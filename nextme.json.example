@@ -1,0 +1,11 @@
+{
+  "app_id": "cli_xxxxxxxxxxxxxxxx",
+  "app_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "projects": [
+    {
+      "name": "my-project",
+      "path": "/absolute/path/to/your/project",
+      "executor": "claude"
+    }
+  ]
+}

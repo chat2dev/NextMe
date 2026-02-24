@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""nextme — CLI entry point.
+
+Usage:
+    nextme up [--directory DIR] [--executor EXECUTOR] [--log-level LEVEL]
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import logging.handlers
+import signal
+import sys
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_NEXTME_HOME = Path("~/.nextme").expanduser()
+_LOG_FILE = _NEXTME_HOME / "logs" / "nextme.log"
+
+# Maximum seconds to wait for in-flight tasks to drain on shutdown.
+_SHUTDOWN_DRAIN_TIMEOUT = 30
+
+
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
+
+
+def _setup_logging(log_level: str) -> None:
+    """Configure root logger: rotating file handler + stderr stream handler.
+
+    File:   ~/.nextme/logs/nextme.log  (max 10 MB × 5 backups)
+    Stderr: same log level, human-readable format.
+    """
+    numeric_level = getattr(logging, log_level.upper(), logging.INFO)
+
+    # Ensure the log directory exists.
+    _LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    formatter = logging.Formatter(fmt, datefmt="%Y-%m-%dT%H:%M:%S")
+
+    # Rotating file handler — 10 MB per file, keep 5 backups.
+    file_handler = logging.handlers.RotatingFileHandler(
+        _LOG_FILE,
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(numeric_level)
+
+    # Stderr handler.
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(formatter)
+    stderr_handler.setLevel(numeric_level)
+
+    root = logging.getLogger()
+    root.setLevel(numeric_level)
+    root.addHandler(file_handler)
+    root.addHandler(stderr_handler)
+
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown helpers
+# ---------------------------------------------------------------------------
+
+
+def _install_signal_handlers(
+    loop: asyncio.AbstractEventLoop,
+    shutdown_event: asyncio.Event,
+) -> None:
+    """Register SIGTERM and SIGINT handlers that set *shutdown_event*."""
+
+    def _signal_handler(sig: int) -> None:
+        sig_name = signal.Signals(sig).name
+        logger.info("Received signal %s — initiating graceful shutdown", sig_name)
+        if not shutdown_event.is_set():
+            shutdown_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _signal_handler, sig)
+        except (NotImplementedError, RuntimeError):
+            # Windows / non-main-thread fallback: use signal.signal instead.
+            signal.signal(sig, lambda s, f: _signal_handler(s))
+
+
+# ---------------------------------------------------------------------------
+# Main async run function
+# ---------------------------------------------------------------------------
+
+
+async def run(directory: str | None, executor: str, log_level: str) -> None:
+    """Full startup sequence for the nextme bot.
+
+    Startup order:
+    1. Load config (AppConfig + Settings).
+    2. Setup logging.
+    3. Validate credentials — exit if missing.
+    4. Init StateStore, load state.
+    5. Init MemoryManager, SkillRegistry, ContextManager.
+    6. Init SessionRegistry, PathLockRegistry.
+    7. Init ACPRuntimeRegistry, ACPJanitor.
+    8. Init MessageHandler, TaskDispatcher, FeishuClient.
+    9. Start background tasks: janitor.run(), state_store.start_debounce_loop(),
+       memory_manager.start_debounce_loop().
+    10. Register SIGTERM/SIGINT handlers.
+    11. await feishu_client.start()  <-- blocks until shutdown signal.
+
+    Shutdown order:
+    1. feishu_client.stop()
+    2. Wait for in-flight tasks (30s timeout).
+    3. acp_registry.stop_all()
+    4. memory_manager.flush_all()
+    5. state_store.stop()
+    6. Cancel background asyncio tasks.
+    """
+    # ------------------------------------------------------------------
+    # Step 1: Load configuration
+    # ------------------------------------------------------------------
+    from .config.loader import ConfigLoader
+
+    cwd = Path(directory).resolve() if directory else None
+    config = ConfigLoader.load_app_config(cwd)
+    settings = ConfigLoader.load_settings()
+
+    # ------------------------------------------------------------------
+    # Step 2: Setup logging (now that we have log_level from CLI + settings)
+    # ------------------------------------------------------------------
+    effective_log_level = log_level or settings.log_level
+    _setup_logging(effective_log_level)
+
+    logger.info("nextme starting up (log_level=%s)", effective_log_level)
+    logger.info("Config loaded: app_id=%s, projects=%d", config.app_id, len(config.projects))
+
+    # ------------------------------------------------------------------
+    # Step 3: Validate credentials
+    # ------------------------------------------------------------------
+    if not config.app_id or not config.app_secret:
+        print(
+            "Error: Feishu app_id and app_secret must be configured.\n"
+            "Set them in ~/.nextme/nextme.json, a local nextme.json, "
+            "or via NEXTME_APP_ID / NEXTME_APP_SECRET environment variables.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # Step 4: StateStore — load persistent state
+    # ------------------------------------------------------------------
+    from .config.state_store import StateStore
+
+    state_store = StateStore(settings)
+    await state_store.load()
+    logger.info("StateStore: state loaded")
+
+    # ------------------------------------------------------------------
+    # Step 5: MemoryManager, SkillRegistry, ContextManager
+    # ------------------------------------------------------------------
+    from .memory.manager import MemoryManager
+    from .context.manager import ContextManager
+    from .skills.registry import SkillRegistry
+
+    memory_manager = MemoryManager(settings)
+    context_manager = ContextManager(settings)
+    skill_registry = SkillRegistry()
+    skill_registry.load(project_path=cwd)
+    logger.info("SkillRegistry: %d skill(s) loaded", len(skill_registry.list_all()))
+
+    # ------------------------------------------------------------------
+    # Step 6: SessionRegistry, PathLockRegistry
+    # ------------------------------------------------------------------
+    from .core.session import SessionRegistry
+    from .core.path_lock import PathLockRegistry
+
+    session_registry = SessionRegistry.get_instance()
+    path_lock_registry = PathLockRegistry.get_instance()
+
+    # ------------------------------------------------------------------
+    # Step 7: ACPRuntimeRegistry, ACPJanitor
+    # ------------------------------------------------------------------
+    from .acp.janitor import ACPRuntimeRegistry, ACPJanitor
+
+    acp_registry = ACPRuntimeRegistry()
+    acp_janitor = ACPJanitor(acp_registry, settings)
+
+    # ------------------------------------------------------------------
+    # Step 8: MessageHandler, TaskDispatcher, FeishuClient
+    # ------------------------------------------------------------------
+    from .feishu.dedup import MessageDedup
+    from .feishu.handler import MessageHandler
+    from .feishu.client import FeishuClient
+    from .core.dispatcher import TaskDispatcher
+
+    dedup = MessageDedup()
+
+    # Build a temporary placeholder FeishuClient so we can construct the
+    # dispatcher.  The dispatcher only calls feishu_client.get_replier() at
+    # dispatch time (not during construction), so we patch the reference once
+    # the real client is built.
+    #
+    # Construction order:
+    #   dispatcher (needs feishu_client ref) → handler (needs dispatcher)
+    #   → feishu_client (needs handler) → patch dispatcher._feishu_client
+    #
+    # We use a two-step approach: build dispatcher with a dummy placeholder,
+    # then replace the internal reference before any message arrives.
+
+    class _PlaceholderFeishuClient:
+        """Temporary stand-in used only during object-graph construction."""
+
+        def get_replier(self):  # noqa: D102
+            raise RuntimeError("FeishuClient not yet initialised")
+
+    dispatcher = TaskDispatcher(
+        config=config,
+        settings=settings,
+        session_registry=session_registry,
+        acp_registry=acp_registry,
+        path_lock_registry=path_lock_registry,
+        feishu_client=_PlaceholderFeishuClient(),  # type: ignore[arg-type]
+    )
+
+    handler = MessageHandler(dedup=dedup, dispatcher=dispatcher)
+    feishu_client = FeishuClient(config, settings, handler=handler)
+
+    # Wire the real client into the dispatcher so dispatch() works correctly.
+    dispatcher._feishu_client = feishu_client
+
+    # ------------------------------------------------------------------
+    # Step 9: Start background tasks
+    # ------------------------------------------------------------------
+    loop = asyncio.get_running_loop()
+
+    janitor_task = loop.create_task(acp_janitor.run(), name="acp-janitor")
+    await state_store.start_debounce_loop()
+    await memory_manager.start_debounce_loop()
+
+    logger.info("Background tasks started")
+
+    # ------------------------------------------------------------------
+    # Step 10: Register signal handlers
+    # ------------------------------------------------------------------
+    shutdown_event = asyncio.Event()
+    _install_signal_handlers(loop, shutdown_event)
+
+    # ------------------------------------------------------------------
+    # Step 11: Start the Feishu WebSocket — blocks until shutdown
+    # ------------------------------------------------------------------
+    feishu_task = loop.create_task(feishu_client.start(), name="feishu-ws")
+
+    # Wait for either the feishu task to fail or a shutdown signal.
+    done, _pending = await asyncio.wait(
+        [feishu_task, loop.create_task(shutdown_event.wait(), name="shutdown-wait")],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    # Surface any exception from the Feishu task.
+    for completed in done:
+        if completed is feishu_task and not completed.cancelled():
+            exc = completed.exception()
+            if exc is not None:
+                logger.error("FeishuClient exited with error: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Graceful shutdown
+    # ------------------------------------------------------------------
+    logger.info("Shutting down…")
+
+    # 1. Stop Feishu WebSocket.
+    try:
+        await feishu_client.stop()
+    except Exception:
+        logger.exception("Error stopping FeishuClient")
+
+    if not feishu_task.done():
+        feishu_task.cancel()
+        try:
+            await asyncio.wait_for(feishu_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            pass
+
+    # 2. Wait for in-flight tasks to drain (30s timeout).
+    logger.info("Waiting up to %ds for in-flight tasks to complete…", _SHUTDOWN_DRAIN_TIMEOUT)
+    all_sessions = session_registry.all_sessions()
+    drain_coros = []
+    for session in all_sessions:
+        if not session.task_queue.empty():
+            drain_coros.append(session.task_queue.join())
+
+    if drain_coros:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*drain_coros, return_exceptions=True),
+                timeout=_SHUTDOWN_DRAIN_TIMEOUT,
+            )
+            logger.info("All in-flight tasks drained")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out waiting for in-flight tasks after %ds", _SHUTDOWN_DRAIN_TIMEOUT
+            )
+
+    # 3. Stop all ACP runtimes.
+    try:
+        await acp_registry.stop_all()
+        logger.info("ACPRuntimeRegistry: all runtimes stopped")
+    except Exception:
+        logger.exception("Error stopping ACP runtimes")
+
+    # 4. Flush all memory to disk.
+    try:
+        await memory_manager.flush_all()
+        logger.info("MemoryManager: all contexts flushed")
+    except Exception:
+        logger.exception("Error flushing memory")
+
+    # 5. Stop StateStore (flush + cancel debounce loop).
+    try:
+        await state_store.stop()
+        logger.info("StateStore: stopped")
+    except Exception:
+        logger.exception("Error stopping StateStore")
+
+    # 6. Cancel remaining background asyncio tasks.
+    for bg_task in (janitor_task,):
+        if not bg_task.done():
+            bg_task.cancel()
+            try:
+                await asyncio.wait_for(bg_task, timeout=5)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+
+    logger.info("nextme shutdown complete")
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    """Parse CLI arguments and launch the async run loop."""
+    parser = argparse.ArgumentParser(
+        prog="nextme",
+        description="Feishu IM × Claude Code Agent Bot",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    up_parser = subparsers.add_parser("up", help="Start the bot")
+    up_parser.add_argument(
+        "--directory",
+        "-d",
+        help="Project directory (overrides config)",
+    )
+    up_parser.add_argument(
+        "--executor",
+        "-e",
+        default="claude-code-acp",
+        help="ACP executor command",
+    )
+    up_parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
+
+    args = parser.parse_args()
+
+    if args.command == "up":
+        asyncio.run(run(args.directory, args.executor, args.log_level))
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

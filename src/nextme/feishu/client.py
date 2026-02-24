@@ -1,0 +1,122 @@
+"""Feishu WebSocket long-connection client with auto-reconnect.
+
+Wraps ``lark_oapi.ws.Client`` (which handles reconnection internally) and
+provides lifecycle management (start / stop) plus a factory for
+``FeishuReplier`` instances.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+
+import lark_oapi as lark
+
+from nextme.config.schema import AppConfig, Settings
+from nextme.feishu.handler import MessageHandler
+from nextme.feishu.reply import FeishuReplier
+
+logger = logging.getLogger(__name__)
+
+
+class FeishuClient:
+    """Manage a Feishu WebSocket connection and expose a ``FeishuReplier``."""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        settings: Settings,
+        handler: MessageHandler,
+    ) -> None:
+        self._config = config
+        self._settings = settings
+        self._handler = handler
+
+        # Determine SDK log level from settings.
+        _log_level_map = {
+            "DEBUG": lark.LogLevel.DEBUG,
+            "INFO": lark.LogLevel.INFO,
+            "WARNING": lark.LogLevel.WARNING,
+            "ERROR": lark.LogLevel.ERROR,
+        }
+        sdk_log_level = _log_level_map.get(
+            settings.log_level.upper(), lark.LogLevel.INFO
+        )
+
+        # REST client (used for sending messages, reactions, etc.)
+        self._lark_client: lark.Client = (
+            lark.Client.builder()
+            .app_id(config.app_id)
+            .app_secret(config.app_secret)
+            .build()
+        )
+
+        # WebSocket client (handles long-connection + reconnect automatically).
+        event_dispatcher = handler.build_event_dispatcher()
+        self._ws_client: lark.ws.Client = lark.ws.Client(
+            config.app_id,
+            config.app_secret,
+            event_handler=event_dispatcher,
+            log_level=sdk_log_level,
+        )
+
+        self._stop_event: asyncio.Event = asyncio.Event()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        """Start the WebSocket connection.
+
+        Registers the current event loop with the handler so that message
+        callbacks can schedule coroutines onto it, then runs the lark WS
+        client in a thread executor (``lark.ws.Client.start()`` is a blocking
+        call).  Returns only after ``stop()`` is called.
+        """
+        loop = asyncio.get_running_loop()
+        self._handler.attach_loop(loop)
+
+        logger.info(
+            "Starting Feishu WebSocket client (app_id=%s)", self._config.app_id
+        )
+
+        self._stop_event.clear()
+
+        # lark.ws.Client.start() is blocking — run it in a thread so we don't
+        # stall the event loop.
+        try:
+            await loop.run_in_executor(None, self._ws_client.start)
+        except asyncio.CancelledError:
+            logger.info("FeishuClient.start() cancelled")
+            raise
+        except Exception:
+            logger.exception("FeishuClient WebSocket error")
+            raise
+        finally:
+            self._stop_event.set()
+            logger.info("FeishuClient WebSocket connection closed")
+
+    async def stop(self) -> None:
+        """Gracefully disconnect the WebSocket connection."""
+        logger.info("Stopping Feishu WebSocket client")
+        try:
+            # lark.ws.Client exposes a stop() method in recent SDK versions.
+            # Run it in executor since it may block briefly.
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._ws_client.stop)
+        except AttributeError:
+            # Older SDK versions may not have stop(); not fatal.
+            logger.debug("lark.ws.Client has no stop() method; skipping")
+        except Exception:
+            logger.exception("Error while stopping WebSocket client")
+        finally:
+            self._stop_event.set()
+
+    # ------------------------------------------------------------------
+    # Factory
+    # ------------------------------------------------------------------
+
+    def get_replier(self) -> FeishuReplier:
+        """Return a ``FeishuReplier`` backed by the underlying lark REST client."""
+        return FeishuReplier(self._lark_client)
