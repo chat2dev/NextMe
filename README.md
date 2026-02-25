@@ -1,44 +1,45 @@
 # NextMe
 
-**飞书 IM × Claude Code Agent Bot**
+**Feishu IM × Claude Code Agent Bot**
 
-将飞书群聊 / 单聊变成 Claude Code 的交互终端。用户在飞书发消息，Bot 通过 [ACP 协议](https://github.com/zed-industries/claude-code-acp) 驱动本地 `claude-code-acp` 子进程执行任务，将流式进度和最终结果以交互卡片形式实时回推到飞书。
-
----
-
-## 功能概览
-
-| 功能 | 说明 |
-|------|------|
-| 飞书 WebSocket 长连接 | 实时接收消息，自动重连 |
-| Claude Code ACP 集成 | 子进程管理，ndjson 流式协议，自行实现（无 SDK 依赖） |
-| 流式进度卡片 | 每 3s 更新一次执行进度，工具调用实时显示 |
-| 权限确认流程 | Agent 执行写操作时推送确认卡片，用户回复数字继续 |
-| Session 隔离 | 每个用户独立 Session，多用户完全并行 |
-| 持久化内存 | 用户事实、偏好跨会话保留，注入 Agent system prompt |
-| 上下文压缩 | 超大上下文自动 zlib/lzma/brotli 压缩存储 |
-| Skills 系统 | Markdown 文件定义 Skill，`/review` `/commit` 等一键触发 |
-| 元命令 | `/new` `/stop` `/help` `/status` `/project` |
-| 路径锁 | 同一物理路径同时只允许一个 Session 写入 |
-| 优雅停机 | SIGTERM/SIGINT → 等待任务完成 → 刷新内存 → 退出 |
+Turn Feishu group chats and direct messages into an interactive Claude Code terminal. Send a message in Feishu — NextMe routes it to a local `claude` subprocess, streams progress updates, and delivers the final result as an interactive card.
 
 ---
 
-## 快速开始
+## Features
 
-### 前置要求
+| Feature | Description |
+|---------|-------------|
+| Feishu WebSocket | Persistent long connection, auto-reconnect |
+| DirectClaudeRuntime | Spawns `claude --print --output-format stream-json`; session continuity via `--resume` |
+| ACPRuntime (optional) | JSON-RPC 2.0 over `cc-acp` subprocess |
+| Streaming progress cards | Card updated every 3 s during execution; live tool-call display |
+| Permission flow | Agent pushes a confirmation card for write operations; user replies with a number |
+| Session isolation | Each user has an independent session; multi-user fully parallel |
+| Persistent memory | User facts and preferences persist across restarts; injected into agent system prompt |
+| Context compression | Oversized contexts auto-compressed with zlib / lzma / brotli |
+| Skills system | Markdown prompt templates; `/review` `/commit` `/test` etc. |
+| Meta-commands | `/new` `/stop` `/help` `/status` `/project` |
+| Path lock | Only one session may write to a given project directory at a time |
+| Graceful shutdown | SIGTERM/SIGINT → drain in-flight tasks → flush state → exit |
+
+---
+
+## Quick Start
+
+### Prerequisites
 
 - Python 3.12+
-- [uv](https://docs.astral.sh/uv/) 包管理器
-- 飞书开发者账号（需创建企业自建应用）
-- `claude-code-acp` 命令可用
+- [uv](https://docs.astral.sh/uv/) package manager
+- Feishu developer account (enterprise self-built app)
+- `claude` CLI installed and authenticated
 
 ```bash
-# 安装 claude-code-acp（需 Node.js）
-npm install -g @zed-industries/claude-code-acp
+# Install Claude Code CLI
+npm install -g @anthropic-ai/claude-code
 ```
 
-### 安装
+### Install
 
 ```bash
 git clone https://github.com/chat2dev/NextMe.git
@@ -46,15 +47,15 @@ cd NextMe
 uv sync
 ```
 
-### 配置
+### Configure
 
-**1. 创建 `nextme.json`**
+**1. Create `nextme.json`**
 
 ```bash
 cp nextme.json.example nextme.json
 ```
 
-编辑 `nextme.json`：
+Edit `nextme.json`:
 
 ```json
 {
@@ -64,236 +65,247 @@ cp nextme.json.example nextme.json
     {
       "name": "my-project",
       "path": "/absolute/path/to/your/project",
-      "executor": "claude-code-acp"
+      "executor": "claude"
     }
   ]
 }
 ```
 
-**2. 飞书应用配置**
+**2. Feishu app configuration**
 
-在[飞书开放平台](https://open.feishu.cn/)创建企业自建应用，并开启以下权限：
+Create an enterprise self-built app on the [Feishu Open Platform](https://open.feishu.cn/) and enable the following permissions:
 
-- `im:message` — 读取/发送消息
-- `im:message.group_at_msg` — 接收群组 @ 消息
-- `im:message.p2p_msg` — 接收单聊消息
+- `im:message` — read / send messages
+- `im:message.group_at_msg` — receive group @ messages
+- `im:message.p2p_msg` — receive direct messages
 
-订阅事件：`im.message.receive_v1`
+Subscribe to the event: `im.message.receive_v1`
 
-### 启动
+### Start
 
 ```bash
 nextme up
 ```
 
-可选参数：
+Optional flags:
 
 ```
-nextme up --directory /path/to/project   # 指定项目目录
-           --executor claude-code-acp    # ACP 执行器命令
-           --log-level DEBUG             # 日志级别
+nextme up --directory /path/to/project   # override project directory
+           --executor claude             # agent executor (default: claude)
+           --log-level DEBUG             # log verbosity
+```
+
+Stop:
+
+```bash
+nextme down
 ```
 
 ---
 
-## 使用方式
+## Usage
 
-### 普通对话
+### Conversational tasks
 
-直接向 Bot 发送消息，Agent 会在项目目录下执行任务，结果以卡片形式返回。
+Send any message to the bot. The agent executes the task inside the configured project directory and returns the result as an interactive card.
 
-### 元命令
+### Meta-commands
 
-| 命令 | 说明 |
-|------|------|
-| `/new` | 重置对话历史（开启新 ACP Session） |
-| `/stop` | 取消当前正在执行的任务 |
-| `/help` | 显示帮助卡片 |
-| `/status` | 查看当前 Session 状态 |
-| `/project <name>` | 切换活跃项目 |
-| `/skill <trigger>` | 手动触发指定 Skill |
+| Command | Description |
+|---------|-------------|
+| `/new` | Reset conversation history (start a new session) |
+| `/stop` | Cancel the currently running task |
+| `/help` | Show the help card |
+| `/status` | Show current session status |
+| `/project <name>` | Switch the active project |
+| `/skill <trigger>` | Manually invoke a skill |
 
-### 内置 Skills
+### Built-in skills
 
-| 触发词 | 功能 |
-|--------|------|
-| `/review` | 代码 Review（正确性 / 性能 / 可读性） |
-| `/commit` | 生成 Conventional Commits 规范的提交信息 |
-| `/explain` | 解释代码工作原理 |
-| `/test` | 生成单元测试 |
-| `/debug` | 系统化调试流程 |
+| Trigger | Description |
+|---------|-------------|
+| `/review` | Code review: correctness / performance / readability |
+| `/commit` | Generate a Conventional Commits message from `git diff` |
+| `/explain` | Explain how code works |
+| `/test` | Generate unit tests |
+| `/debug` | Systematic debugging workflow |
 
-### 权限确认
+### Permission confirmation (ACPRuntime only)
 
-当 Agent 需要执行写操作时，飞书会弹出权限确认卡片：
+When the agent needs to perform a write operation, a permission card is pushed to Feishu:
 
 ```
-需要授权
-Agent 即将执行以下操作：...
+Authorization required
+The agent is about to perform: ...
 
-1. 允许
-2. 拒绝
-3. 总是允许
+1. Allow
+2. Deny
+3. Always allow
 ```
 
-回复对应数字即可继续。
+Reply with the corresponding number to continue.
 
 ---
 
-## 配置说明
+## Configuration
 
-### 配置优先级（低 → 高）
+### Priority (low → high)
 
 ```
 ~/.nextme/nextme.json
   → {cwd}/nextme.json
     → ~/.nextme/settings.json
       → .env
-        → NEXTME_* 环境变量
+        → NEXTME_* environment variables
 ```
 
-### `nextme.json` 字段
+### `nextme.json` fields
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `app_id` | string | 飞书应用 App ID |
-| `app_secret` | string | 飞书应用 App Secret |
-| `projects` | array | 项目列表（name / path / executor） |
+| Field | Type | Description |
+|-------|------|-------------|
+| `app_id` | string | Feishu app App ID |
+| `app_secret` | string | Feishu app App Secret |
+| `projects` | array | Project list (`name` / `path` / `executor`) |
 
-### `~/.nextme/settings.json` 字段
+`executor` values:
+- `"claude"` (default) — DirectClaudeRuntime, uses local `claude` CLI
+- `"cc-acp"` — ACPRuntime, uses `cc-acp` subprocess (JSON-RPC 2.0)
 
-| 字段 | 默认值 | 说明 |
-|------|--------|------|
-| `acp_idle_timeout_seconds` | `7200` | ACP 进程空闲超时（秒） |
-| `task_queue_capacity` | `1024` | 每个 Session 的任务队列容量 |
-| `memory_debounce_seconds` | `30` | 内存写入防抖间隔（秒） |
-| `context_max_bytes` | `1000000` | 触发压缩的上下文大小阈值 |
-| `context_compression` | `"zlib"` | 压缩算法：`zlib` / `lzma` / `brotli` |
-| `progress_debounce_seconds` | `3.0` | 进度卡片更新防抖间隔（秒） |
-| `permission_timeout_seconds` | `300.0` | 权限确认超时（秒） |
-| `log_level` | `"INFO"` | 日志级别 |
+### `~/.nextme/settings.json` fields
 
-### 环境变量
+| Field | Default | Description |
+|-------|---------|-------------|
+| `acp_idle_timeout_seconds` | `7200` | Idle timeout before ACPRuntime process is killed |
+| `task_queue_capacity` | `1024` | Per-session task queue capacity |
+| `memory_debounce_seconds` | `30` | State / memory flush debounce interval (s) |
+| `context_max_bytes` | `1000000` | Context size threshold for compression |
+| `context_compression` | `"zlib"` | Compression algorithm: `zlib` / `lzma` / `brotli` |
+| `progress_debounce_seconds` | `3.0` | Progress card update debounce interval (s) |
+| `permission_timeout_seconds` | `300.0` | Permission confirmation timeout (s) |
+| `log_level` | `"INFO"` | Log verbosity |
+
+### Environment variables
 
 ```bash
 NEXTME_APP_ID=cli_xxx
 NEXTME_APP_SECRET=xxx
 NEXTME_LOG_LEVEL=INFO
-NEXTME_CLAUDE_PATH=claude-code-acp
 NEXTME_ACP_IDLE_TIMEOUT_SECONDS=7200
 ```
 
 ---
 
-## 自定义 Skills
+## Custom Skills
 
-在以下任一目录创建 `.md` 文件即可自动加载（优先级从高到低）：
+Place a `.md` file in any of the following directories (higher priority overrides lower):
 
-1. `{project_path}/.nextme/skills/*.md` — 项目级
-2. `~/.nextme/skills/*.md` — 用户全局
-3. `{package}/skills/*.md` — 内置
+1. `{project_path}/.nextme/skills/*.md` — project-local
+2. `~/.nextme/skills/*.md` — user-global
+3. `{package}/skills/*.md` — built-in
 
-文件格式：
+File format:
 
 ```markdown
 ---
 name: My Skill
 trigger: myskill
-description: 功能说明
+description: What this skill does
 tools_allowlist: []
 tools_denylist: []
 ---
 
-你是一位...
+You are a ...
 
-用户请求：{user_input}
-上下文：{context}
+User request: {user_input}
+Context: {context}
 
-请完成以下任务...
+Please complete the following task ...
 ```
 
-触发方式：`/skill myskill` 或直接 `/myskill`。
+Invoke with `/skill myskill` or directly `/myskill`.
 
 ---
 
-## 文件存储
+## File Storage
 
 ```
 ~/.nextme/
-├── nextme.json          # 用户级配置
-├── settings.json        # 行为设置
-├── state.json           # Session 状态持久化
+├── nextme.json          # user-level config
+├── settings.json        # behaviour settings
+├── state.json           # session state (actual_id, active project)
+├── nextme.pid           # PID file (used by nextme down)
 ├── memory/
-│   └── {ctx_hash}/      # 每用户内存（facts / 偏好 / 个人信息）
+│   └── {ctx_hash}/      # per-user memory (facts / preferences / personal)
 ├── threads/
-│   └── {session_id}/    # 每 Session 上下文文件（可压缩）
-├── skills/              # 用户自定义 Skills
-└── logs/nextme.log      # 滚动日志（10MB × 5）
+│   └── {session_id}/    # per-session context files (optionally compressed)
+├── skills/              # user-defined skills
+└── logs/nextme.log      # rolling log (10 MB × 5 backups)
 ```
 
 ---
 
-## 架构简述
+## Architecture
 
 ```
 Feishu User ──WebSocket──▶ FeishuClient
                                 │
-                          MessageHandler（LRU 去重）
+                          MessageHandler (LRU dedup)
                                 │
                           TaskDispatcher
-                           ├─ 元命令处理
-                           ├─ 权限回复路由
-                           └─ 普通消息入队
+                           ├─ meta-command handling
+                           ├─ permission reply routing
+                           └─ enqueue regular messages
                                 │
                     ┌───────────▼───────────┐
-                    │   SessionWorker       │  ← 每 Session 一个协程
-                    │   串行消费任务队列     │
+                    │   SessionWorker       │  ← one coroutine per session
+                    │   serial task queue   │
                     └───────────┬───────────┘
-                                │ PathLock（路径级互斥）
+                                │ PathLock (per-path mutex)
                                 ▼
-                          ACPRuntime
-                           ├─ 启动 claude-code-acp 子进程
-                           ├─ ndjson 流式协议
-                           ├─ 进度回调（3s 防抖卡片更新）
-                           └─ 权限请求（asyncio.Future 阻塞）
+                     ACPRuntimeRegistry
+                      ├─ executor="claude" → DirectClaudeRuntime
+                      │   claude --print --output-format stream-json
+                      │   [--resume session_id]
+                      └─ executor="cc-acp" → ACPRuntime
+                          JSON-RPC 2.0 over cc-acp subprocess
 ```
 
 ---
 
-## 技术栈
+## Tech Stack
 
-| 层次 | 技术 |
-|------|------|
-| 语言 | Python 3.12+ |
-| 包管理 | uv + pyproject.toml |
-| IM 集成 | lark-oapi，WebSocket 长连接 |
-| Agent 通信 | ACP 协议，ndjson over stdin/stdout，自行实现 |
-| 并发模型 | asyncio（Queue + Lock + Task + Future） |
-| 配置校验 | pydantic v2 + python-dotenv |
-| 上下文压缩 | zlib / lzma（标准库）/ brotli（可选） |
+| Layer | Technology |
+|-------|------------|
+| Language | Python 3.12+ |
+| Package manager | uv + pyproject.toml |
+| IM integration | lark-oapi, WebSocket long connection |
+| Agent runtime | DirectClaudeRuntime (default) / ACPRuntime (optional) |
+| Concurrency | asyncio (Queue + Lock + Task + Future) |
+| Config validation | pydantic v2 + python-dotenv |
+| Context compression | zlib / lzma (stdlib) / brotli (optional) |
 
 ---
 
-## 开发
+## Development
 
 ```bash
-# 安装开发依赖
+# Install dev dependencies
 uv sync --extra dev
 
-# 代码检查
+# Lint
 uv run ruff check src/
 
-# 运行测试
+# Run tests
 uv run pytest
 ```
 
 ---
 
-## 路线图
+## Roadmap
 
-- **Phase 1 ✅** — 飞书 WebSocket + ACP 子进程 + Session 隔离 + 流式进度 + 权限确认
-- **Phase 2** — Skills 系统完整集成、持久化内存（facts 注入）、上下文压缩
-- **Phase 3** — 多项目切换、热重载配置、路径锁多用户冲突防护
+- **Phase 1 ✅** — Feishu WebSocket + agent subprocess + session isolation + streaming progress + permission confirmation
+- **Phase 2 ✅** — Skills system, persistent memory (facts injection), context compression, multi-project switching, path lock
+- **Phase 3** — Config hot-reload, Slack / DingTalk adapter, multi-agent orchestration
 
 ---
 

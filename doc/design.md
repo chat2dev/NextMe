@@ -1,124 +1,120 @@
-# NextMe 设计文档 — Feishu IM × Claude Code Agent Bot
+# NextMe Design Document — Feishu IM × Claude Code Agent Bot
 
 ## Context
 
-用户需要一个 Python Bot，作为飞书 IM 与底层 AI Agent（Claude Code CLI）之间的桥接层。Bot 通过飞书长连接接收用户消息，将消息转发给 Claude Code Agent，并将 Agent 的执行结果和状态实时推送回飞书。
-
-参考项目：
-- `/Users/bytedance/develop/agent/open-jieli`（Go，飞书 + ACP + 多 Agent）
-- `/Users/bytedance/develop/agent/deer-flow`（Python，LangGraph 多智能体框架）
+The user needs a Python Bot that acts as a bridge between Feishu IM and the underlying AI Agent (Claude Code CLI). The bot receives user messages over a Feishu long-polling WebSocket connection, forwards them to the Claude Code Agent, and pushes the agent's execution results and status back to Feishu in real time.
 
 ---
 
-## 技术选型
+## Technology Choices
 
-| 层次 | 技术 |
-|------|------|
-| 语言 | Python 3.12+ |
-| 包管理 | uv + pyproject.toml |
-| IM 集成 | lark-oapi (Python SDK)，WebSocket 长连接 |
-| Agent 通信 | DirectClaudeRuntime（默认）：`claude --print --output-format stream-json`；ACPRuntime（备选）：JSON-RPC 2.0 over ndjson |
-| 并发模型 | asyncio（I/O 密集型，Queue + Lock + Task + Future） |
-| 配置 | pydantic v2 + python-dotenv，多源优先级 |
-| 状态持久化 | `~/.nextme/state.json`，asyncio 去抖写入（30s），原子 rename |
-| 内存持久化 | `~/.nextme/memory/{hash}/`，JSON 文件，asyncio 去抖写入 |
-| 上下文压缩 | zlib（标准库）/ lzma（标准库）/ brotli（可选依赖） |
-| Skills 系统 | Markdown + YAML frontmatter 文件 |
+| Layer | Technology |
+|-------|------------|
+| Language | Python 3.12+ |
+| Package management | uv + pyproject.toml |
+| IM integration | lark-oapi (Python SDK), WebSocket long connection |
+| Agent communication | DirectClaudeRuntime (default): `claude --print --output-format stream-json`; ACPRuntime (alternative): JSON-RPC 2.0 over ndjson |
+| Concurrency model | asyncio (I/O-bound, Queue + Lock + Task + Future) |
+| Configuration | pydantic v2 + python-dotenv, multi-source priority |
+| State persistence | `~/.nextme/state.json`, asyncio debounced writes (30s), atomic rename |
+| Memory persistence | `~/.nextme/memory/{hash}/`, JSON files, asyncio debounced writes |
+| Context compression | zlib (stdlib) / lzma (stdlib) / brotli (optional dependency) |
+| Skills system | Markdown + YAML frontmatter files |
 
 ---
 
-## 项目结构
+## Project Structure
 
 ```
 nextme/
 ├── pyproject.toml
-├── nextme.json.example          # 配置模板
+├── nextme.json.example          # configuration template
 ├── .env.example
-├── doc/                         # 设计文档
+├── doc/                         # design documents
 │   └── design.md
-├── skills/                      # 内置 Skills
+├── skills/                      # built-in Skills
 │   ├── review.md
 │   ├── commit.md
 │   ├── explain.md
 │   ├── test.md
 │   └── debug.md
 └── src/nextme/
-    ├── main.py                  # CLI 入口 (nextme up / nextme down)
+    ├── main.py                  # CLI entry point (nextme up / nextme down)
     ├── config/
-    │   ├── loader.py            # 多源配置加载
+    │   ├── loader.py            # multi-source config loading
     │   ├── schema.py            # AppConfig, Settings, GlobalState (pydantic)
-    │   └── state_store.py       # ~/.nextme/state.json 原子读写 + 去抖刷新
+    │   └── state_store.py       # ~/.nextme/state.json atomic read/write + debounced flush
     ├── feishu/
-    │   ├── client.py            # WebSocket 长连接管理 + 重连
-    │   ├── handler.py           # 消息/卡片事件路由
-    │   ├── reply.py             # FeishuReplier + 卡片 JSON 构建 (schema 2.0)
-    │   └── dedup.py             # LRU 消息去重（1000条，5min TTL）
+    │   ├── client.py            # WebSocket long connection management + reconnect
+    │   ├── handler.py           # message/card event routing
+    │   ├── reply.py             # FeishuReplier + card JSON construction (schema 2.0)
+    │   └── dedup.py             # LRU message deduplication (1000 entries, 5min TTL)
     ├── core/
-    │   ├── interfaces.py        # Replier / IMAdapter / AgentRuntime Protocol 接口
-    │   ├── dispatcher.py        # TaskDispatcher：路由 / 权限回复 / 元命令
+    │   ├── interfaces.py        # Replier / IMAdapter / AgentRuntime Protocol interfaces
+    │   ├── dispatcher.py        # TaskDispatcher: routing / permission replies / meta-commands
     │   ├── session.py           # UserContext, Session, SessionRegistry
-    │   ├── worker.py            # 每个 Session 的 asyncio 队列消费协程
-    │   ├── commands.py          # /new /stop /help /skill /status /project 处理
-    │   └── path_lock.py         # 物理路径级 asyncio.Lock 注册表
+    │   ├── worker.py            # per-Session asyncio queue consumer coroutine
+    │   ├── commands.py          # /new /stop /help /skill /status /project handlers
+    │   └── path_lock.py         # physical path-level asyncio.Lock registry
     ├── acp/
-    │   ├── direct_runtime.py    # DirectClaudeRuntime：claude CLI 直接调用（默认）
-    │   ├── runtime.py           # ACPRuntime：JSON-RPC 2.0 over cc-acp 子进程
-    │   ├── client.py            # JSON-RPC ndjson 消息序列化 / 解析
-    │   ├── janitor.py           # ACPRuntimeRegistry + 后台清理空闲进程（2h）
-    │   └── protocol.py          # JSON-RPC 消息构造辅助函数
+    │   ├── direct_runtime.py    # DirectClaudeRuntime: direct claude CLI invocation (default)
+    │   ├── runtime.py           # ACPRuntime: JSON-RPC 2.0 over cc-acp subprocess
+    │   ├── client.py            # JSON-RPC ndjson message serialization / parsing
+    │   ├── janitor.py           # ACPRuntimeRegistry + background cleanup of idle processes (2h)
+    │   └── protocol.py          # JSON-RPC message construction helpers
     ├── memory/
-    │   ├── manager.py           # MemoryManager：加载/保存/去抖刷新
+    │   ├── manager.py           # MemoryManager: load/save/debounced flush
     │   └── schema.py            # UserMemory, Fact (pydantic)
     ├── context/
-    │   ├── manager.py           # ContextManager：线程文件 I/O
-    │   └── compression.py       # zlib/lzma/brotli 压缩策略
+    │   ├── manager.py           # ContextManager: thread file I/O
+    │   └── compression.py       # zlib/lzma/brotli compression strategies
     ├── skills/
-    │   ├── registry.py          # SkillRegistry：扫描 + 加载 markdown
-    │   ├── loader.py            # YAML frontmatter 解析
-    │   └── invoker.py           # 构建 skill prompt
+    │   ├── registry.py          # SkillRegistry: scan + load markdown
+    │   ├── loader.py            # YAML frontmatter parsing
+    │   └── invoker.py           # skill prompt construction
     └── protocol/
-        └── types.py             # Task, Reply, TaskStatus 枚举
+        └── types.py             # Task, Reply, TaskStatus enums
 ```
 
 ---
 
-## 解耦层：IMAdapter / AgentRuntime Protocol 接口 (`core/interfaces.py`)
+## Decoupling Layer: IMAdapter / AgentRuntime Protocol Interfaces (`core/interfaces.py`)
 
-### 设计目标
+### Design Goal
 
-`core/` 层不直接依赖飞书 SDK 或 ACP 实现，通过 `typing.Protocol` 声明结构化接口，为未来支持 Slack / 钉钉 / 其他 Agent CLI 奠定基础。
+The `core/` layer has no direct dependency on the Feishu SDK or ACP implementation. Structural interfaces are declared via `typing.Protocol`, laying the groundwork for future support of Slack / DingTalk / other Agent CLIs.
 
-### 接口定义
+### Interface Definitions
 
-| 接口 | 实现者 | 方法数 | 用途 |
-|------|--------|--------|------|
-| `Replier` | `FeishuReplier` | 4 async send + 5 sync build | 发送消息、构建卡片 JSON |
-| `IMAdapter` | `FeishuClient` | start / stop / get_replier | IM 平台连接生命周期 |
-| `AgentRuntime` | `DirectClaudeRuntime` / `ACPRuntime` | 3 read-only属性 + 5 async方法 | Agent 子进程生命周期 |
+| Interface | Implementor | Method count | Purpose |
+|-----------|-------------|--------------|---------|
+| `Replier` | `FeishuReplier` | 4 async send + 5 sync build | Send messages, build card JSON |
+| `IMAdapter` | `FeishuClient` | start / stop / get_replier | IM platform connection lifecycle |
+| `AgentRuntime` | `DirectClaudeRuntime` / `ACPRuntime` | 3 read-only properties + 5 async methods | Agent subprocess lifecycle |
 
-所有接口均标注 `@runtime_checkable`，支持 `isinstance()` 断言与测试。
+All interfaces are annotated `@runtime_checkable`, supporting `isinstance()` assertions and testing.
 
-### 使用位置
+### Usage Locations
 
 - `core/worker.py` — `replier: Replier`
 - `core/dispatcher.py` — `feishu_client: IMAdapter`, `replier: Replier`
-- `core/commands.py` — 所有 `handle_*` 函数参数 `replier: Replier`
+- `core/commands.py` — all `handle_*` function parameters `replier: Replier`
 
 ---
 
-## 核心架构图
+## Core Architecture Diagram
 
 ```
 Feishu User ──WebSocket──▶ FeishuClient
                                 │
                           MessageHandler
-                           - 去重检查（LRU, 5min TTL）
-                           - 解析 chat_id, user_id, text
+                           - dedup check (LRU, 5min TTL)
+                           - parse chat_id, user_id, text
                                 │
                           TaskDispatcher
                            - context_id = "chat_id:user_id"
-                           - 权限回复路由（数字 1/2/3）
-                           - 元命令处理（/new /stop ...）
+                           - permission reply routing (digits 1/2/3)
+                           - meta-command handling (/new /stop ...)
                                 │
                           SessionRegistry.get_or_create(context_id)
                                 │
@@ -126,41 +122,41 @@ Feishu User ──WebSocket──▶ FeishuClient
                                 │
                     ┌───────────▼───────────┐
                     │   Session Worker      │  (per-session asyncio Task)
-                    │   串行消费 Queue      │
+                    │   serial Queue drain  │
                     └───────────┬───────────┘
                                 │
                        PathLockRegistry.get(project_path)
-                                │ (async acquire，防多 Session 并发写)
+                                │ (async acquire, prevents concurrent writes from multiple Sessions)
                                 ▼
                        ACPRuntimeRegistry.get_or_create(executor)
                         - executor="claude" → DirectClaudeRuntime
                         - executor="cc-acp" → ACPRuntime
                                 │
               ┌─────────────────┴──────────────────┐
-              │ DirectClaudeRuntime（默认）          │ ACPRuntime（备选）
+              │ DirectClaudeRuntime (default)        │ ACPRuntime (alternative)
               │ claude --print --output-format      │ JSON-RPC 2.0
               │   stream-json [--resume session_id] │ over cc-acp subprocess
               └─────────────────┬──────────────────┘
-                                │ on_progress → 飞书进度卡片（3s 去抖）
-                                │ on_permission → 阻塞等待用户确认
+                                │ on_progress → Feishu progress card (3s debounce)
+                                │ on_permission → block waiting for user confirmation
                                 ▼
                        FeishuReplier.send_card(result)
 ```
 
 ---
 
-## Agent Runtime 双后端
+## Agent Runtime Dual Backend
 
-### 运行时选择
+### Runtime Selection
 
-`ACPRuntimeRegistry.get_or_create(executor=...)` 根据 executor 字段路由：
+`ACPRuntimeRegistry.get_or_create(executor=...)` routes based on the executor field:
 
-| executor 值 | 运行时 | 协议 |
-|-------------|--------|------|
-| `"claude"` (默认) | `DirectClaudeRuntime` | stream-json ndjson |
+| executor value | Runtime | Protocol |
+|----------------|---------|---------|
+| `"claude"` (default) | `DirectClaudeRuntime` | stream-json ndjson |
 | `"cc-acp"` / `"claude-code-acp"` | `ACPRuntime` | JSON-RPC 2.0 |
 
-配置示例（`~/.nextme/nextme.json`）：
+Configuration example (`~/.nextme/nextme.json`):
 ```json
 {
   "projects": [
@@ -169,81 +165,81 @@ Feishu User ──WebSocket──▶ FeishuClient
 }
 ```
 
-### DirectClaudeRuntime（默认，`acp/direct_runtime.py`）
+### DirectClaudeRuntime (default, `acp/direct_runtime.py`)
 
-直接调用本地安装的 `claude` CLI，绕过 cc-acp。适用于自定义 API 代理（`ANTHROPIC_BASE_URL`）场景。
+Directly invokes the locally installed `claude` CLI, bypassing cc-acp. Suitable for custom API proxy (`ANTHROPIC_BASE_URL`) scenarios.
 
-**启动命令**：
+**Launch command**:
 ```bash
 claude --print --output-format stream-json --verbose \
        --dangerously-skip-permissions \
-       [--resume <session_id>]   # 第二次起用于续接对话
+       [--resume <session_id>]   # used from the second call onwards to resume a conversation
 ```
 
-**stream-json 事件类型**：
+**stream-json event types**:
 
-| 事件 | 说明 |
-|------|------|
-| `system` | 初始化事件，携带 `session_id`、`model`、tools 列表 |
-| `assistant` | 模型文本输出，可能分块 |
-| `tool_use` | 工具调用，携带 `name` |
-| `tool_result` | 工具执行结果 |
-| `result` | 最终事件，`is_error=true` 或携带完整 `result` 文本 |
-| `user` | 用户输入回显（忽略） |
+| Event | Description |
+|-------|-------------|
+| `system` | Initialization event, carries `session_id`, `model`, tools list |
+| `assistant` | Model text output, may be chunked |
+| `tool_use` | Tool call, carries `name` |
+| `tool_result` | Tool execution result |
+| `result` | Final event, `is_error=true` or carries complete `result` text |
+| `user` | User input echo (ignored) |
 
-**session 续接**：`result` 事件携带 `session_id`，存入 `_actual_id`，下次调用追加 `--resume <session_id>`。
+**Session resumption**: The `result` event carries `session_id`, stored in `_actual_id`; the next call appends `--resume <session_id>`.
 
-**环境隔离**（关键）：子进程 env 必须过滤 `CLAUDECODE` 和 `CLAUDE_CODE_*` 前缀变量，避免 "nested session" 错误（当 NextMe 本身在 Claude Code 终端内启动时）。
+**Environment isolation** (critical): The subprocess env must filter out `CLAUDECODE` and `CLAUDE_CODE_*` prefix variables to avoid "nested session" errors (when NextMe itself is launched inside a Claude Code terminal).
 
-### ACPRuntime（备选，`acp/runtime.py`）
+### ACPRuntime (alternative, `acp/runtime.py`)
 
-通过 `cc-acp` 子进程使用 JSON-RPC 2.0 协议通信。
+Communicates via JSON-RPC 2.0 protocol through the `cc-acp` subprocess.
 
-**JSON-RPC 2.0 流程**：
+**JSON-RPC 2.0 flow**:
 ```
 initialize → session/new (or session/load) → session/prompt
                 ↑ Server→Client notifications: session/update
                 ↑ Server→Client requests:      session/request_permission
 ```
 
-**环境隔离**：同样过滤 `CLAUDECODE`、`CLAUDE_CODE_*`；将 `ANTHROPIC_AUTH_TOKEN`（OAuth token）映射为 `ANTHROPIC_API_KEY` 供 cc-acp SDK 使用。
+**Environment isolation**: Same filtering of `CLAUDECODE`, `CLAUDE_CODE_*`; maps `ANTHROPIC_AUTH_TOKEN` (OAuth token) to `ANTHROPIC_API_KEY` for cc-acp SDK usage.
 
 ---
 
-## 持久化设计
+## Persistence Design
 
-NextMe 有三层持久化，职责独立：
+NextMe has three persistence layers with independent responsibilities:
 
 ```
 ~/.nextme/
-├── state.json           # Session 状态（对话 ID、活跃项目）
-├── memory/{ctx_hash}/   # 用户长期记忆（facts）
-├── threads/{session_id}/# 上下文压缩文件
-├── nextme.pid           # PID 文件（防误杀）
-└── logs/nextme.log      # 滚动日志（10MB × 5）
+├── state.json           # Session state (conversation ID, active project)
+├── memory/{ctx_hash}/   # user long-term memory (facts)
+├── threads/{session_id}/# context compressed files
+├── nextme.pid           # PID file (prevents accidental kills)
+└── logs/nextme.log      # rolling log (10MB × 5)
 ```
 
 ---
 
-### 1. Session 状态持久化（`config/state_store.py`）
+### 1. Session State Persistence (`config/state_store.py`)
 
-#### Schema（`config/schema.py`）
+#### Schema (`config/schema.py`)
 
 ```python
 class ProjectState(BaseModel):
-    salt: str = ""          # 确定性 session ID 生成用随机数
-    actual_id: str = ""     # claude 返回的 session UUID（用于 --resume）
+    salt: str = ""          # random value for deterministic session ID generation
+    actual_id: str = ""     # session UUID returned by claude (used for --resume)
     executor: str = "claude"
 
 class UserState(BaseModel):
-    last_active_project: str = ""          # 恢复上次活跃项目
+    last_active_project: str = ""          # restore last active project
     projects: dict[str, ProjectState] = {} # project_name -> ProjectState
 
 class GlobalState(BaseModel):
     contexts: dict[str, UserState] = {}    # context_id -> UserState
 ```
 
-**文件结构**（`~/.nextme/state.json`）：
+**File structure** (`~/.nextme/state.json`):
 ```json
 {
   "contexts": {
@@ -260,47 +256,47 @@ class GlobalState(BaseModel):
 }
 ```
 
-#### StateStore 写入策略
+#### StateStore Write Strategy
 
-| 特性 | 实现 |
-|------|------|
-| 原子写入 | temp file（同目录）+ `os.replace()`，POSIX `rename(2)` 原子性保证 |
-| 去抖刷新 | 后台 asyncio Task，每 `memory_debounce_seconds`（默认 30s）检查 dirty 标志 |
-| 崩溃恢复 | 文件损坏或 JSON 非法时静默返回 `GlobalState()`（空状态），不崩溃 |
-| 优雅停机 | `StateStore.stop()` 先 flush 再取消后台 Task |
+| Feature | Implementation |
+|---------|----------------|
+| Atomic write | temp file (same directory) + `os.replace()`, guaranteed atomic by POSIX `rename(2)` |
+| Debounced flush | background asyncio Task, checks dirty flag every `memory_debounce_seconds` (default 30s) |
+| Crash recovery | silently returns `GlobalState()` (empty state) if file is corrupted or invalid JSON — no crash |
+| Graceful shutdown | `StateStore.stop()` flushes first then cancels the background Task |
 
-#### session_id 生命周期
+#### session_id Lifecycle
 
 ```
-Bot 启动
+Bot starts
   → StateStore.load()
-  → [若 state.json 存在] UserState.projects["nextme"].actual_id 读入内存
+  → [if state.json exists] UserState.projects["nextme"].actual_id loaded into memory
   → Session.actual_id = stored_actual_id
 
-用户发消息
-  → worker 调用 DirectClaudeRuntime.execute()
-  → claude 返回 result 事件携带 session_id
+User sends message
+  → worker calls DirectClaudeRuntime.execute()
+  → claude returns result event carrying session_id
   → DirectClaudeRuntime._actual_id = session_id
   → Session.actual_id = runtime.actual_id
   → StateStore.set_user_state(...) → dirty = True
-  → 30s 内异步写盘
+  → async write to disk within 30s
 
-Bot 重启
-  → 从 state.json 恢复 actual_id
-  → 下次 execute 时追加 --resume actual_id
-  → 对话上下文无缝续接
+Bot restarts
+  → restore actual_id from state.json
+  → append --resume actual_id on next execute
+  → conversation context seamlessly resumed
 ```
 
 ---
 
-### 2. 用户记忆持久化（`memory/`）
+### 2. User Memory Persistence (`memory/`)
 
-#### 文件布局
+#### File Layout
 ```
 ~/.nextme/memory/{md5(context_id)}/
-├── user_context.json     # 用户偏好、交互风格
-├── personal.json         # 姓名、时区、角色等
-└── facts.json            # 已学习事实（含置信度）
+├── user_context.json     # user preferences, interaction style
+├── personal.json         # name, timezone, role, etc.
+└── facts.json            # learned facts (with confidence scores)
 ```
 
 #### Facts Schema
@@ -317,13 +313,13 @@ Bot 重启
 }
 ```
 
-#### MemoryManager 写入策略
+#### MemoryManager Write Strategy
 
-与 StateStore 相同：内存立即更新，文件通过 asyncio 去抖（30s）异步写入，原子 rename。每次 Session 启动时注入 top-15 facts 到 agent system prompt。
+Same as StateStore: in-memory updates are immediate, file writes are async via asyncio debounce (30s), atomic rename. On each Session start, the top-15 facts are injected into the agent system prompt.
 
 ---
 
-### 3. 上下文压缩持久化（`context/`）
+### 3. Context Compression Persistence (`context/`)
 
 ```
 ~/.nextme/threads/{session_id}/
@@ -331,57 +327,57 @@ Bot 重启
 └── context.meta.json   # {"algorithm": "zlib", "original_size": 1048576, ...}
 ```
 
-| 算法 | 标准库 | 速度 | 压缩率 | 触发条件 |
-|------|--------|------|--------|----------|
-| zlib | ✅ | 快 | 中 | 默认 |
-| lzma | ✅ | 慢 | 高 | 上下文 > 500KB |
-| brotli | 可选 pip | 中 | 高 | 安装后自动评估 |
+| Algorithm | Stdlib | Speed | Compression ratio | Trigger condition |
+|-----------|--------|-------|-------------------|-------------------|
+| zlib | ✅ | fast | medium | default |
+| lzma | ✅ | slow | high | context > 500KB |
+| brotli | optional pip | medium | high | auto-evaluated when installed |
 
 ---
 
-### 4. PID 文件（`~/.nextme/nextme.pid`）
+### 4. PID File (`~/.nextme/nextme.pid`)
 
-Bot 启动时写入当前 PID，正常退出时删除。`nextme down` 读取 PID 文件发送 SIGTERM，而非 `pkill nextme`（避免误杀同名进程）。PID 文件陈旧（进程已死）时自动清除。
+The bot writes its current PID on startup and deletes the file on normal exit. `nextme down` reads the PID file to send SIGTERM, rather than using `pkill nextme` (which could accidentally kill unrelated processes). A stale PID file (process already dead) is automatically cleaned up.
 
 ---
 
-## Session 生命周期
+## Session Lifecycle
 
-### 状态机
+### State Machine
 ```
-新消息 → QUEUED → WAITING_LOCK → EXECUTING
-                                     │
+new message → QUEUED → WAITING_LOCK → EXECUTING
+                                         │
               ← permission_request → WAITING_PERMISSION
-                                     │ (用户回复 1/2/3)
-                                     ↓
-                                 EXECUTING
-                                     │
-                              /stop → CANCELED → IDLE
-                              done  → IDLE
+                                         │ (user replies 1/2/3)
+                                         ↓
+                                     EXECUTING
+                                         │
+                                  /stop → CANCELED → IDLE
+                                  done  → IDLE
 ```
 
-### 权限流程
+### Permission Flow
 ```
-DirectClaudeRuntime（skip-permissions，无权限请求）
-ACPRuntime 发送 session/request_permission
+DirectClaudeRuntime (skip-permissions, no permission requests)
+ACPRuntime sends session/request_permission
   → Session.perm_future = asyncio.Future()
-  → 发送权限卡片给用户（带编号选项）
-  → worker await perm_future（最长等待 5min）
-用户回复 "1"
-  → TaskDispatcher 识别为权限回复
+  → send permission card to user (with numbered options)
+  → worker await perm_future (max wait 5min)
+User replies "1"
+  → TaskDispatcher identifies as permission reply
   → perm_future.set_result(choice)
-  → worker 恢复执行，发送 permission_response 给 ACP
+  → worker resumes execution, sends permission_response to ACP
 ```
 
-### Session 生命周期与 ACPJanitor
-- 每个 `context_id` + `project_name` 组合对应一个 Session
-- DirectClaudeRuntime 每次 execute 启动新子进程（无常驻进程）
-- ACPRuntime 子进程常驻，后台 Janitor（每分钟检查）：空闲 2h 后自动终止
-- `/new` 命令清除 `actual_id`，下次 execute 开启新对话
+### Session Lifecycle and ACPJanitor
+- Each `context_id` + `project_name` combination corresponds to one Session
+- DirectClaudeRuntime launches a new subprocess for each execute (no persistent process)
+- ACPRuntime subprocess is persistent; background Janitor (checks every minute): auto-terminates after 2h of idle
+- `/new` command clears `actual_id`, next execute starts a new conversation
 
 ---
 
-## 关键数据结构
+## Key Data Structures
 
 ### `protocol/types.py`
 
@@ -398,9 +394,9 @@ class TaskStatus(str, Enum):
 @dataclass
 class Task:
     id: str                   # UUID
-    content: str              # 用户消息
+    content: str              # user message
     session_id: str           # chatID:userID
-    reply_fn: Callable        # 异步回调
+    reply_fn: Callable        # async callback
     created_at: datetime
     timeout: timedelta = timedelta(hours=8)
     canceled: bool = False
@@ -413,11 +409,11 @@ class Session:
     context_id: str           # "chatID:userID"
     project_name: str
     project_path: Path
-    executor: str             # "claude" (默认) 或 "cc-acp"
-    salt: str                 # 生成确定性 session ID 的随机数
-    actual_id: str            # claude 返回的 session UUID（--resume 用）
+    executor: str             # "claude" (default) or "cc-acp"
+    salt: str                 # random value for deterministic session ID generation
+    actual_id: str            # session UUID returned by claude (used for --resume)
     status: TaskStatus
-    task_queue: asyncio.Queue # 容量 1024
+    task_queue: asyncio.Queue # capacity 1024
     pending_tasks: list[Task]
     active_task: Optional[Task]
     perm_future: Optional[asyncio.Future[PermissionChoice]]
@@ -429,58 +425,58 @@ class UserContext:
     sessions: dict[str, Session]  # project_name -> Session
 
 class SessionRegistry:
-    """全局单例：context_id -> UserContext"""
+    """Global singleton: context_id -> UserContext"""
 ```
 
 ---
 
-## 消息去重与并发控制
+## Message Deduplication and Concurrency Control
 
-- **消息去重**：LRU 缓存（1000条，5min TTL），基于 Feishu `message_id`，防止 WebSocket 重连时重复处理
-- **Session 串行**：每个 Session 有一个 asyncio worker，任务串行执行
-- **跨用户并行**：不同 `context_id` 完全并行（asyncio 并发协程）
-- **路径锁**：`PathLockRegistry`，同一物理路径同时只允许一个 Session 写入（防多用户同写同一代码库）
-
----
-
-## 元命令 (`/` 开头)
-
-| 命令 | 功能 |
-|------|------|
-| `/new` | 清除 actual_id（下次对话开新 session） |
-| `/stop` | 取消当前执行中的任务（SIGTERM 子进程） |
-| `/help` | 显示帮助卡片 |
-| `/skill <trigger>` | 手动触发 Skill |
-| `/status` | 显示当前 Session 状态（project / executor / session_id） |
-| `/project <name>` | 切换活跃项目 |
+- **Message deduplication**: LRU cache (1000 entries, 5min TTL), based on Feishu `message_id`, prevents duplicate processing on WebSocket reconnects
+- **Session serialization**: each Session has one asyncio worker, tasks execute serially
+- **Cross-user parallelism**: different `context_id` values run fully in parallel (asyncio concurrent coroutines)
+- **Path lock**: `PathLockRegistry`, only one Session may write to the same physical path at a time (prevents multiple users from concurrently writing to the same codebase)
 
 ---
 
-## Feishu 卡片（schema 2.0）
+## Meta-Commands (`/` prefix)
 
-所有卡片使用 Feishu 互动卡片 **schema 2.0**。已知限制：
+| Command | Function |
+|---------|----------|
+| `/new` | Clear actual_id (next conversation starts a new session) |
+| `/stop` | Cancel the currently executing task (SIGTERM to subprocess) |
+| `/help` | Display help card |
+| `/skill <trigger>` | Manually trigger a Skill |
+| `/status` | Display current Session state (project / executor / session_id) |
+| `/project <name>` | Switch active project |
 
-| 标签 | schema 2.0 支持 |
-|------|-----------------|
+---
+
+## Feishu Cards (schema 2.0)
+
+All cards use Feishu interactive cards **schema 2.0**. Known limitations:
+
+| Element | schema 2.0 support |
+|---------|--------------------|
 | `markdown` | ✅ |
 | `hr` | ✅ |
 | `action` / `button` | ✅ |
 | `collapsible_panel` | ✅ |
-| `note` | ❌（已废弃，改用 `markdown`） |
+| `note` | ❌ (deprecated, replaced by `markdown`) |
 
-| 卡片类型 | 触发时机 | 颜色 |
-|----------|----------|------|
-| 进度卡片 | 任务开始 / content_delta | 黄色 |
-| 结果卡片 | 任务完成 | 蓝色 |
-| 权限卡片 | ACPRuntime permission_request | 橙色 |
-| 错误卡片 | 执行失败 | 红色 |
-| 帮助卡片 | /help 命令 | 绿色 |
+| Card type | Trigger | Color |
+|-----------|---------|-------|
+| Progress card | task start / content_delta | yellow |
+| Result card | task complete | blue |
+| Permission card | ACPRuntime permission_request | orange |
+| Error card | execution failure | red |
+| Help card | /help command | green |
 
 ---
 
-## Skills 系统 (`skills/`)
+## Skills System (`skills/`)
 
-### Skill 文件格式
+### Skill File Format
 ```markdown
 ---
 name: Code Review
@@ -495,28 +491,28 @@ tools_denylist: []
 请从正确性、性能、可读性三个维度进行 Review。
 ```
 
-### 发现优先级（高→低）
+### Discovery Priority (high → low)
 1. `{project_path}/.nextme/skills/*.md`
 2. `~/.nextme/skills/*.md`
-3. `{package_dir}/skills/*.md`（内置）
+3. `{package_dir}/skills/*.md` (built-in)
 
-### 内置 Skills
-| 触发词 | 功能 |
-|--------|------|
-| `/review` | 代码 Review |
-| `/commit` | 生成 Commit Message |
-| `/explain` | 解释代码 |
-| `/test` | 生成单元测试 |
-| `/debug` | 系统化调试 |
+### Built-in Skills
+| Trigger | Function |
+|---------|----------|
+| `/review` | Code Review |
+| `/commit` | Generate Commit Message |
+| `/explain` | Explain code |
+| `/test` | Generate unit tests |
+| `/debug` | Systematic debugging |
 
 ---
 
-## 配置系统
+## Configuration System
 
-### 优先级（低→高）
+### Priority (low → high)
 ```
 ~/.nextme/nextme.json  →  {cwd}/nextme.json  →
-~/.nextme/settings.json  →  .env  →  NEXTME_* 环境变量
+~/.nextme/settings.json  →  .env  →  NEXTME_* environment variables
 ```
 
 ### `nextme.json`
@@ -546,90 +542,90 @@ tools_denylist: []
 
 ---
 
-## 启动与优雅停机 (`main.py`)
+## Startup and Graceful Shutdown (`main.py`)
 
 ```
 nextme up [--directory DIR] [--executor EXE] [--log-level LEVEL]
 nextme down [--timeout SECS]
 
-启动顺序：
-1. 加载配置（AppConfig + Settings）
-2. 写 PID 文件
-3. 初始化 StateStore → load()
-4. 初始化 MemoryManager, ContextManager, SkillRegistry
-5. 初始化 SessionRegistry, PathLockRegistry
-6. 初始化 ACPRuntimeRegistry, ACPJanitor
-7. 初始化 MessageHandler, TaskDispatcher, FeishuClient
-8. 启动后台任务：janitor.run(), state_store.start_debounce_loop(),
-               memory_manager.start_debounce_loop()
-9. 注册 SIGTERM/SIGINT 处理器
-10. FeishuClient.start()  ← 阻塞，等待信号
+Startup sequence:
+1. Load configuration (AppConfig + Settings)
+2. Write PID file
+3. Initialize StateStore → load()
+4. Initialize MemoryManager, ContextManager, SkillRegistry
+5. Initialize SessionRegistry, PathLockRegistry
+6. Initialize ACPRuntimeRegistry, ACPJanitor
+7. Initialize MessageHandler, TaskDispatcher, FeishuClient
+8. Start background tasks: janitor.run(), state_store.start_debounce_loop(),
+                           memory_manager.start_debounce_loop()
+9. Register SIGTERM/SIGINT handlers
+10. FeishuClient.start()  ← blocks, waiting for signal
 
-SIGTERM / SIGINT 优雅停机：
-1. 停止飞书 WebSocket
-2. 等待 in-flight 任务完成（或超时 30s 强制退出）
+SIGTERM / SIGINT graceful shutdown:
+1. Stop Feishu WebSocket
+2. Wait for in-flight tasks to complete (or force exit after 30s timeout)
 3. ACPRuntimeRegistry.stop_all()
 4. MemoryManager.flush_all()
-5. StateStore.stop()（flush + 取消去抖 Task）
-6. 取消后台 asyncio.Task
-7. 删除 PID 文件
+5. StateStore.stop() (flush + cancel debounce Task)
+6. Cancel background asyncio.Tasks
+7. Delete PID file
 ```
 
 ---
 
-## 文件存储布局
+## File Storage Layout
 
 ```
 ~/.nextme/
-├── nextme.json          # 用户级配置（app_id, app_secret, projects）
-├── settings.json        # 行为设置（超时、去抖、日志级别）
-├── state.json           # Session 状态（actual_id, active_project）
-├── nextme.pid           # PID 文件（nextme down 定向 SIGTERM）
+├── nextme.json          # user-level config (app_id, app_secret, projects)
+├── settings.json        # behavioral settings (timeouts, debounce, log level)
+├── state.json           # Session state (actual_id, active_project)
+├── nextme.pid           # PID file (nextme down targets SIGTERM here)
 ├── memory/
-│   └── {md5(ctx_id)}/   # per-user 长期记忆
+│   └── {md5(ctx_id)}/   # per-user long-term memory
 │       ├── facts.json
 │       ├── personal.json
 │       └── user_context.json
 ├── threads/
-│   └── {session_id}/    # per-session 上下文压缩文件
+│   └── {session_id}/    # per-session context compressed files
 │       ├── context.txt[.zlib|.lzma|.br]
 │       └── context.meta.json
-├── skills/              # 用户自定义 Skills（覆盖内置）
-└── logs/nextme.log      # 滚动日志（10MB × 5 backup）
+├── skills/              # user-defined Skills (override built-ins)
+└── logs/nextme.log      # rolling log (10MB × 5 backups)
 ```
 
 ---
 
-## 关键依赖
+## Key Dependencies
 
 ```toml
 [project]
 requires-python = ">=3.12"
 dependencies = [
-    "lark-oapi>=1.5.3",     # 飞书 Python SDK
-    "pydantic>=2.0",        # 配置/数据校验
-    "python-dotenv>=1.0",   # .env 加载
-    # 无需 acp-sdk，协议层自行实现
+    "lark-oapi>=1.5.3",     # Feishu Python SDK
+    "pydantic>=2.0",        # config/data validation
+    "python-dotenv>=1.0",   # .env loading
+    # no acp-sdk needed — protocol layer is self-implemented
 ]
 
 [project.optional-dependencies]
-brotli = ["brotli>=1.0"]    # 可选：brotli 压缩
+brotli = ["brotli>=1.0"]    # optional: brotli compression
 ```
 
-外部工具依赖（需用户自行安装）：
-- `claude`（`npm install -g @anthropic-ai/claude-code`，推荐 v2+）
-- `cc-acp`（可选备选，`npm install -g @zed-industries/claude-code-acp`）
+External tool dependencies (must be installed by the user):
+- `claude` (`npm install -g @anthropic-ai/claude-code`, v2+ recommended)
+- `cc-acp` (optional alternative, `npm install -g @zed-industries/claude-code-acp`)
 
 ---
 
-## 验证方式
+## Verification Checklist
 
-1. **飞书连接**：`nextme up` 后向 Bot 发消息，Bot 出现"思考中..."进度卡片
-2. **Agent 执行**：发送 `"列出当前目录的文件"` → Bot 返回结果卡片
-3. **流式进度**：长任务中每 3s 看到进度卡片内容更新
-4. **Session 续接**：连续发两条消息，第二条带上 `--resume session_id`（日志确认）
-5. **重启恢复**：重启 Bot 后发消息，观察 `--resume` 是否携带上次的 `session_id`
-6. **Session 隔离**：两个不同用户同时发消息，互不干扰
-7. **权限确认**（仅 cc-acp）：Agent 执行写操作时，飞书弹出权限选择卡片
-8. **Skills 调用**：`/review` 触发 Code Review Skill，Agent 返回结构化 Review 结果
-9. **安全停机**：`nextme down` 发送 SIGTERM → Bot 等待 in-flight 任务完成后退出
+1. **Feishu connection**: after `nextme up`, send a message to the bot — bot shows a "思考中..." progress card
+2. **Agent execution**: send `"列出当前目录的文件"` → bot returns a result card
+3. **Streaming progress**: during a long task, see progress card content update every 3s
+4. **Session resumption**: send two consecutive messages; the second one appends `--resume session_id` (confirm in logs)
+5. **Restart recovery**: restart the bot and send a message; verify that `--resume` carries the previous `session_id`
+6. **Session isolation**: two different users send messages simultaneously; they do not interfere with each other
+7. **Permission confirmation** (cc-acp only): when the agent performs a write operation, Feishu shows a permission selection card
+8. **Skills invocation**: `/review` triggers the Code Review Skill; agent returns a structured review result
+9. **Safe shutdown**: `nextme down` sends SIGTERM → bot waits for in-flight tasks to complete before exiting
