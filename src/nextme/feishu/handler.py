@@ -90,6 +90,7 @@ class MessageHandler:
 
         message_id: str = getattr(message, "message_id", "") or ""
         chat_id: str = getattr(message, "chat_id", "") or ""
+        chat_type: str = getattr(message, "chat_type", "") or ""
         user_id: str = (
             getattr(getattr(sender, "sender_id", None), "open_id", "") or ""
         )
@@ -127,14 +128,16 @@ class MessageHandler:
             session_id=session_id,
             reply_fn=_reply_fn,
             message_id=message_id,
+            chat_type=chat_type,
             created_at=datetime.now(),
         )
 
         logger.info(
-            "New task: id=%s session=%s message_id=%s text=%.80r",
+            "New task: id=%s session=%s message_id=%s chat_type=%s text=%.80r",
             task.id,
             session_id,
             message_id,
+            chat_type,
             text,
         )
 

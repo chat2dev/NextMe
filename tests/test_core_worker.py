@@ -444,16 +444,33 @@ async def test_execute_task_syncs_actual_id_from_runtime(
 # Tests: thread-mode progress card and elapsed time
 # ---------------------------------------------------------------------------
 
-async def test_execute_task_uses_reply_card_when_message_id_set(
+async def test_execute_task_uses_reply_card_for_group_chat(
     worker, session, replier, acp_registry
 ):
-    """When task has message_id, initial progress card is sent via reply_card."""
+    """Group chat: initial progress card sent via reply_card with in_thread=True."""
     _, mock_runtime = acp_registry
     task, _ = make_task("hello")
     task.message_id = "om_src_123"
+    task.chat_type = "group"
     await worker._execute_task(task)
     replier.reply_card.assert_awaited()
-    # reply_card called for initial progress card; send_card not called
+    call_kwargs = replier.reply_card.call_args.kwargs
+    assert call_kwargs.get("in_thread") is True
+    replier.send_card.assert_not_awaited()
+
+
+async def test_execute_task_uses_reply_card_for_p2p_chat(
+    worker, session, replier, acp_registry
+):
+    """P2P chat: initial progress card sent via reply_card with in_thread=False (quote)."""
+    _, mock_runtime = acp_registry
+    task, _ = make_task("hello")
+    task.message_id = "om_src_123"
+    task.chat_type = "p2p"
+    await worker._execute_task(task)
+    replier.reply_card.assert_awaited()
+    call_kwargs = replier.reply_card.call_args.kwargs
+    assert call_kwargs.get("in_thread") is False
     replier.send_card.assert_not_awaited()
 
 

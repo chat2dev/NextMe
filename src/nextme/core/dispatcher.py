@@ -104,18 +104,21 @@ class TaskDispatcher:
 
         # ------------------------------------------------------------------
         # Build a proper reply_fn that sends Feishu messages for this task.
-        # Prefers thread replies (reply_card / reply_text) when the task
-        # carries a message_id; falls back to top-level chat messages.
+        # - group chat  → thread reply  (reply_in_thread=True)
+        # - p2p chat    → quote reply   (reply_in_thread=False)
+        # - no message_id → top-level chat message (fallback)
         # ------------------------------------------------------------------
+        in_thread = task.chat_type == "group"
+
         async def reply_fn(reply: Reply) -> None:
             if reply.type == ReplyType.CARD:
                 if task.message_id:
-                    await replier.reply_card(task.message_id, reply.content)
+                    await replier.reply_card(task.message_id, reply.content, in_thread=in_thread)
                 else:
                     await replier.send_card(chat_id, reply.content)
             elif reply.type == ReplyType.MARKDOWN:
                 if task.message_id:
-                    await replier.reply_text(task.message_id, reply.content)
+                    await replier.reply_text(task.message_id, reply.content, in_thread=in_thread)
                 else:
                     await replier.send_text(chat_id, reply.content)
             else:
@@ -205,14 +208,14 @@ class TaskDispatcher:
                 )
             return
 
-        # Immediately acknowledge receipt with a thread reply so the user
-        # knows their message was received before the worker starts.
+        # Immediately acknowledge receipt with an "OK" emoji reaction so the
+        # user knows their message was received before the worker starts.
         if task.message_id:
             try:
-                await replier.reply_text(task.message_id, "ok")
+                await replier.send_reaction(task.message_id, "OK")
             except Exception:
                 logger.warning(
-                    "TaskDispatcher: failed to send ack for task %s: ",
+                    "TaskDispatcher: failed to send reaction for task %s",
                     task.id,
                     exc_info=True,
                 )

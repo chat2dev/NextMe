@@ -165,7 +165,10 @@ class SessionWorker:
         self._task_start = time.monotonic()
         self._active_message_id = task.message_id
 
-        # Step 1 — Send initial progress card as a thread reply so it appears
+        # group → thread reply; p2p → quote reply; no message_id → top-level.
+        in_thread = task.chat_type == "group"
+
+        # Step 1 — Send initial progress card as a reply so it appears
         # inline with the user's original message.
         chat_id = self._session.context_id.split(":")[0]
         initial_card = self._replier.build_progress_card(
@@ -176,7 +179,7 @@ class SessionWorker:
         try:
             if task.message_id:
                 self._progress_message_id = await self._replier.reply_card(
-                    task.message_id, initial_card
+                    task.message_id, initial_card, in_thread=in_thread
                 )
             else:
                 self._progress_message_id = await self._replier.send_card(

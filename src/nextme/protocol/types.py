@@ -51,7 +51,8 @@ class Task:
     content: str                        # user message text
     session_id: str                     # "chatID:userID"
     reply_fn: Callable                  # async callback: (Reply) -> None
-    message_id: str = ""                # Feishu message_id for thread replies
+    message_id: str = ""                # Feishu message_id for thread/quote replies
+    chat_type: str = ""                 # "p2p" → quote reply; "group" → thread reply
     created_at: datetime = field(default_factory=datetime.now)
     timeout: timedelta = field(default_factory=lambda: timedelta(hours=8))
     canceled: bool = False
