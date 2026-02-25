@@ -51,6 +51,7 @@ nextme/
     │   ├── reply.py             # Reply 类型 + 卡片 JSON 构建
     │   └── dedup.py             # LRU 消息去重（1000条，5min TTL）
     ├── core/
+    │   ├── interfaces.py        # Replier / IMAdapter / AgentRuntime Protocol 接口
     │   ├── dispatcher.py        # TaskDispatcher：路由 / 权限回复 / 元命令
     │   ├── session.py           # UserContext, Session, SessionRegistry
     │   ├── worker.py            # 每个 Session 的 asyncio 队列消费协程
@@ -74,6 +75,38 @@ nextme/
     └── protocol/
         └── types.py             # Task, Reply, TaskStatus 枚举
 ```
+
+---
+
+## 解耦层：IMAdapter / AgentRuntime Protocol 接口 (`core/interfaces.py`)
+
+### 设计目标
+
+`core/` 层不直接依赖飞书 SDK 或 ACP 实现，通过 `typing.Protocol` 声明结构化接口，**仅换类型标注，不改运行逻辑**。为未来支持 Slack / 钉钉 / 其他 Agent CLI 奠定基础。
+
+### 接口定义
+
+| 接口 | 实现者 | 方法数 | 用途 |
+|------|--------|--------|------|
+| `Replier` | `FeishuReplier` | 4 async send + 5 sync build | 发送消息、构建卡片 JSON |
+| `IMAdapter` | `FeishuClient` | start / stop / get_replier | IM 平台连接生命周期 |
+| `AgentRuntime` | `ACPRuntime` | 3 read-only属性 + 5 async方法 | Agent 子进程生命周期 |
+
+所有接口均标注 `@runtime_checkable`，支持 `isinstance()` 断言与测试。
+
+### 使用位置
+
+- `core/worker.py` — `replier: Replier`（原 `FeishuReplier`）
+- `core/dispatcher.py` — `feishu_client: IMAdapter`, `replier: Replier`
+- `core/commands.py` — 所有 `handle_*` 函数参数 `replier: Replier`
+
+### 验证方式
+
+`tests/test_interfaces.py` 包含 35 个测试：
+- `isinstance(FeishuReplier(...), Replier)` → `True`
+- `isinstance(FeishuClient(...), IMAdapter)` → `True`
+- `isinstance(ACPRuntime(...), AgentRuntime)` → `True`
+- 缺少关键方法的对象 `isinstance` 返回 `False`（负例验证）
 
 ---
 

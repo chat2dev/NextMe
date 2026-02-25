@@ -22,7 +22,6 @@ from typing import Optional
 
 from ..acp.janitor import ACPRuntimeRegistry
 from ..config.schema import Settings
-from ..feishu.reply import FeishuReplier
 from ..protocol.types import (
     PermissionChoice,
     PermissionRequest,
@@ -31,6 +30,7 @@ from ..protocol.types import (
     Task,
     TaskStatus,
 )
+from .interfaces import Replier
 from .path_lock import PathLockRegistry
 from .session import Session
 
@@ -52,7 +52,7 @@ class SessionWorker:
         self,
         session: Session,
         acp_registry: ACPRuntimeRegistry,
-        replier: FeishuReplier,
+        replier: Replier,
         settings: Settings,
         path_lock_registry: PathLockRegistry,
     ) -> None:

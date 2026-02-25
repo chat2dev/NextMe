@@ -11,8 +11,8 @@ import logging
 
 from ..acp.runtime import ACPRuntime
 from ..config.schema import AppConfig, Settings
-from ..feishu.reply import FeishuReplier
 from ..protocol.types import TaskStatus
+from .interfaces import Replier
 from .session import Session, UserContext
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ HELP_COMMANDS: list[tuple[str, str]] = [
 async def handle_new(
     session: Session,
     runtime: ACPRuntime | None,
-    replier: FeishuReplier,
+    replier: Replier,
     chat_id: str,
 ) -> None:
     """Reset the ACP session, clearing conversation history.
@@ -77,7 +77,7 @@ async def handle_new(
 
 async def handle_stop(
     session: Session,
-    replier: FeishuReplier,
+    replier: Replier,
     chat_id: str,
 ) -> None:
     """Cancel the task currently executing in *session*.
@@ -113,7 +113,7 @@ async def handle_stop(
         )
 
 
-async def handle_help(replier: FeishuReplier, chat_id: str) -> None:
+async def handle_help(replier: Replier, chat_id: str) -> None:
     """Send the help card listing all available commands.
 
     Args:
@@ -130,7 +130,7 @@ async def handle_help(replier: FeishuReplier, chat_id: str) -> None:
 
 async def handle_status(
     session: Session,
-    replier: FeishuReplier,
+    replier: Replier,
     chat_id: str,
 ) -> None:
     """Send a status card showing the current session state.
@@ -191,7 +191,7 @@ async def handle_project(
     project_name: str,
     config: AppConfig,
     settings: Settings,
-    replier: FeishuReplier,
+    replier: Replier,
     chat_id: str,
 ) -> None:
     """Switch the active project for *user_ctx*.

@@ -22,7 +22,6 @@ from typing import Optional
 
 from ..acp.janitor import ACPRuntimeRegistry
 from ..config.schema import AppConfig, Settings
-from ..feishu.reply import FeishuReplier
 from ..protocol.types import (
     PermissionChoice,
     Reply,
@@ -30,6 +29,7 @@ from ..protocol.types import (
     Task,
     TaskStatus,
 )
+from .interfaces import IMAdapter, Replier
 from .commands import (
     handle_help,
     handle_new,
@@ -65,7 +65,7 @@ class TaskDispatcher:
         session_registry: SessionRegistry,
         acp_registry: ACPRuntimeRegistry,
         path_lock_registry: PathLockRegistry,
-        feishu_client,  # FeishuClient — avoid circular import
+        feishu_client: IMAdapter,
     ) -> None:
         self._config = config
         self._settings = settings
@@ -352,7 +352,7 @@ class TaskDispatcher:
     # Private: worker lifecycle
     # ------------------------------------------------------------------
 
-    async def _ensure_worker(self, session: Session, replier: FeishuReplier) -> None:
+    async def _ensure_worker(self, session: Session, replier: Replier) -> None:
         """Start a :class:`~nextme.core.worker.SessionWorker` if one is not running.
 
         If a previous worker task has completed (normally or due to an error),
