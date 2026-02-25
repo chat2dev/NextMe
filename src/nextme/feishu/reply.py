@@ -273,7 +273,7 @@ class FeishuReplier:
             )
         footer_parts: list[str] = []
         if session_id:
-            footer_parts.append(f"session: {session_id}")
+            footer_parts.append(f"🆔 {session_id}")
         if elapsed:
             footer_parts.append(f"耗时: {elapsed}")
         if footer_parts:
@@ -330,7 +330,7 @@ class FeishuReplier:
         if session_id:
             elements.append({"tag": "hr"})
             elements.append(
-                {"tag": "markdown", "content": f"session: {session_id}"}
+                {"tag": "markdown", "content": f"🆔 {session_id}"}
             )
 
         card = {

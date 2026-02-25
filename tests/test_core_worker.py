@@ -154,53 +154,61 @@ async def test_run_dequeues_multiple_tasks(worker, session, acp_registry):
 # _send_result tests
 # ---------------------------------------------------------------------------
 
-async def test_send_result_calls_reply_fn_with_card(worker):
-    task, replies = make_task("hello")
+async def test_send_result_updates_progress_card_in_place(worker, replier):
+    """Result updates the existing progress card (no new card created)."""
+    worker._progress_message_id = "prog_msg_id"
+    task, _ = make_task("hello")
     await worker._send_result(task, "Great result")
-    assert len(replies) == 1
-    reply = replies[0]
-    assert reply.type == ReplyType.CARD
-    assert reply.title == "完成"
+    replier.update_card.assert_awaited_once()
+    # update_card called with the progress card id
+    assert replier.update_card.call_args.args[0] == "prog_msg_id"
 
 
 async def test_send_result_uses_build_result_card(worker, replier):
-    task, replies = make_task("hello")
+    worker._progress_message_id = "prog_msg_id"
+    task, _ = make_task("hello")
     await worker._send_result(task, "Some content")
     replier.build_result_card.assert_called_once()
-    kwargs = replier.build_result_card.call_args
-    # Verify content was passed
-    if kwargs[1]:
-        assert "content" in kwargs[1]
-    else:
-        assert "Some content" in kwargs[0]
+    kwargs = replier.build_result_card.call_args.kwargs
+    assert kwargs.get("content") == "Some content"
 
 
 async def test_send_result_handles_empty_content(worker, replier):
-    task, replies = make_task("hello")
-    # Empty content should be replaced with "(无输出)"
+    """Empty content is replaced with '(无输出)'."""
+    worker._progress_message_id = "prog_msg_id"
+    task, _ = make_task("hello")
     await worker._send_result(task, "")
-    replier.build_result_card.assert_called_once()
     call_args = replier.build_result_card.call_args
-    # The content arg should be "(无输出)"
-    content_arg = call_args[1].get("content") or call_args[0][0]
+    content_arg = call_args.kwargs.get("content") or call_args.args[0]
     assert "(无输出)" in str(content_arg)
+
+
+async def test_send_result_fallback_uses_reply_card_when_no_progress_card(worker, replier):
+    """When progress card was never sent, falls back to reply_card."""
+    worker._progress_message_id = None
+    task, _ = make_task("hello")
+    task.message_id = "om_src"
+    await worker._send_result(task, "result")
+    replier.reply_card.assert_awaited()
+    replier.update_card.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
 # _send_error tests
 # ---------------------------------------------------------------------------
 
-async def test_send_error_calls_reply_fn_with_card(worker):
-    task, replies = make_task("hello")
+async def test_send_error_updates_progress_card_in_place(worker, replier):
+    """Error updates the existing progress card (no new card)."""
+    worker._progress_message_id = "prog_msg_id"
+    task, _ = make_task("hello")
     await worker._send_error(task, "Something went wrong")
-    assert len(replies) == 1
-    reply = replies[0]
-    assert reply.type == ReplyType.CARD
-    assert reply.template == "red"
+    replier.update_card.assert_awaited_once()
+    assert replier.update_card.call_args.args[0] == "prog_msg_id"
 
 
 async def test_send_error_uses_build_error_card(worker, replier):
-    task, replies = make_task("hello")
+    worker._progress_message_id = "prog_msg_id"
+    task, _ = make_task("hello")
     await worker._send_error(task, "Error message")
     replier.build_error_card.assert_called_once_with("Error message")
 
@@ -209,13 +217,13 @@ async def test_send_error_uses_build_error_card(worker, replier):
 # _send_cancelled tests
 # ---------------------------------------------------------------------------
 
-async def test_send_cancelled_calls_reply_fn_with_markdown(worker):
-    task, replies = make_task("hello")
+async def test_send_cancelled_updates_progress_card_in_place(worker, replier):
+    """Cancellation updates the existing progress card (no new card)."""
+    worker._progress_message_id = "prog_msg_id"
+    task, _ = make_task("hello")
     await worker._send_cancelled(task)
-    assert len(replies) == 1
-    reply = replies[0]
-    assert reply.type == ReplyType.MARKDOWN
-    assert "已取消" in reply.content
+    replier.update_card.assert_awaited_once()
+    assert replier.update_card.call_args.args[0] == "prog_msg_id"
 
 
 # ---------------------------------------------------------------------------
@@ -377,27 +385,26 @@ async def test_execute_task_sends_initial_progress_card(worker, session, replier
 
 
 async def test_execute_task_sends_result_on_success(worker, session, replier, acp_registry):
+    """Success updates the progress card in-place (no new card via reply_fn)."""
     _, mock_runtime = acp_registry
     mock_runtime.execute = AsyncMock(return_value="Success content")
-    task, replies = make_task("hello")
+    task, _ = make_task("hello")
     await worker._execute_task(task)
-    # The final reply should be a CARD with result
-    assert len(replies) == 1
-    assert replies[0].type == ReplyType.CARD
+    # build_result_card is called and the card is applied via update_card or send_card
+    replier.build_result_card.assert_called()
 
 
 async def test_execute_task_sends_error_on_ensure_ready_failure(
     worker, session, replier, acp_registry
 ):
+    """ensure_ready failure updates the progress card with an error card."""
     _, mock_runtime = acp_registry
     mock_runtime.ensure_ready = AsyncMock(side_effect=RuntimeError("not ready"))
-    task, replies = make_task("hello")
+    task, _ = make_task("hello")
     await worker._execute_task(task)
-    # Error card should be sent
     replier.build_error_card.assert_called()
-    assert len(replies) == 1
-    assert replies[0].type == ReplyType.CARD
-    assert replies[0].template == "red"
+    # Card is applied via update_card or send_card (not via reply_fn)
+    assert replier.update_card.await_count + replier.send_card.await_count >= 1
 
 
 async def test_execute_task_sends_error_on_execute_failure(
@@ -405,17 +412,17 @@ async def test_execute_task_sends_error_on_execute_failure(
 ):
     _, mock_runtime = acp_registry
     mock_runtime.execute = AsyncMock(side_effect=RuntimeError("execution failed"))
-    task, replies = make_task("hello")
+    task, _ = make_task("hello")
     await worker._execute_task(task)
     replier.build_error_card.assert_called()
-    assert len(replies) == 1
 
 
 async def test_execute_task_sends_cancelled_when_task_marked_canceled(
     worker, session, replier, acp_registry
 ):
+    """Cancellation updates the progress card with a cancel card."""
     _, mock_runtime = acp_registry
-    task, replies = make_task("hello")
+    task, _ = make_task("hello")
 
     async def fake_execute(**kwargs):
         task.canceled = True
@@ -423,10 +430,10 @@ async def test_execute_task_sends_cancelled_when_task_marked_canceled(
 
     mock_runtime.execute = fake_execute
     await worker._execute_task(task)
-    # Since task.canceled was set, _send_cancelled should be called
-    assert len(replies) == 1
-    assert replies[0].type == ReplyType.MARKDOWN
-    assert "已取消" in replies[0].content
+    # build_result_card called with "已取消" title
+    replier.build_result_card.assert_called()
+    call_kwargs = replier.build_result_card.call_args.kwargs
+    assert call_kwargs.get("title") == "已取消" or "已取消" in str(call_kwargs)
 
 
 async def test_execute_task_syncs_actual_id_from_runtime(

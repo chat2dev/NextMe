@@ -75,7 +75,8 @@ class SessionWorker:
         self._progress_buffer: list[str] = []
         self._last_progress_update: float = 0.0
         self._task_start: float = 0.0
-        self._active_message_id: str = ""  # message_id of the current task
+        self._active_message_id: str = ""   # original Feishu message_id
+        self._active_in_thread: bool = False  # thread vs quote-reply mode
 
     # ------------------------------------------------------------------
     # Main loop
@@ -164,9 +165,10 @@ class SessionWorker:
         self._last_progress_update = 0.0
         self._task_start = time.monotonic()
         self._active_message_id = task.message_id
+        self._active_in_thread = task.chat_type == "group"
 
         # group → thread reply; p2p → quote reply; no message_id → top-level.
-        in_thread = task.chat_type == "group"
+        in_thread = self._active_in_thread
 
         # Step 1 — Send initial progress card as a reply so it appears
         # inline with the user's original message.
@@ -318,12 +320,18 @@ class SessionWorker:
                     self._session.context_id,
                 )
         else:
-            # Fallback: send a new card if we somehow lack a message_id.
+            # Fallback: initial card send failed; send a new card keeping the
+            # same reply mode (thread / quote / top-level) as the original task.
             chat_id = self._session.context_id.split(":")[0]
             try:
-                self._progress_message_id = await self._replier.send_card(
-                    chat_id, card
-                )
+                if self._active_message_id:
+                    self._progress_message_id = await self._replier.reply_card(
+                        self._active_message_id, card, in_thread=self._active_in_thread
+                    )
+                else:
+                    self._progress_message_id = await self._replier.send_card(
+                        chat_id, card
+                    )
             except Exception:
                 logger.exception(
                     "SessionWorker[%s]: failed to send fallback progress card",
@@ -398,57 +406,63 @@ class SessionWorker:
     # Reply helpers
     # ------------------------------------------------------------------
 
+    async def _update_or_reply(self, task: Task, card_json: str) -> None:
+        """Update the existing progress card in-place, or fall back to a new reply.
+
+        Prefers ``update_card`` (PATCH) on the progress card so the user sees
+        one card transition from "思考中..." to the final state rather than two
+        separate messages.
+        """
+        if self._progress_message_id:
+            try:
+                await self._replier.update_card(self._progress_message_id, card_json)
+                return
+            except Exception:
+                logger.exception(
+                    "SessionWorker[%s]: failed to update card in-place",
+                    self._session.context_id,
+                )
+        # Fallback: no progress card available — send a new reply.
+        try:
+            if task.message_id:
+                await self._replier.reply_card(
+                    task.message_id, card_json, in_thread=self._active_in_thread
+                )
+            else:
+                chat_id = self._session.context_id.split(":")[0]
+                await self._replier.send_card(chat_id, card_json)
+        except Exception:
+            logger.exception(
+                "SessionWorker[%s]: failed to send fallback reply card",
+                self._session.context_id,
+            )
+
     async def _send_result(self, task: Task, content: str) -> None:
-        """Send the final result card for *task*."""
+        """Update the progress card to show the final result."""
         elapsed_s = int(time.monotonic() - self._task_start)
         result_card = self._replier.build_result_card(
             content=content or "(无输出)",
             title="完成",
             template="blue",
-            session_id=self._session.context_id,
+            session_id=self._session.actual_id or "",
             elapsed=_format_elapsed(elapsed_s),
         )
-        reply = Reply(
-            type=ReplyType.CARD,
-            content=result_card,
-            title="完成",
-            template="blue",
-        )
-        try:
-            await task.reply_fn(reply)
-        except Exception:
-            logger.exception(
-                "SessionWorker[%s]: failed to send result reply for task %s",
-                self._session.context_id,
-                task.id,
-            )
+        await self._update_or_reply(task, result_card)
 
     async def _send_error(self, task: Task, error: str) -> None:
-        """Send an error card for *task*."""
+        """Update the progress card to show an error."""
         error_card = self._replier.build_error_card(error)
-        reply = Reply(
-            type=ReplyType.CARD,
-            content=error_card,
-            title="出错了",
-            template="red",
-        )
-        try:
-            await task.reply_fn(reply)
-        except Exception:
-            logger.exception(
-                "SessionWorker[%s]: failed to send error reply for task %s",
-                self._session.context_id,
-                task.id,
-            )
+        await self._update_or_reply(task, error_card)
 
     async def _send_cancelled(self, task: Task) -> None:
-        """Send a cancellation notification for *task*."""
-        reply = Reply(
-            type=ReplyType.MARKDOWN,
-            content="已取消",
+        """Update the progress card to show a cancellation notice."""
+        cancel_card = self._replier.build_result_card(
+            content="操作已取消",
+            title="已取消",
+            template="grey",
         )
         try:
-            await task.reply_fn(reply)
+            await self._update_or_reply(task, cancel_card)
         except Exception:
             logger.exception(
                 "SessionWorker[%s]: failed to send cancel reply for task %s",
