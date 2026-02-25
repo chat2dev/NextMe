@@ -13,11 +13,11 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1 import (
     CreateMessageRequest,
     CreateMessageRequestBody,
-    CreateReactionRequest,
-    CreateReactionRequestBody,
+    CreateMessageReactionRequest,
+    CreateMessageReactionRequestBody,
+    Emoji,
     PatchMessageRequest,
     PatchMessageRequestBody,
-    ReactionEmoji,
 )
 
 from nextme.protocol.types import PermOption
@@ -114,11 +114,11 @@ class FeishuReplier:
     async def send_reaction(self, message_id: str, emoji: str = "SMILE") -> None:
         """Add an emoji reaction to the message identified by *message_id*."""
         request = (
-            CreateReactionRequest.builder()
+            CreateMessageReactionRequest.builder()
             .message_id(message_id)
             .request_body(
-                CreateReactionRequestBody.builder()
-                .reaction_type(ReactionEmoji.builder().emoji_type(emoji).build())
+                CreateMessageReactionRequestBody.builder()
+                .reaction_type(Emoji.builder().emoji_type(emoji).build())
                 .build()
             )
             .build()
