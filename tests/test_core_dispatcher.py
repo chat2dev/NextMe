@@ -61,6 +61,8 @@ def mock_replier():
     r.send_text = AsyncMock()
     r.send_card = AsyncMock(return_value="msg_id")
     r.update_card = AsyncMock()
+    r.reply_text = AsyncMock(return_value="thread_msg_id")
+    r.reply_card = AsyncMock(return_value="thread_card_id")
     r.build_help_card = MagicMock(return_value='{"card": "help"}')
     r.build_permission_card = MagicMock(return_value='{"card": "perm"}')
     r.build_progress_card = MagicMock(return_value='{"card": "prog"}')
@@ -558,3 +560,72 @@ async def test_dispatch_restarts_finished_worker(dispatcher):
 
     # Two workers should have been created (one per dispatch after the first finished)
     assert MockWorker.call_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: immediate "ok" thread ack
+# ---------------------------------------------------------------------------
+
+def make_task_with_message_id(content: str, message_id: str, session_id: str = "chat_abc:user_xyz") -> Task:
+    """Create a Task with a Feishu message_id for thread-reply tests."""
+    return Task(
+        id=str(uuid.uuid4()),
+        content=content,
+        session_id=session_id,
+        reply_fn=AsyncMock(),
+        message_id=message_id,
+    )
+
+
+async def test_dispatch_sends_ok_ack_when_message_id_present(dispatcher, mock_replier):
+    """When task has a message_id, an 'ok' thread reply is sent after enqueueing."""
+    task = make_task_with_message_id("hello", message_id="om_src_msg")
+    with patch("nextme.core.dispatcher.SessionWorker") as MockWorker:
+        mock_instance = MagicMock()
+        mock_instance.run = AsyncMock()
+        MockWorker.return_value = mock_instance
+        await dispatcher.dispatch(task)
+    mock_replier.reply_text.assert_awaited_once_with("om_src_msg", "ok")
+
+
+async def test_dispatch_no_ok_ack_when_message_id_empty(dispatcher, mock_replier):
+    """When task has no message_id, no thread ack is sent."""
+    task = make_task("hello")  # message_id defaults to ""
+    with patch("nextme.core.dispatcher.SessionWorker") as MockWorker:
+        mock_instance = MagicMock()
+        mock_instance.run = AsyncMock()
+        MockWorker.return_value = mock_instance
+        await dispatcher.dispatch(task)
+    mock_replier.reply_text.assert_not_awaited()
+
+
+async def test_dispatch_reply_fn_uses_reply_card_when_message_id_set(dispatcher, mock_replier):
+    """reply_fn calls reply_card (not send_card) when task has message_id."""
+    task = make_task_with_message_id("hello", message_id="om_src_msg")
+    with patch("nextme.core.dispatcher.SessionWorker") as MockWorker:
+        mock_instance = MagicMock()
+        mock_instance.run = AsyncMock()
+        MockWorker.return_value = mock_instance
+        await dispatcher.dispatch(task)
+
+    from nextme.protocol.types import Reply, ReplyType
+    reply = Reply(type=ReplyType.CARD, content='{"card": "result"}')
+    await task.reply_fn(reply)
+    mock_replier.reply_card.assert_awaited_with("om_src_msg", '{"card": "result"}')
+    mock_replier.send_card.assert_not_awaited()
+
+
+async def test_dispatch_reply_fn_uses_send_card_when_no_message_id(dispatcher, mock_replier):
+    """reply_fn falls back to send_card when task has no message_id."""
+    task = make_task("hello")
+    with patch("nextme.core.dispatcher.SessionWorker") as MockWorker:
+        mock_instance = MagicMock()
+        mock_instance.run = AsyncMock()
+        MockWorker.return_value = mock_instance
+        await dispatcher.dispatch(task)
+
+    from nextme.protocol.types import Reply, ReplyType
+    reply = Reply(type=ReplyType.CARD, content='{"card": "result"}')
+    await task.reply_fn(reply)
+    mock_replier.send_card.assert_awaited()
+    mock_replier.reply_card.assert_not_awaited()

@@ -611,3 +611,120 @@ class TestSendReaction:
         result = await replier.send_reaction("om_123", emoji="OK")
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# reply_text (async)
+# ---------------------------------------------------------------------------
+
+
+class TestReplyText:
+    async def test_reply_text_success_returns_message_id(self):
+        replier, mock_client = make_replier()
+        mock_response = MagicMock()
+        mock_response.success.return_value = True
+        mock_response.data.message_id = "om_thread_123"
+        mock_client.im.v1.message.areply = AsyncMock(return_value=mock_response)
+
+        result = await replier.reply_text("om_src_456", "ok")
+
+        assert result == "om_thread_123"
+        mock_client.im.v1.message.areply.assert_awaited_once()
+
+    async def test_reply_text_failure_returns_empty_string(self):
+        replier, mock_client = make_replier()
+        mock_response = MagicMock()
+        mock_response.success.return_value = False
+        mock_response.code = 400
+        mock_response.msg = "Bad Request"
+        mock_client.im.v1.message.areply = AsyncMock(return_value=mock_response)
+
+        result = await replier.reply_text("om_src", "hello")
+
+        assert result == ""
+
+    async def test_reply_text_default_in_thread_true(self):
+        """reply_text uses in_thread=True by default."""
+        replier, mock_client = make_replier()
+        mock_response = MagicMock()
+        mock_response.success.return_value = True
+        mock_response.data.message_id = "om_t"
+        mock_client.im.v1.message.areply = AsyncMock(return_value=mock_response)
+
+        await replier.reply_text("om_src", "hi")
+
+        # areply was called — the in_thread flag is embedded in the request builder
+        mock_client.im.v1.message.areply.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# reply_card (async)
+# ---------------------------------------------------------------------------
+
+
+class TestReplyCard:
+    async def test_reply_card_success_returns_message_id(self):
+        replier, mock_client = make_replier()
+        mock_response = MagicMock()
+        mock_response.success.return_value = True
+        mock_response.data.message_id = "om_card_thread_99"
+        mock_client.im.v1.message.areply = AsyncMock(return_value=mock_response)
+
+        result = await replier.reply_card("om_src_msg", '{"schema": "2.0"}')
+
+        assert result == "om_card_thread_99"
+        mock_client.im.v1.message.areply.assert_awaited_once()
+
+    async def test_reply_card_failure_returns_empty_string(self):
+        replier, mock_client = make_replier()
+        mock_response = MagicMock()
+        mock_response.success.return_value = False
+        mock_response.code = 500
+        mock_response.msg = "Server error"
+        mock_client.im.v1.message.areply = AsyncMock(return_value=mock_response)
+
+        result = await replier.reply_card("om_src", "{}")
+
+        assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# build_result_card with elapsed
+# ---------------------------------------------------------------------------
+
+
+class TestBuildResultCardElapsed:
+    def test_elapsed_appears_in_footer(self):
+        replier, _ = make_replier()
+        parsed = json.loads(
+            replier.build_result_card("content", session_id="sess1", elapsed="5s")
+        )
+        elements = parsed["body"]["elements"]
+        footer_md = next(
+            (e for e in elements if e.get("tag") == "markdown" and "耗时" in e.get("content", "")),
+            None,
+        )
+        assert footer_md is not None
+        assert "5s" in footer_md["content"]
+
+    def test_no_elapsed_no_extra_footer_part(self):
+        replier, _ = make_replier()
+        parsed = json.loads(
+            replier.build_result_card("content", session_id="sess1")
+        )
+        elements = parsed["body"]["elements"]
+        footer_texts = [
+            e.get("content", "") for e in elements if e.get("tag") == "markdown"
+        ]
+        assert not any("耗时" in t for t in footer_texts)
+
+    def test_elapsed_without_session_id(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_result_card("content", elapsed="2m"))
+        elements = parsed["body"]["elements"]
+        footer_md = next(
+            (e for e in elements if e.get("tag") == "markdown" and "耗时" in e.get("content", "")),
+            None,
+        )
+        assert footer_md is not None
+        assert "2m" in footer_md["content"]

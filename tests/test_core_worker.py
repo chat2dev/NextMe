@@ -66,6 +66,8 @@ def replier():
     r.send_text = AsyncMock()
     r.send_card = AsyncMock(return_value="msg_123")
     r.update_card = AsyncMock()
+    r.reply_text = AsyncMock(return_value="thread_msg_456")
+    r.reply_card = AsyncMock(return_value="thread_card_789")
     r.build_help_card = MagicMock(return_value='{"card": "help"}')
     r.build_permission_card = MagicMock(return_value='{"card": "perm"}')
     r.build_progress_card = MagicMock(return_value='{"card": "progress"}')
@@ -436,3 +438,82 @@ async def test_execute_task_syncs_actual_id_from_runtime(
     task, replies = make_task("hello")
     await worker._execute_task(task)
     assert session.actual_id == "new-acp-id"
+
+
+# ---------------------------------------------------------------------------
+# Tests: thread-mode progress card and elapsed time
+# ---------------------------------------------------------------------------
+
+async def test_execute_task_uses_reply_card_when_message_id_set(
+    worker, session, replier, acp_registry
+):
+    """When task has message_id, initial progress card is sent via reply_card."""
+    _, mock_runtime = acp_registry
+    task, _ = make_task("hello")
+    task.message_id = "om_src_123"
+    await worker._execute_task(task)
+    replier.reply_card.assert_awaited()
+    # reply_card called for initial progress card; send_card not called
+    replier.send_card.assert_not_awaited()
+
+
+async def test_execute_task_uses_send_card_when_no_message_id(
+    worker, session, replier, acp_registry
+):
+    """When task has no message_id, initial progress card uses send_card fallback."""
+    _, mock_runtime = acp_registry
+    task, _ = make_task("hello")
+    # message_id defaults to ""
+    await worker._execute_task(task)
+    replier.send_card.assert_awaited()
+    replier.reply_card.assert_not_awaited()
+
+
+async def test_on_progress_status_includes_elapsed_time(worker, replier):
+    """Progress card status line includes elapsed time when content is present."""
+    worker._progress_message_id = "msg_123"
+    worker._last_progress_update = 0.0
+    worker._task_start = time.monotonic() - 5  # pretend 5s elapsed
+    worker._progress_buffer = ["some content"]
+    await worker._on_progress("", "")
+    # build_progress_card should be called; check status contains seconds
+    call_args = replier.build_progress_card.call_args
+    status = call_args.kwargs.get("status") or call_args.args[0]
+    assert "s" in status  # elapsed time includes "s" suffix
+
+
+async def test_on_progress_status_includes_tool_and_elapsed(worker, replier):
+    """When tool_name present, status shows tool + elapsed."""
+    worker._progress_message_id = "msg_123"
+    worker._last_progress_update = 0.0
+    worker._task_start = time.monotonic() - 10
+    worker._progress_buffer = []
+    await worker._on_progress("", "bash")
+    call_args = replier.build_progress_card.call_args
+    status = call_args.kwargs.get("status") or call_args.args[0]
+    assert "bash" in status
+    assert "s" in status  # elapsed present
+
+
+def test_format_elapsed_seconds_only():
+    from nextme.core.worker import _format_elapsed
+    assert _format_elapsed(0) == "0s"
+    assert _format_elapsed(59) == "59s"
+
+
+def test_format_elapsed_minutes_and_seconds():
+    from nextme.core.worker import _format_elapsed
+    assert _format_elapsed(60) == "1m"
+    assert _format_elapsed(90) == "1m 30s"
+    assert _format_elapsed(125) == "2m 5s"
+
+
+async def test_send_result_includes_elapsed_in_card(worker, session, replier, acp_registry):
+    """build_result_card is called with an elapsed kwarg when task completes."""
+    _, mock_runtime = acp_registry
+    worker._task_start = time.monotonic() - 3
+    task, _ = make_task("hello")
+    await worker._execute_task(task)
+    call_kwargs = replier.build_result_card.call_args.kwargs
+    assert "elapsed" in call_kwargs
+    assert call_kwargs["elapsed"]  # non-empty elapsed string

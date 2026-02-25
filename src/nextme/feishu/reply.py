@@ -18,6 +18,8 @@ from lark_oapi.api.im.v1 import (
     Emoji,
     PatchMessageRequest,
     PatchMessageRequestBody,
+    ReplyMessageRequest,
+    ReplyMessageRequestBody,
 )
 
 from nextme.protocol.types import PermOption
@@ -135,6 +137,83 @@ class FeishuReplier:
         else:
             logger.debug("send_reaction ok: message_id=%s emoji=%s", message_id, emoji)
 
+    async def reply_text(
+        self, message_id: str, text: str, in_thread: bool = True
+    ) -> str:
+        """Reply to *message_id* with a plain-text message.
+
+        Args:
+            message_id: The Feishu message_id to reply to.
+            text: The text content to send.
+            in_thread: When ``True`` (default), reply appears inside a thread.
+
+        Returns:
+            The new message_id of the sent reply, or ``""`` on failure.
+        """
+        content = json.dumps({"text": text})
+        request = (
+            ReplyMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .msg_type("text")
+                .content(content)
+                .reply_in_thread(in_thread)
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.im.v1.message.areply(request)
+        if not response.success():
+            logger.error(
+                "reply_text failed: message_id=%s code=%s msg=%s",
+                message_id,
+                response.code,
+                response.msg,
+            )
+            return ""
+        new_id: str = response.data.message_id  # type: ignore[union-attr]
+        logger.debug("reply_text -> new message_id=%s", new_id)
+        return new_id
+
+    async def reply_card(
+        self, message_id: str, card_json: str, in_thread: bool = True
+    ) -> str:
+        """Reply to *message_id* with an interactive card.
+
+        Args:
+            message_id: The Feishu message_id to reply to.
+            card_json: The card JSON string.
+            in_thread: When ``True`` (default), reply appears inside a thread.
+
+        Returns:
+            The new message_id of the sent card, or ``""`` on failure.
+        """
+        request = (
+            ReplyMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .msg_type("interactive")
+                .content(card_json)
+                .reply_in_thread(in_thread)
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.im.v1.message.areply(request)
+        if not response.success():
+            logger.error(
+                "reply_card failed: message_id=%s code=%s msg=%s",
+                message_id,
+                response.code,
+                response.msg,
+            )
+            return ""
+        new_id: str = response.data.message_id  # type: ignore[union-attr]
+        logger.debug("reply_card -> new message_id=%s", new_id)
+        return new_id
+
     # ------------------------------------------------------------------
     # Card builders
     # ------------------------------------------------------------------
@@ -171,6 +250,7 @@ class FeishuReplier:
         template: str = "blue",
         reasoning: str = "",
         session_id: str = "",
+        elapsed: str = "",
     ) -> str:
         """Return a card JSON string for the final result."""
         elements: list[dict] = [
@@ -194,6 +274,8 @@ class FeishuReplier:
         footer_parts: list[str] = []
         if session_id:
             footer_parts.append(f"session: {session_id}")
+        if elapsed:
+            footer_parts.append(f"耗时: {elapsed}")
         if footer_parts:
             elements.append({"tag": "hr"})
             elements.append(

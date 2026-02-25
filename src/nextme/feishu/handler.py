@@ -126,6 +126,7 @@ class MessageHandler:
             content=text,
             session_id=session_id,
             reply_fn=_reply_fn,
+            message_id=message_id,
             created_at=datetime.now(),
         )
 

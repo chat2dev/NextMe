@@ -104,12 +104,20 @@ class TaskDispatcher:
 
         # ------------------------------------------------------------------
         # Build a proper reply_fn that sends Feishu messages for this task.
+        # Prefers thread replies (reply_card / reply_text) when the task
+        # carries a message_id; falls back to top-level chat messages.
         # ------------------------------------------------------------------
         async def reply_fn(reply: Reply) -> None:
             if reply.type == ReplyType.CARD:
-                await replier.send_card(chat_id, reply.content)
+                if task.message_id:
+                    await replier.reply_card(task.message_id, reply.content)
+                else:
+                    await replier.send_card(chat_id, reply.content)
             elif reply.type == ReplyType.MARKDOWN:
-                await replier.send_text(chat_id, reply.content)
+                if task.message_id:
+                    await replier.reply_text(task.message_id, reply.content)
+                else:
+                    await replier.send_text(chat_id, reply.content)
             else:
                 # REACTION and FILE are not yet implemented at this layer.
                 logger.warning(
@@ -196,6 +204,18 @@ class TaskDispatcher:
                     chat_id,
                 )
             return
+
+        # Immediately acknowledge receipt with a thread reply so the user
+        # knows their message was received before the worker starts.
+        if task.message_id:
+            try:
+                await replier.reply_text(task.message_id, "ok")
+            except Exception:
+                logger.warning(
+                    "TaskDispatcher: failed to send ack for task %s: ",
+                    task.id,
+                    exc_info=True,
+                )
 
         await self._ensure_worker(session, replier)
 

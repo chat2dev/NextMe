@@ -54,6 +54,18 @@ class Replier(Protocol):
         """Add an emoji reaction to an existing message."""
         ...
 
+    async def reply_text(
+        self, message_id: str, text: str, in_thread: bool = True
+    ) -> str:
+        """Reply to an existing message with plain text.  Returns the new message_id."""
+        ...
+
+    async def reply_card(
+        self, message_id: str, card_json: str, in_thread: bool = True
+    ) -> str:
+        """Reply to an existing message with an interactive card.  Returns the new message_id."""
+        ...
+
     # ------------------------------------------------------------------
     # Sync card builders
     # ------------------------------------------------------------------
@@ -74,6 +86,7 @@ class Replier(Protocol):
         template: str = "blue",
         reasoning: str = "",
         session_id: str = "",
+        elapsed: str = "",
     ) -> str:
         """Return a card JSON string for the final result."""
         ...

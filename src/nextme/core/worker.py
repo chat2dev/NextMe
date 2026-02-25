@@ -37,6 +37,14 @@ from .session import Session
 logger = logging.getLogger(__name__)
 
 
+def _format_elapsed(seconds: int) -> str:
+    """Return a compact human-readable elapsed time string (e.g. '5s', '1m 30s')."""
+    if seconds < 60:
+        return f"{seconds}s"
+    m, s = divmod(seconds, 60)
+    return f"{m}m {s}s" if s else f"{m}m"
+
+
 class SessionWorker:
     """Serially consume tasks from a :class:`~nextme.core.session.Session`'s queue.
 
@@ -66,6 +74,8 @@ class SessionWorker:
         self._progress_message_id: Optional[str] = None
         self._progress_buffer: list[str] = []
         self._last_progress_update: float = 0.0
+        self._task_start: float = 0.0
+        self._active_message_id: str = ""  # message_id of the current task
 
     # ------------------------------------------------------------------
     # Main loop
@@ -152,8 +162,11 @@ class SessionWorker:
         self._progress_message_id = None
         self._progress_buffer = []
         self._last_progress_update = 0.0
+        self._task_start = time.monotonic()
+        self._active_message_id = task.message_id
 
-        # Step 1 — Send initial progress card.
+        # Step 1 — Send initial progress card as a thread reply so it appears
+        # inline with the user's original message.
         chat_id = self._session.context_id.split(":")[0]
         initial_card = self._replier.build_progress_card(
             status="",
@@ -161,9 +174,14 @@ class SessionWorker:
             title="思考中...",
         )
         try:
-            self._progress_message_id = await self._replier.send_card(
-                chat_id, initial_card
-            )
+            if task.message_id:
+                self._progress_message_id = await self._replier.reply_card(
+                    task.message_id, initial_card
+                )
+            else:
+                self._progress_message_id = await self._replier.send_card(
+                    chat_id, initial_card
+                )
             logger.debug(
                 "SessionWorker[%s]: sent initial progress card message_id=%s",
                 self._session.context_id,
@@ -269,10 +287,16 @@ class SessionWorker:
             return
 
         accumulated = "".join(self._progress_buffer)
-        status_text = f"工具调用: {tool_name}" if tool_name else ""
 
-        if not accumulated and not status_text:
+        if not accumulated and not tool_name:
             return
+
+        elapsed_s = int(now - self._task_start)
+        elapsed_str = _format_elapsed(elapsed_s)
+        if tool_name:
+            status_text = f"工具调用: {tool_name} · {elapsed_str}"
+        else:
+            status_text = elapsed_str
 
         self._last_progress_update = now
 
@@ -373,11 +397,13 @@ class SessionWorker:
 
     async def _send_result(self, task: Task, content: str) -> None:
         """Send the final result card for *task*."""
+        elapsed_s = int(time.monotonic() - self._task_start)
         result_card = self._replier.build_result_card(
             content=content or "(无输出)",
             title="完成",
             template="blue",
             session_id=self._session.context_id,
+            elapsed=_format_elapsed(elapsed_s),
         )
         reply = Reply(
             type=ReplyType.CARD,
