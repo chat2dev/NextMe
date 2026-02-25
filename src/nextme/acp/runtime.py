@@ -152,11 +152,16 @@ class ACPRuntime:
             self._cwd,
         )
 
-        # Build the child environment following open-jieli's pattern:
-        # inherit the full parent env, add CI=true + TERM=xterm.
-        # Do NOT strip or modify any vars — cc-acp handles auth itself via
-        # ANTHROPIC_AUTH_TOKEN (Claude Code subscription) or ANTHROPIC_API_KEY.
-        child_env = dict(os.environ)
+        # Build the child environment: inherit full env, strip vars that cause
+        # nested-session errors, then add CI=true + TERM=xterm.
+        child_env = {
+            k: v for k, v in os.environ.items()
+            if k not in _STRIP_ENV_EXACT and not k.startswith(_STRIP_ENV_PREFIX)
+        }
+        # Map ANTHROPIC_AUTH_TOKEN (OAuth) → ANTHROPIC_API_KEY for cc-acp SDK.
+        auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        if auth_token and "ANTHROPIC_API_KEY" not in child_env:
+            child_env["ANTHROPIC_API_KEY"] = auth_token
         child_env["CI"] = "true"
         child_env.setdefault("TERM", "xterm")
 

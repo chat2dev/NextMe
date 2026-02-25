@@ -151,12 +151,7 @@ class FeishuReplier:
         ]
         if status:
             elements.append(
-                {
-                    "tag": "note",
-                    "elements": [
-                        {"tag": "plain_text", "content": status},
-                    ],
-                }
+                {"tag": "markdown", "content": f"_{status}_"}
             )
         card = {
             "schema": "2.0",
@@ -202,12 +197,7 @@ class FeishuReplier:
         if footer_parts:
             elements.append({"tag": "hr"})
             elements.append(
-                {
-                    "tag": "note",
-                    "elements": [
-                        {"tag": "plain_text", "content": " | ".join(footer_parts)},
-                    ],
-                }
+                {"tag": "markdown", "content": " | ".join(footer_parts)}
             )
         card = {
             "schema": "2.0",
@@ -258,12 +248,7 @@ class FeishuReplier:
         if session_id:
             elements.append({"tag": "hr"})
             elements.append(
-                {
-                    "tag": "note",
-                    "elements": [
-                        {"tag": "plain_text", "content": f"session: {session_id}"},
-                    ],
-                }
+                {"tag": "markdown", "content": f"session: {session_id}"}
             )
 
         card = {

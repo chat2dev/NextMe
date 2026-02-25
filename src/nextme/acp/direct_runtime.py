@@ -170,7 +170,12 @@ class DirectClaudeRuntime:
 
         # Inherit full env — the locally installed claude already handles
         # ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL correctly.
-        env = dict(os.environ)
+        # Strip CLAUDECODE and CLAUDE_CODE_* to prevent "nested session" errors
+        # when NextMe itself is running inside a Claude Code terminal.
+        env = {
+            k: v for k, v in os.environ.items()
+            if k != "CLAUDECODE" and not k.startswith("CLAUDE_CODE_")
+        }
         env["CI"] = "true"
         env.setdefault("TERM", "xterm")
 

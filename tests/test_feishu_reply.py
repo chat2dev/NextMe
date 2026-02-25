@@ -64,9 +64,8 @@ class TestBuildProgressCard:
         replier, _ = make_replier()
         parsed = json.loads(replier.build_progress_card("Step 1/3", "content"))
         elements = parsed["body"]["elements"]
-        note_elements = [e for e in elements if e.get("tag") == "note"]
-        assert len(note_elements) == 1
-        assert note_elements[0]["elements"][0]["content"] == "Step 1/3"
+        status_elements = [e for e in elements if e.get("tag") == "markdown" and "Step 1/3" in e.get("content", "")]
+        assert len(status_elements) == 1
 
     def test_no_note_element_when_status_empty(self):
         replier, _ = make_replier()
@@ -154,9 +153,8 @@ class TestBuildResultCard:
         replier, _ = make_replier()
         parsed = json.loads(replier.build_result_card("content", session_id="sess-abc"))
         elements = parsed["body"]["elements"]
-        note_elements = [e for e in elements if e.get("tag") == "note"]
-        assert len(note_elements) == 1
-        assert "sess-abc" in note_elements[0]["elements"][0]["content"]
+        footer_elements = [e for e in elements if e.get("tag") == "markdown" and "sess-abc" in e.get("content", "")]
+        assert len(footer_elements) == 1
 
     def test_session_id_adds_hr_before_footer(self):
         replier, _ = make_replier()
@@ -165,8 +163,8 @@ class TestBuildResultCard:
         tags = [e.get("tag") for e in elements]
         assert "hr" in tags
         hr_idx = tags.index("hr")
-        note_idx = tags.index("note")
-        assert hr_idx < note_idx
+        footer_idx = next(i for i, e in enumerate(elements) if e.get("tag") == "markdown" and "sess-abc" in e.get("content", ""))
+        assert hr_idx < footer_idx
 
     def test_no_hr_or_note_when_no_reasoning_and_no_session(self):
         replier, _ = make_replier()
@@ -185,7 +183,8 @@ class TestBuildResultCard:
         tags = [e.get("tag") for e in elements]
         assert tags.count("hr") == 2
         assert "collapsible_panel" in tags
-        assert "note" in tags
+        footer_elements = [e for e in elements if e.get("tag") == "markdown" and "s1" in e.get("content", "")]
+        assert len(footer_elements) >= 1
 
     def test_schema_is_2_0(self):
         replier, _ = make_replier()
@@ -295,9 +294,8 @@ class TestBuildPermissionCard:
             replier.build_permission_card("desc", opts, session_id="sess-abc")
         )
         elements = parsed["body"]["elements"]
-        note_elements = [e for e in elements if e.get("tag") == "note"]
-        assert len(note_elements) == 1
-        assert "sess-abc" in note_elements[0]["elements"][0]["content"]
+        footer_elements = [e for e in elements if e.get("tag") == "markdown" and "sess-abc" in e.get("content", "")]
+        assert len(footer_elements) == 1
 
     def test_no_footer_note_when_no_session_id(self):
         replier, _ = make_replier()
