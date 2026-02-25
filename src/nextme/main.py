@@ -437,8 +437,8 @@ def main() -> None:
     up_parser.add_argument(
         "--executor",
         "-e",
-        default="claude-code-acp",
-        help="ACP executor command",
+        default="claude",
+        help="Agent executor command (default: 'claude')",
     )
     up_parser.add_argument(
         "--log-level",

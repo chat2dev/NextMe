@@ -18,22 +18,33 @@ import logging
 from typing import Optional
 
 from ..config.schema import Settings
+from .direct_runtime import DirectClaudeRuntime
 from .runtime import ACPRuntime
 
 logger = logging.getLogger(__name__)
 
 _JANITOR_INTERVAL_SECONDS = 60
 
+# Executor names that use the cc-acp JSON-RPC protocol.  Any other name is
+# treated as a direct ``claude`` CLI executor (→ DirectClaudeRuntime).
+_ACP_EXECUTOR_NAMES: frozenset[str] = frozenset({"claude-code-acp", "cc-acp"})
+
+_AnyRuntime = ACPRuntime | DirectClaudeRuntime
+
 
 class ACPRuntimeRegistry:
-    """Thread-safe (asyncio-safe) registry of active :class:`ACPRuntime` instances.
+    """Thread-safe (asyncio-safe) registry of active runtime instances.
+
+    Holds either :class:`ACPRuntime` (cc-acp protocol) or
+    :class:`DirectClaudeRuntime` (direct claude CLI) depending on the
+    executor name passed to :meth:`get_or_create`.
 
     Intended to be used as a module-level singleton, though nothing prevents
     creating multiple instances for testing.
     """
 
     def __init__(self) -> None:
-        self._runtimes: dict[str, ACPRuntime] = {}
+        self._runtimes: dict[str, _AnyRuntime] = {}
         self._lock: asyncio.Lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -45,43 +56,61 @@ class ACPRuntimeRegistry:
         session_id: str,
         cwd: str,
         settings: Settings,
-        executor: str = "claude-code-acp",
-    ) -> ACPRuntime:
-        """Return the existing :class:`ACPRuntime` for *session_id*, or create one.
+        executor: str = "claude",
+    ) -> _AnyRuntime:
+        """Return the existing runtime for *session_id*, or create one.
 
-        This method is **synchronous** and does *not* start the subprocess.
-        Call :meth:`~nextme.acp.runtime.ACPRuntime.ensure_ready` on the
-        returned runtime before sending prompts.
+        Selects the runtime implementation based on *executor*:
+
+        * ``"claude-code-acp"`` / ``"cc-acp"`` → :class:`ACPRuntime`
+          (JSON-RPC 2.0 over cc-acp subprocess).
+        * Any other value → :class:`DirectClaudeRuntime`
+          (direct ``claude --print --output-format stream-json`` invocation).
+
+        This method is **synchronous** and does *not* start any subprocess.
+        Call :meth:`ensure_ready` on the returned runtime before sending prompts.
 
         Args:
             session_id: Unique bot-level session identifier.
             cwd: Working directory passed to the subprocess.
             settings: Application settings used by the runtime.
-            executor: ACP subprocess command (default ``"claude-code-acp"``).
+            executor: Executor command.  Defaults to ``"claude"``.
 
         Returns:
-            An :class:`ACPRuntime` instance (possibly freshly created).
+            A runtime instance (possibly freshly created).
         """
         if session_id not in self._runtimes:
             logger.info(
-                "ACPRuntimeRegistry: creating runtime for session %r", session_id
+                "ACPRuntimeRegistry: creating %s runtime for session %r",
+                "ACPRuntime" if executor in _ACP_EXECUTOR_NAMES else "DirectClaudeRuntime",
+                session_id,
             )
-            self._runtimes[session_id] = ACPRuntime(
-                session_id=session_id,
-                cwd=cwd,
-                settings=settings,
-                executor=executor,
-            )
+            runtime: _AnyRuntime
+            if executor in _ACP_EXECUTOR_NAMES:
+                runtime = ACPRuntime(
+                    session_id=session_id,
+                    cwd=cwd,
+                    settings=settings,
+                    executor=executor,
+                )
+            else:
+                runtime = DirectClaudeRuntime(
+                    session_id=session_id,
+                    cwd=cwd,
+                    settings=settings,
+                    executor=executor,
+                )
+            self._runtimes[session_id] = runtime
         return self._runtimes[session_id]
 
-    def get(self, session_id: str) -> Optional[ACPRuntime]:
+    def get(self, session_id: str) -> Optional[_AnyRuntime]:
         """Return the runtime for *session_id*, or ``None`` if not registered.
 
         Args:
             session_id: Unique bot-level session identifier.
 
         Returns:
-            The :class:`ACPRuntime` instance, or ``None``.
+            The runtime instance, or ``None``.
         """
         return self._runtimes.get(session_id)
 

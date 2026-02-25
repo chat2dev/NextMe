@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nextme.acp.direct_runtime import DirectClaudeRuntime
 from nextme.acp.janitor import ACPJanitor, ACPRuntimeRegistry
+from nextme.acp.runtime import ACPRuntime
 from nextme.config.schema import Settings
 
 
@@ -154,6 +156,54 @@ class TestACPRuntimeRegistry:
         # Should complete without raising
         await registry.stop_all()
         assert len(registry) == 0
+
+    def test_get_or_create_uses_direct_runtime_for_claude_executor(self, tmp_path):
+        """executor='claude' (default) → DirectClaudeRuntime."""
+        registry = ACPRuntimeRegistry()
+        settings = make_settings()
+        runtime = registry.get_or_create(
+            session_id="s-direct",
+            cwd=str(tmp_path),
+            settings=settings,
+            executor="claude",
+        )
+        assert isinstance(runtime, DirectClaudeRuntime)
+
+    def test_get_or_create_uses_acp_runtime_for_cc_acp_executor(self, tmp_path):
+        """executor='cc-acp' → ACPRuntime."""
+        registry = ACPRuntimeRegistry()
+        settings = make_settings()
+        runtime = registry.get_or_create(
+            session_id="s-acp",
+            cwd=str(tmp_path),
+            settings=settings,
+            executor="cc-acp",
+        )
+        assert isinstance(runtime, ACPRuntime)
+
+    def test_get_or_create_uses_acp_runtime_for_claude_code_acp_executor(self, tmp_path):
+        """executor='claude-code-acp' → ACPRuntime."""
+        registry = ACPRuntimeRegistry()
+        settings = make_settings()
+        runtime = registry.get_or_create(
+            session_id="s-acp2",
+            cwd=str(tmp_path),
+            settings=settings,
+            executor="claude-code-acp",
+        )
+        assert isinstance(runtime, ACPRuntime)
+
+    def test_get_or_create_uses_direct_runtime_for_custom_executor(self, tmp_path):
+        """Any non-ACP executor path → DirectClaudeRuntime."""
+        registry = ACPRuntimeRegistry()
+        settings = make_settings()
+        runtime = registry.get_or_create(
+            session_id="s-custom",
+            cwd=str(tmp_path),
+            settings=settings,
+            executor="/usr/local/bin/claude",
+        )
+        assert isinstance(runtime, DirectClaudeRuntime)
 
 
 # ---------------------------------------------------------------------------

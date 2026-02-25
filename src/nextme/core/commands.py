@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import logging
 
-from ..acp.runtime import ACPRuntime
 from ..config.schema import AppConfig, Settings
 from ..protocol.types import TaskStatus
-from .interfaces import Replier
+from .interfaces import AgentRuntime, Replier
 from .session import Session, UserContext
 
 logger = logging.getLogger(__name__)
@@ -38,18 +37,18 @@ HELP_COMMANDS: list[tuple[str, str]] = [
 
 async def handle_new(
     session: Session,
-    runtime: ACPRuntime | None,
+    runtime: AgentRuntime | None,
     replier: Replier,
     chat_id: str,
 ) -> None:
-    """Reset the ACP session, clearing conversation history.
+    """Reset the agent session, clearing conversation history.
 
-    Clears ``session.actual_id`` and calls ``ACPRuntime.reset_session()`` if a
+    Clears ``session.actual_id`` and calls ``reset_session()`` if a
     runtime exists.  Sends a confirmation text message.
 
     Args:
         session: The active session to reset.
-        runtime: The associated :class:`~nextme.acp.runtime.ACPRuntime`, if any.
+        runtime: The associated agent runtime, if any.
         replier: Feishu message sender.
         chat_id: Target chat.
     """

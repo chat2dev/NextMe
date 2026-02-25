@@ -26,6 +26,7 @@ from nextme.feishu.reply import FeishuReplier
 from nextme.feishu.client import FeishuClient
 from nextme.feishu.dedup import MessageDedup
 from nextme.feishu.handler import MessageHandler
+from nextme.acp.direct_runtime import DirectClaudeRuntime
 from nextme.acp.runtime import ACPRuntime
 from nextme.protocol.types import PermOption
 
@@ -83,6 +84,14 @@ def make_feishu_client(tmp_path) -> FeishuClient:
 
 def make_acp_runtime(tmp_path) -> ACPRuntime:
     return ACPRuntime(
+        session_id="oc_chat_test:ou_user_test",
+        cwd=str(tmp_path),
+        settings=Settings(),
+    )
+
+
+def make_direct_runtime(tmp_path) -> DirectClaudeRuntime:
+    return DirectClaudeRuntime(
         session_id="oc_chat_test:ou_user_test",
         cwd=str(tmp_path),
         settings=Settings(),
@@ -245,6 +254,53 @@ class TestAgentRuntimeProtocol:
     @pytest.mark.asyncio
     async def test_reset_session_does_not_raise_when_idle(self, tmp_path):
         r = make_acp_runtime(tmp_path)
+        await r.reset_session()
+        assert r.actual_id is None
+
+
+# ---------------------------------------------------------------------------
+# TestDirectRuntimeProtocol
+# ---------------------------------------------------------------------------
+
+
+class TestDirectRuntimeProtocol:
+    """DirectClaudeRuntime structurally satisfies the AgentRuntime Protocol."""
+
+    def test_direct_runtime_isinstance_agent_runtime(self, tmp_path):
+        r = make_direct_runtime(tmp_path)
+        assert isinstance(r, AgentRuntime)
+
+    def test_is_running_false_before_execute(self, tmp_path):
+        r = make_direct_runtime(tmp_path)
+        assert r.is_running is False
+
+    def test_last_access_is_datetime(self, tmp_path):
+        r = make_direct_runtime(tmp_path)
+        assert isinstance(r.last_access, datetime)
+
+    def test_actual_id_is_none_before_execute(self, tmp_path):
+        r = make_direct_runtime(tmp_path)
+        assert r.actual_id is None
+
+    def test_async_methods_are_coroutine_functions(self, tmp_path):
+        r = make_direct_runtime(tmp_path)
+        for method_name in ("ensure_ready", "execute", "cancel", "reset_session", "stop"):
+            assert inspect.iscoroutinefunction(getattr(r, method_name)), method_name
+
+    @pytest.mark.asyncio
+    async def test_cancel_does_not_raise_when_idle(self, tmp_path):
+        r = make_direct_runtime(tmp_path)
+        await r.cancel()
+
+    @pytest.mark.asyncio
+    async def test_stop_does_not_raise_when_idle(self, tmp_path):
+        r = make_direct_runtime(tmp_path)
+        await r.stop()
+
+    @pytest.mark.asyncio
+    async def test_reset_session_clears_actual_id(self, tmp_path):
+        r = make_direct_runtime(tmp_path)
+        r._actual_id = "existing"
         await r.reset_session()
         assert r.actual_id is None
 
