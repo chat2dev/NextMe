@@ -3,16 +3,27 @@
 Each Session owns exactly one ACPRuntime.  The runtime:
 
 * Launches the ACP subprocess on first use (``ensure_ready``).
+* Negotiates capabilities via JSON-RPC ``initialize``.
 * Sends prompts and streams responses (``execute``).
-* Handles permission round-trips inline.
+* Handles permission round-trips inline via ``session/request_permission``.
 * Can cancel an in-flight task (``cancel``).
 * Gracefully terminates the subprocess (``stop``).
+
+Protocol
+--------
+cc-acp speaks **JSON-RPC 2.0** over stdin/stdout (ndjson).
+
+Inbound message kinds (classified by :func:`~nextme.acp.protocol.classify`):
+    ``"response"``        — matched response to one of our outbound requests
+    ``"notification"``    — push event (``session/update``) with no id
+    ``"server_request"``  — cc-acp calling the bot (``session/request_permission``)
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
@@ -26,17 +37,27 @@ from ..protocol.types import (
 )
 from .client import ACPClient
 from .protocol import (
-    CancelMsg,
-    LoadSessionMsg,
-    NewSessionMsg,
-    PermissionResponseMsg,
-    PromptMsg,
+    cancel_params,
+    classify,
+    initialize_params,
+    load_session_params,
+    new_session_params,
+    parse_permission_request,
+    permission_cancel_result,
+    permission_response_result,
+    prompt_params,
 )
 
 logger = logging.getLogger(__name__)
 
-_READY_TIMEOUT_SECONDS = 30
+_INIT_TIMEOUT_SECONDS = 30
+_SESSION_TIMEOUT_SECONDS = 15
 _STOP_GRACEFUL_TIMEOUT_SECONDS = 5
+
+# Environment variable prefixes/names that must not be inherited by the ACP subprocess.
+# CLAUDECODE / CLAUDE_CODE_* carry session state from the outer Claude Code process
+# and cause nested-session errors or unexpected behaviour inside the inner claude.
+_STRIP_ENV_PREFIXES: tuple[str, ...] = ("CLAUDE_CODE_", "CLAUDECODE")
 
 
 class ACPRuntime:
@@ -61,21 +82,20 @@ class ACPRuntime:
         self._settings = settings
         self._executor = executor
 
-        # ACP's own session id (returned in ``session_created`` messages).
+        # ACP's own session id (returned in ``session/new`` response).
         self._actual_id: Optional[str] = None
 
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._client: Optional[ACPClient] = None
 
-        # Tracks the background task that drains stderr.
+        # Background task that drains stderr.
         self._stderr_drain_task: Optional[asyncio.Task] = None
-
-        # A single asyncio.Queue used to multiplex ACP messages to the
-        # current ``execute`` call.  Replaced on every ``execute`` call.
-        self._msg_queue: Optional[asyncio.Queue] = None
 
         # Background reader task that feeds _msg_queue.
         self._reader_task: Optional[asyncio.Task] = None
+
+        # Single queue shared by all messages from cc-acp.
+        self._msg_queue: Optional[asyncio.Queue] = None
 
         self._last_access: datetime = datetime.now()
         self._ready: bool = False
@@ -87,10 +107,7 @@ class ACPRuntime:
     @property
     def is_running(self) -> bool:
         """True while the subprocess is alive."""
-        return (
-            self._proc is not None
-            and self._proc.returncode is None
-        )
+        return self._proc is not None and self._proc.returncode is None
 
     @property
     def last_access(self) -> datetime:
@@ -99,7 +116,7 @@ class ACPRuntime:
 
     @property
     def actual_id(self) -> Optional[str]:
-        """The ACP-assigned session id (set after first ``session_created``)."""
+        """The ACP-assigned session id (set after first ``session/new``)."""
         return self._actual_id
 
     # ------------------------------------------------------------------
@@ -107,13 +124,12 @@ class ACPRuntime:
     # ------------------------------------------------------------------
 
     async def ensure_ready(self) -> None:
-        """Start the subprocess if not running; wait for the ``ready`` message.
+        """Start the subprocess if not running; negotiate via ``initialize``.
 
-        Idempotent: calling it when the subprocess is already live is a no-op.
+        Idempotent: no-op when the subprocess is already live and ready.
 
         Raises:
-            RuntimeError: If the subprocess fails to send ``ready`` within
-                :data:`_READY_TIMEOUT_SECONDS`.
+            RuntimeError: If initialization times out or fails.
         """
         if self._ready and self.is_running:
             return
@@ -125,59 +141,85 @@ class ACPRuntime:
             self._cwd,
         )
 
+        # Build a minimal, safe child environment:
+        #
+        # We do NOT inherit the full parent env because it contains several vars that
+        # break the inner claude process:
+        #   • CLAUDECODE / CLAUDE_CODE_* — carry outer-session state, cause
+        #     "nested session" errors.
+        #   • ANTHROPIC_AUTH_TOKEN — an OAuth-style token that claude interprets as an
+        #     auth override and rejects (exits code 1).
+        #
+        # Instead we pass only the subset that cc-acp and claude actually need:
+        #   • PATH / HOME / USER / SHELL / TMPDIR / LANG / TERM — basic POSIX env.
+        #   • ANTHROPIC_* — API endpoint and credentials (AUTH_TOKEN promoted to API_KEY).
+        #   • CI=true — disables interactive/TTY prompts in claude.
+        #
+        # Additional vars from the parent can be allowlisted below if needed.
+        _INHERIT = {
+            "PATH", "HOME", "USER", "SHELL", "LOGNAME",
+            "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
+            "TERM", "COLORTERM", "COLORFGBG",
+        }
+        child_env: dict[str, str] = {
+            k: v for k, v in os.environ.items() if k in _INHERIT
+        }
+        child_env["CI"] = "true"
+        child_env.setdefault("TERM", "xterm")
+
+        # Pass the Anthropic base URL (for custom proxies).
+        if "ANTHROPIC_BASE_URL" in os.environ:
+            child_env["ANTHROPIC_BASE_URL"] = os.environ["ANTHROPIC_BASE_URL"]
+
+        # Determine the API key: prefer ANTHROPIC_API_KEY, fall back to AUTH_TOKEN.
+        api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        if api_key:
+            child_env["ANTHROPIC_API_KEY"] = api_key
+
         self._proc = await asyncio.create_subprocess_exec(
             self._executor,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self._cwd,
+            env=child_env,
             start_new_session=True,  # process group isolation
         )
 
         self._client = ACPClient(self._proc)
         self._ready = False
-
-        # Start the persistent stdout reader that feeds the message queue.
         self._msg_queue = asyncio.Queue()
+
         self._reader_task = asyncio.create_task(
             self._run_reader(), name=f"acp-reader-{self._session_id}"
         )
-
-        # Drain stderr in the background so the pipe never blocks.
         self._stderr_drain_task = asyncio.create_task(
             self._drain_stderr(), name=f"acp-stderr-{self._session_id}"
         )
 
-        # Wait for the ready message.
+        # Negotiate capabilities.
         try:
             await asyncio.wait_for(
-                self._wait_for_ready(), timeout=_READY_TIMEOUT_SECONDS
+                self._do_initialize(), timeout=_INIT_TIMEOUT_SECONDS
             )
         except asyncio.TimeoutError:
             await self.stop()
             raise RuntimeError(
-                f"ACPRuntime[{self._session_id}]: timed out waiting for 'ready' "
-                f"after {_READY_TIMEOUT_SECONDS}s"
+                f"ACPRuntime[{self._session_id}]: initialize timed out after {_INIT_TIMEOUT_SECONDS}s"
             )
 
         logger.info("ACPRuntime[%s]: subprocess is ready", self._session_id)
 
-    async def _wait_for_ready(self) -> None:
-        """Block until a ``ready`` message arrives on the queue."""
-        assert self._msg_queue is not None
-        while True:
-            msg = await self._msg_queue.get()
-            if isinstance(msg, Exception):
-                raise msg
-            if msg.get("type") == "ready":
-                self._ready = True
-                return
-            # Other messages before ready are unexpected but not fatal.
-            logger.debug(
-                "ACPRuntime[%s]: received %r before ready, ignoring",
-                self._session_id,
-                msg.get("type"),
-            )
+    async def _do_initialize(self) -> None:
+        """Send ``initialize`` and wait for the matching response."""
+        assert self._client is not None
+        req_id = await self._client.send_request("initialize", initialize_params())
+        resp = await self._wait_response(req_id, timeout=_INIT_TIMEOUT_SECONDS)
+        proto = resp.get("protocolVersion", "?")
+        logger.debug(
+            "ACPRuntime[%s]: initialized, protocolVersion=%s", self._session_id, proto
+        )
+        self._ready = True
 
     # ------------------------------------------------------------------
     # Execute
@@ -189,29 +231,28 @@ class ACPRuntime:
         on_progress: Callable[[str, str], Awaitable[None]],
         on_permission: Callable[[PermissionRequest], Awaitable[PermissionChoice]],
     ) -> str:
-        """Send *task* to ACP and stream responses until ``done`` or ``error``.
+        """Send *task* to ACP and stream responses until ``session/prompt`` completes.
 
         Flow
         ----
-        1. Ensure the subprocess is running (``ensure_ready``).
-        2. Send ``load_session`` (if a prior ACP session id exists) or
-           ``new_session`` (first call or after ``reset_session``).
-        3. Send a ``prompt`` message with the task content.
-        4. Stream messages from the queue:
+        1. ``ensure_ready`` — start / verify subprocess.
+        2. ``session/new`` or ``session/load`` — create / resume Claude session.
+        3. ``session/prompt`` — submit the task content.
+        4. Process ``session/update`` notifications:
 
-           * ``session_created`` — record the ACP session id.
-           * ``content_delta``   — accumulate text; call ``on_progress``
+           * ``agent_message_chunk``  — accumulate text; call ``on_progress``
              (debounced by ``settings.progress_debounce_seconds``).
-           * ``tool_use``        — call ``on_progress`` with the tool name.
-           * ``permission_request`` — call ``on_permission``, then send a
-             ``permission_response``.
-           * ``done``            — return accumulated / final content.
-           * ``error``           — raise ``RuntimeError``.
+           * ``tool_call``            — call ``on_progress`` with the tool name.
+           * ``agent_thought_chunk``  — silently accumulated (not shown to user).
+
+        5. Handle ``session/request_permission`` inbound server requests
+           by calling ``on_permission`` and sending the chosen response.
+        6. When the ``session/prompt`` response arrives → return final content.
 
         Args:
             task: The Task whose ``content`` is sent as the prompt.
             on_progress: Async callback ``(delta: str, tool_name: str) -> None``
-                         invoked on content deltas and tool-use events.
+                         called on content deltas and tool-use events.
             on_permission: Async callback that receives a
                            :class:`~nextme.protocol.types.PermissionRequest`
                            and must return a
@@ -221,7 +262,7 @@ class ACPRuntime:
             The final accumulated text content from ACP.
 
         Raises:
-            RuntimeError: On ACP-reported errors or subprocess failure.
+            RuntimeError: On ACP errors or subprocess failure.
         """
         await self.ensure_ready()
 
@@ -230,29 +271,39 @@ class ACPRuntime:
 
         self._last_access = datetime.now()
 
-        # --- Step 1-2: session setup -------------------------------------
+        # --- Step 1: create or resume session ----------------------------
         if self._actual_id:
+            load_id = await self._client.send_request(
+                "session/load",
+                load_session_params(self._actual_id, self._cwd),
+            )
+            await self._wait_response(load_id, timeout=_SESSION_TIMEOUT_SECONDS)
             logger.debug(
-                "ACPRuntime[%s]: loading existing ACP session %r",
+                "ACPRuntime[%s]: loaded ACP session %r",
                 self._session_id,
                 self._actual_id,
             )
-            await self._client.send(LoadSessionMsg(session_id=self._actual_id))
         else:
-            logger.debug(
-                "ACPRuntime[%s]: creating new ACP session", self._session_id
+            new_id = await self._client.send_request(
+                "session/new",
+                new_session_params(self._cwd),
             )
-            await self._client.send(
-                NewSessionMsg(session_id=self._session_id, cwd=self._cwd)
+            resp = await self._wait_response(new_id, timeout=_SESSION_TIMEOUT_SECONDS)
+            self._actual_id = resp.get("sessionId") or resp.get("session_id") or ""
+            logger.debug(
+                "ACPRuntime[%s]: created ACP session %r",
+                self._session_id,
+                self._actual_id,
             )
 
-        # --- Step 3: send prompt -----------------------------------------
-        await self._client.send(
-            PromptMsg(session_id=self._session_id, content=task.content)
+        # --- Step 2: send prompt -----------------------------------------
+        prompt_req_id = await self._client.send_request(
+            "session/prompt",
+            prompt_params(self._actual_id or "", task.content),
         )
 
-        # --- Step 4: stream responses ------------------------------------
-        accumulated_content: list[str] = []
+        # --- Step 3: stream messages until the prompt response -----------
+        accumulated: list[str] = []
         pending_delta: list[str] = []
         last_progress_time: float = 0.0
         debounce: float = self._settings.progress_debounce_seconds
@@ -267,156 +318,201 @@ class ACPRuntime:
                     await on_progress(combined, tool_name)
                 except Exception as exc:
                     logger.warning(
-                        "ACPRuntime[%s]: on_progress callback raised: %s",
-                        self._session_id,
-                        exc,
+                        "ACPRuntime[%s]: on_progress raised: %s", self._session_id, exc
                     )
 
+        timeout_secs = task.timeout.total_seconds()
+
         while True:
-            # Respect task cancellation flag.
             if task.canceled:
                 await self.cancel()
-                return "".join(accumulated_content)
+                return "".join(accumulated)
 
             try:
                 msg = await asyncio.wait_for(
-                    self._msg_queue.get(),
-                    timeout=task.timeout.total_seconds(),
+                    self._msg_queue.get(), timeout=timeout_secs
                 )
             except asyncio.TimeoutError:
                 raise RuntimeError(
-                    f"ACPRuntime[{self._session_id}]: timed out waiting for ACP "
-                    f"response after {task.timeout}"
+                    f"ACPRuntime[{self._session_id}]: timed out waiting for "
+                    f"prompt response after {task.timeout}"
                 )
 
             if isinstance(msg, Exception):
                 raise RuntimeError(
-                    f"ACPRuntime[{self._session_id}]: subprocess error: {msg}"
+                    f"ACPRuntime[{self._session_id}]: reader error: {msg}"
                 ) from msg
 
-            msg_type: str = msg.get("type", "")
+            kind = classify(msg)
 
-            if msg_type == "session_created":
-                self._actual_id = msg.get("session_id") or self._actual_id
-                logger.debug(
-                    "ACPRuntime[%s]: ACP session_id set to %r",
-                    self._session_id,
-                    self._actual_id,
-                )
+            # --- JSON-RPC response to one of our requests ----------------
+            if kind == "response":
+                msg_id: int = msg.get("id", -1)
 
-            elif msg_type == "content_delta":
-                delta: str = msg.get("delta") or msg.get("content") or ""
-                accumulated_content.append(delta)
-                pending_delta.append(delta)
-
-                now = time.monotonic()
-                if (now - last_progress_time) >= debounce:
+                if msg_id == prompt_req_id:
+                    # Final response for the prompt — done.
                     await _flush_progress()
-
-            elif msg_type == "tool_use":
-                tool_name: str = msg.get("name") or msg.get("tool_name") or ""
-                # Flush any accumulated delta first, then emit the tool event.
-                await _flush_progress(tool_name=tool_name)
-
-            elif msg_type == "permission_request":
-                # Flush progress before pausing for user input.
-                await _flush_progress()
-
-                request_id: str = msg.get("request_id", "")
-                description: str = msg.get("description", "")
-                raw_options: list = msg.get("options") or []
-
-                perm_options: list[PermOption] = [
-                    PermOption(
-                        index=opt.get("index", i + 1),
-                        label=opt.get("label", ""),
-                        description=opt.get("description", ""),
+                    if "error" in msg:
+                        err_msg = (msg["error"] or {}).get("message", "unknown ACP error")
+                        raise RuntimeError(
+                            f"ACPRuntime[{self._session_id}]: prompt error: {err_msg}"
+                        )
+                    final = "".join(accumulated)
+                    logger.debug(
+                        "ACPRuntime[%s]: prompt done (len=%d)", self._session_id, len(final)
                     )
-                    for i, opt in enumerate(raw_options)
-                ]
-
-                perm_request = PermissionRequest(
-                    session_id=self._session_id,
-                    request_id=request_id,
-                    description=description,
-                    options=perm_options,
-                )
-
-                try:
-                    choice: PermissionChoice = await asyncio.wait_for(
-                        on_permission(perm_request),
-                        timeout=self._settings.permission_timeout_seconds,
+                    return final
+                else:
+                    # Stale response from a prior session/new or session/load
+                    # that arrived late — safely ignore.
+                    logger.debug(
+                        "ACPRuntime[%s]: ignoring stale response id=%d", self._session_id, msg_id
                     )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "ACPRuntime[%s]: permission request timed out, defaulting to 1",
+
+            # --- session/update notification -----------------------------
+            elif kind == "notification":
+                params: dict = msg.get("params") or {}
+                update: dict = params.get("update") or {}
+                update_type: str = update.get("sessionUpdate", "")
+
+                if update_type == "agent_message_chunk":
+                    content_block = update.get("content") or {}
+                    delta: str = content_block.get("text", "")
+                    accumulated.append(delta)
+                    pending_delta.append(delta)
+                    now = time.monotonic()
+                    if (now - last_progress_time) >= debounce:
+                        await _flush_progress()
+
+                elif update_type == "tool_call":
+                    tool_name: str = (
+                        update.get("title")
+                        or update.get("name")
+                        or update.get("tool")
+                        or "tool"
+                    )
+                    await _flush_progress(tool_name=tool_name)
+
+                elif update_type == "agent_thought_chunk":
+                    # Internal reasoning — accumulate silently.
+                    pass
+
+                else:
+                    logger.debug(
+                        "ACPRuntime[%s]: unhandled update type %r",
                         self._session_id,
-                    )
-                    choice = PermissionChoice(
-                        request_id=request_id, option_index=1
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "ACPRuntime[%s]: on_permission callback raised: %s; defaulting to 1",
-                        self._session_id,
-                        exc,
-                    )
-                    choice = PermissionChoice(
-                        request_id=request_id, option_index=1
+                        update_type,
                     )
 
-                await self._client.send(
-                    PermissionResponseMsg(
-                        request_id=choice.request_id,
-                        choice=choice.option_index,
-                    )
-                )
-
-            elif msg_type == "done":
-                # Final flush of any remaining buffered delta.
-                await _flush_progress()
-
-                # Prefer the explicit ``content`` field when present (ACP may
-                # send the full final text here).
-                final_content: str = msg.get("content") or "".join(accumulated_content)
-                logger.debug(
-                    "ACPRuntime[%s]: task done, content length=%d",
-                    self._session_id,
-                    len(final_content),
-                )
-                return final_content
-
-            elif msg_type == "error":
-                error_msg: str = msg.get("message") or msg.get("error") or "unknown ACP error"
-                raise RuntimeError(
-                    f"ACPRuntime[{self._session_id}]: ACP reported error: {error_msg}"
-                )
+            # --- session/request_permission (server → client request) ----
+            elif kind == "server_request":
+                await self._handle_permission(msg, on_permission)
 
             else:
                 logger.debug(
-                    "ACPRuntime[%s]: unhandled message type %r",
+                    "ACPRuntime[%s]: unknown message: %s",
                     self._session_id,
-                    msg_type,
+                    str(msg)[:200],
                 )
+
+    # ------------------------------------------------------------------
+    # Permission handling
+    # ------------------------------------------------------------------
+
+    async def _handle_permission(
+        self,
+        msg: dict,
+        on_permission: Callable[[PermissionRequest], Awaitable[PermissionChoice]],
+    ) -> None:
+        """Parse an inbound ``session/request_permission`` request, call
+        ``on_permission``, and send the chosen response back to cc-acp."""
+        if msg.get("method") != "session/request_permission":
+            logger.debug(
+                "ACPRuntime[%s]: ignoring unknown server request %r",
+                self._session_id,
+                msg.get("method"),
+            )
+            return
+
+        assert self._client is not None
+
+        try:
+            perm_req = parse_permission_request(msg)
+        except Exception as exc:
+            logger.warning(
+                "ACPRuntime[%s]: failed to parse permission request: %s",
+                self._session_id,
+                exc,
+            )
+            await self._client.send_error_response(
+                msg.get("id", 0), -32600, "invalid permission request"
+            )
+            return
+
+        # Map to our internal PermissionRequest type.
+        tool_call = perm_req.tool_call or {}
+        description = tool_call.get("title") or tool_call.get("description") or ""
+        perm_options: list[PermOption] = [
+            PermOption(
+                index=i + 1,
+                label=opt.option_id,
+                description=opt.name,
+            )
+            for i, opt in enumerate(perm_req.options)
+        ]
+
+        internal_req = PermissionRequest(
+            session_id=self._session_id,
+            request_id=perm_req.option_id if hasattr(perm_req, "option_id") else "",
+            description=description,
+            options=perm_options,
+        )
+
+        try:
+            choice: PermissionChoice = await asyncio.wait_for(
+                on_permission(internal_req),
+                timeout=self._settings.permission_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "ACPRuntime[%s]: permission timed out, using first option",
+                self._session_id,
+            )
+            choice = PermissionChoice(request_id="", option_index=1)
+        except Exception as exc:
+            logger.warning(
+                "ACPRuntime[%s]: on_permission raised: %s", self._session_id, exc
+            )
+            choice = PermissionChoice(request_id="", option_index=1)
+
+        # Map the 1-based index back to the option_id string.
+        chosen_index = max(1, choice.option_index) - 1
+        if perm_req.options and chosen_index < len(perm_req.options):
+            option_id = perm_req.options[chosen_index].option_id
+        elif perm_req.options:
+            option_id = perm_req.options[0].option_id
+        else:
+            option_id = "allow_once"
+
+        result = permission_response_result(option_id)
+        await self._client.send_response(perm_req.jsonrpc_id, result)
 
     # ------------------------------------------------------------------
     # Control
     # ------------------------------------------------------------------
 
     async def cancel(self) -> None:
-        """Send a ``cancel`` message to the ACP subprocess.
+        """Send ``session/cancel`` to cc-acp.
 
         Silently does nothing if the subprocess is not running.
         """
-        if not self.is_running or self._client is None:
+        if not self.is_running or self._client is None or not self._actual_id:
             return
         logger.info("ACPRuntime[%s]: sending cancel", self._session_id)
         try:
-            await self._client.send(CancelMsg(session_id=self._session_id))
+            await self._client.send_request("session/cancel", cancel_params(self._actual_id))
         except Exception as exc:
-            logger.warning(
-                "ACPRuntime[%s]: error sending cancel: %s", self._session_id, exc
-            )
+            logger.warning("ACPRuntime[%s]: cancel failed: %s", self._session_id, exc)
 
     async def reset_session(self) -> None:
         """Clear *actual_id* so the next ``execute`` creates a fresh ACP session."""
@@ -424,11 +520,7 @@ class ACPRuntime:
         self._actual_id = None
 
     async def stop(self) -> None:
-        """Terminate the ACP subprocess gracefully.
-
-        Sends SIGTERM first; if the process is still alive after
-        :data:`_STOP_GRACEFUL_TIMEOUT_SECONDS`, sends SIGKILL.
-        """
+        """Terminate the ACP subprocess gracefully (SIGTERM → SIGKILL)."""
         if self._proc is None:
             return
 
@@ -437,7 +529,6 @@ class ACPRuntime:
         self._client = None
         self._ready = False
 
-        # Cancel background tasks.
         for bg_task in (self._reader_task, self._stderr_drain_task):
             if bg_task is not None and not bg_task.done():
                 bg_task.cancel()
@@ -450,9 +541,9 @@ class ACPRuntime:
         self._stderr_drain_task = None
 
         if proc.returncode is not None:
-            return  # already exited
+            return
 
-        logger.info("ACPRuntime[%s]: stopping subprocess (SIGTERM)", self._session_id)
+        logger.info("ACPRuntime[%s]: terminating subprocess (SIGTERM)", self._session_id)
         try:
             proc.terminate()
         except ProcessLookupError:
@@ -460,16 +551,10 @@ class ACPRuntime:
 
         try:
             await asyncio.wait_for(proc.wait(), timeout=_STOP_GRACEFUL_TIMEOUT_SECONDS)
-            logger.info(
-                "ACPRuntime[%s]: subprocess exited with code %d",
-                self._session_id,
-                proc.returncode,
-            )
         except asyncio.TimeoutError:
             logger.warning(
-                "ACPRuntime[%s]: subprocess did not exit in %ds, sending SIGKILL",
+                "ACPRuntime[%s]: subprocess did not exit, sending SIGKILL",
                 self._session_id,
-                _STOP_GRACEFUL_TIMEOUT_SECONDS,
             )
             try:
                 proc.kill()
@@ -484,13 +569,54 @@ class ACPRuntime:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _run_reader(self) -> None:
-        """Read all stdout lines and push parsed dicts into ``_msg_queue``.
+    async def _wait_response(self, req_id: int, timeout: float) -> dict:
+        """Block until a ``response`` message with *req_id* arrives on the queue.
 
-        Runs as a background asyncio task for the lifetime of the subprocess.
-        When stdout reaches EOF (subprocess exited), ``None`` is pushed so
-        that any awaiting ``execute`` call can detect the EOF condition.
+        Other messages (notifications, server requests) encountered while
+        waiting are **re-queued** so they are not lost.
+
+        Raises:
+            RuntimeError: On error response or reader exception.
         """
+        assert self._msg_queue is not None
+        stashed: list = []
+
+        try:
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = max(0.0, deadline - time.monotonic())
+                try:
+                    msg = await asyncio.wait_for(
+                        self._msg_queue.get(), timeout=remaining
+                    )
+                except asyncio.TimeoutError:
+                    raise RuntimeError(
+                        f"ACPRuntime[{self._session_id}]: timed out waiting "
+                        f"for response id={req_id}"
+                    )
+
+                if isinstance(msg, Exception):
+                    raise RuntimeError(
+                        f"ACPRuntime[{self._session_id}]: reader error: {msg}"
+                    ) from msg
+
+                kind = classify(msg)
+                if kind == "response" and msg.get("id") == req_id:
+                    if "error" in msg:
+                        err = (msg["error"] or {}).get("message", "unknown error")
+                        raise RuntimeError(
+                            f"ACPRuntime[{self._session_id}]: RPC error: {err}"
+                        )
+                    return msg.get("result") or {}
+                else:
+                    # Re-queue so the execute loop can process it.
+                    stashed.append(msg)
+        finally:
+            for m in stashed:
+                await self._msg_queue.put(m)
+
+    async def _run_reader(self) -> None:
+        """Read all stdout lines and push parsed dicts into ``_msg_queue``."""
         assert self._client is not None
         assert self._msg_queue is not None
 
@@ -500,13 +626,11 @@ class ACPRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning(
-                "ACPRuntime[%s]: reader task error: %s", self._session_id, exc
-            )
+            logger.warning("ACPRuntime[%s]: reader error: %s", self._session_id, exc)
             await self._msg_queue.put(exc)
 
     async def _drain_stderr(self) -> None:
-        """Continuously read and log stderr so the pipe never fills up."""
+        """Continuously read stderr to prevent pipe blockage."""
         if self._proc is None or self._proc.stderr is None:
             return
         try:
@@ -522,6 +646,4 @@ class ACPRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.debug(
-                "ACPRuntime[%s]: stderr drain ended: %s", self._session_id, exc
-            )
+            logger.debug("ACPRuntime[%s]: stderr drain ended: %s", self._session_id, exc)

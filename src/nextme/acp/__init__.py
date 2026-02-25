@@ -2,8 +2,8 @@
 
 Public surface
 --------------
-protocol  — ndjson message dataclasses + parse/serialize helpers
-client    — ACPClient (thin stdin/stdout wrapper)
+protocol  — JSON-RPC 2.0 message helpers + parse/classify utilities
+client    — ACPClient (bidirectional JSON-RPC stdin/stdout wrapper)
 runtime   — ACPRuntime (subprocess lifecycle + execute/cancel/stop)
 janitor   — ACPRuntimeRegistry (global session map) + ACPJanitor (idle reaper)
 """
@@ -11,25 +11,39 @@ janitor   — ACPRuntimeRegistry (global session map) + ACPJanitor (idle reaper)
 from .client import ACPClient
 from .janitor import ACPJanitor, ACPRuntimeRegistry
 from .protocol import (
-    CancelMsg,
-    LoadSessionMsg,
-    NewSessionMsg,
-    PermissionResponseMsg,
-    PromptMsg,
-    parse_acp_message,
-    serialize_msg,
+    InboundPermissionRequest,
+    PermissionOption,
+    cancel_params,
+    classify,
+    initialize_params,
+    load_session_params,
+    make_request,
+    make_response,
+    new_session_params,
+    parse_message,
+    parse_permission_request,
+    permission_cancel_result,
+    permission_response_result,
+    prompt_params,
 )
 from .runtime import ACPRuntime
 
 __all__ = [
-    # protocol
-    "NewSessionMsg",
-    "LoadSessionMsg",
-    "PromptMsg",
-    "PermissionResponseMsg",
-    "CancelMsg",
-    "parse_acp_message",
-    "serialize_msg",
+    # protocol helpers
+    "make_request",
+    "make_response",
+    "parse_message",
+    "classify",
+    "initialize_params",
+    "new_session_params",
+    "load_session_params",
+    "prompt_params",
+    "cancel_params",
+    "InboundPermissionRequest",
+    "PermissionOption",
+    "parse_permission_request",
+    "permission_response_result",
+    "permission_cancel_result",
     # client
     "ACPClient",
     # runtime

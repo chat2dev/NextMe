@@ -1,11 +1,11 @@
-"""Tests for nextme.acp.runtime.ACPRuntime."""
+"""Tests for nextme.acp.runtime.ACPRuntime (JSON-RPC 2.0 protocol)."""
 import asyncio
 import uuid
 import pytest
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from nextme.acp.runtime import ACPRuntime, _READY_TIMEOUT_SECONDS, _STOP_GRACEFUL_TIMEOUT_SECONDS
+from nextme.acp.runtime import ACPRuntime, _INIT_TIMEOUT_SECONDS, _STOP_GRACEFUL_TIMEOUT_SECONDS
 from nextme.config.schema import Settings
 from nextme.protocol.types import Task, PermissionChoice, PermOption, PermissionRequest
 
@@ -14,8 +14,8 @@ from nextme.protocol.types import Task, PermissionChoice, PermOption, Permission
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def make_task(content: str = "hello", canceled: bool = False, timeout_seconds: float = 10.0):
-    """Create a Task and a list that captures replies."""
     replies = []
 
     async def reply_fn(r):
@@ -33,7 +33,6 @@ def make_task(content: str = "hello", canceled: bool = False, timeout_seconds: f
 
 
 def make_runtime(tmp_path, settings=None, executor="echo"):
-    """Create an ACPRuntime with a tmp working directory."""
     if settings is None:
         settings = Settings(
             progress_debounce_seconds=0.0,
@@ -46,10 +45,6 @@ def make_runtime(tmp_path, settings=None, executor="echo"):
         executor=executor,
     )
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 @pytest.fixture
 def settings():
@@ -65,17 +60,16 @@ def runtime(settings, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Tests: properties (no subprocess needed)
+# Properties (no subprocess)
 # ---------------------------------------------------------------------------
 
+
 def test_is_running_false_when_proc_none(runtime):
-    """is_running is False when _proc is None."""
     assert runtime._proc is None
     assert runtime.is_running is False
 
 
 def test_is_running_true_when_proc_returncode_none(runtime):
-    """is_running is True when _proc.returncode is None (still alive)."""
     mock_proc = MagicMock()
     mock_proc.returncode = None
     runtime._proc = mock_proc
@@ -83,7 +77,6 @@ def test_is_running_true_when_proc_returncode_none(runtime):
 
 
 def test_is_running_false_when_proc_exited(runtime):
-    """is_running is False when _proc.returncode is 0 (exited cleanly)."""
     mock_proc = MagicMock()
     mock_proc.returncode = 0
     runtime._proc = mock_proc
@@ -91,7 +84,6 @@ def test_is_running_false_when_proc_exited(runtime):
 
 
 def test_is_running_false_when_proc_exited_nonzero(runtime):
-    """is_running is False when _proc.returncode is non-zero."""
     mock_proc = MagicMock()
     mock_proc.returncode = 1
     runtime._proc = mock_proc
@@ -99,93 +91,98 @@ def test_is_running_false_when_proc_exited_nonzero(runtime):
 
 
 def test_last_access_returns_datetime(runtime):
-    """last_access returns a datetime instance."""
     assert isinstance(runtime.last_access, datetime)
 
 
 def test_actual_id_none_by_default(runtime):
-    """actual_id is None before any execute call."""
     assert runtime.actual_id is None
 
 
 def test_actual_id_set_manually(runtime):
-    """actual_id returns whatever _actual_id is set to."""
     runtime._actual_id = "acp-session-123"
     assert runtime.actual_id == "acp-session-123"
 
 
 # ---------------------------------------------------------------------------
-# Tests: reset_session
+# reset_session
 # ---------------------------------------------------------------------------
 
+
 async def test_reset_session_clears_actual_id(runtime):
-    """reset_session sets _actual_id back to None."""
     runtime._actual_id = "some-id"
     await runtime.reset_session()
     assert runtime._actual_id is None
 
 
 async def test_reset_session_idempotent(runtime):
-    """reset_session can be called when _actual_id is already None."""
     assert runtime._actual_id is None
     await runtime.reset_session()
     assert runtime._actual_id is None
 
 
 # ---------------------------------------------------------------------------
-# Tests: cancel
+# cancel
 # ---------------------------------------------------------------------------
 
+
 async def test_cancel_does_nothing_when_not_running(runtime):
-    """cancel() is a no-op when the subprocess is not running."""
     assert not runtime.is_running
-    # Should not raise
-    await runtime.cancel()
+    await runtime.cancel()  # should not raise
 
 
-async def test_cancel_sends_cancel_message_when_running(runtime):
-    """cancel() sends a CancelMsg when the subprocess is alive."""
+async def test_cancel_sends_cancel_request_when_running(runtime):
     mock_proc = MagicMock()
     mock_proc.returncode = None
     runtime._proc = mock_proc
+    runtime._actual_id = "sess-abc"
 
     mock_client = MagicMock()
-    mock_client.send = AsyncMock()
+    mock_client.send_request = AsyncMock(return_value=99)
     runtime._client = mock_client
 
     await runtime.cancel()
 
-    mock_client.send.assert_awaited_once()
-    sent_msg = mock_client.send.call_args.args[0]
-    # CancelMsg has a session_id attribute
-    assert hasattr(sent_msg, "session_id")
-    assert sent_msg.session_id == "test-session"
+    mock_client.send_request.assert_awaited_once()
+    method, params = mock_client.send_request.call_args.args
+    assert method == "session/cancel"
+    assert params["sessionId"] == "sess-abc"
 
 
 async def test_cancel_does_nothing_when_client_none(runtime):
-    """cancel() is a no-op when _client is None even if proc seems running."""
     mock_proc = MagicMock()
     mock_proc.returncode = None
     runtime._proc = mock_proc
     runtime._client = None
-    # Should not raise
+    await runtime.cancel()  # no raise
+
+
+async def test_cancel_does_nothing_when_no_actual_id(runtime):
+    mock_proc = MagicMock()
+    mock_proc.returncode = None
+    runtime._proc = mock_proc
+    mock_client = MagicMock()
+    mock_client.send_request = AsyncMock()
+    runtime._client = mock_client
+    runtime._actual_id = None
+
     await runtime.cancel()
 
+    mock_client.send_request.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
-# Tests: stop
+# stop
 # ---------------------------------------------------------------------------
+
 
 async def test_stop_handles_proc_none(runtime):
-    """stop() returns immediately when _proc is None."""
     assert runtime._proc is None
     await runtime.stop()  # should not raise
 
 
 async def test_stop_resets_state(runtime):
-    """stop() sets _proc, _client, _ready back to None/False."""
     mock_proc = MagicMock()
-    mock_proc.returncode = 0  # already exited (so we skip SIGTERM path)
+    mock_proc.returncode = 0
     runtime._proc = mock_proc
     runtime._client = MagicMock()
     runtime._ready = True
@@ -198,9 +195,8 @@ async def test_stop_resets_state(runtime):
 
 
 async def test_stop_sends_sigterm(runtime):
-    """stop() calls proc.terminate() when proc is still running."""
     mock_proc = MagicMock()
-    mock_proc.returncode = None  # still running
+    mock_proc.returncode = None
     mock_proc.terminate = MagicMock()
     mock_proc.wait = AsyncMock(return_value=0)
     runtime._proc = mock_proc
@@ -212,7 +208,6 @@ async def test_stop_sends_sigterm(runtime):
 
 
 async def test_stop_kills_on_graceful_timeout(runtime):
-    """stop() calls proc.kill() when proc does not exit within the graceful timeout."""
     mock_proc = MagicMock()
     mock_proc.returncode = None
     mock_proc.terminate = MagicMock()
@@ -225,7 +220,6 @@ async def test_stop_kills_on_graceful_timeout(runtime):
 
     mock_proc.kill = mock_kill
 
-    # Simulate wait() never completing so graceful timeout fires
     async def never_returns():
         await asyncio.sleep(9999)
 
@@ -233,7 +227,6 @@ async def test_stop_kills_on_graceful_timeout(runtime):
     runtime._proc = mock_proc
     runtime._ready = True
 
-    # Patch the graceful timeout to be very short
     with patch("nextme.acp.runtime._STOP_GRACEFUL_TIMEOUT_SECONDS", 0.05):
         await runtime.stop()
 
@@ -241,11 +234,9 @@ async def test_stop_kills_on_graceful_timeout(runtime):
 
 
 async def test_stop_cancels_background_tasks(runtime):
-    """stop() cancels the reader and stderr drain tasks."""
     mock_proc = MagicMock()
-    mock_proc.returncode = 0  # already exited
+    mock_proc.returncode = 0
 
-    # Create real asyncio tasks that block forever so they're not done
     async def block():
         await asyncio.sleep(9999)
 
@@ -258,17 +249,16 @@ async def test_stop_cancels_background_tasks(runtime):
 
     await runtime.stop()
 
-    # Both background tasks should have been cancelled
     assert reader_task.cancelled()
     assert stderr_task.cancelled()
 
 
 # ---------------------------------------------------------------------------
-# Tests: ensure_ready (mock subprocess)
+# ensure_ready (mock subprocess)
 # ---------------------------------------------------------------------------
 
+
 async def test_ensure_ready_idempotent_when_already_ready(runtime):
-    """ensure_ready() is a no-op when already ready and running."""
     runtime._ready = True
     mock_proc = MagicMock()
     mock_proc.returncode = None
@@ -277,18 +267,23 @@ async def test_ensure_ready_idempotent_when_already_ready(runtime):
     with patch("asyncio.create_subprocess_exec") as mock_exec:
         await runtime.ensure_ready()
 
-    # Should not have launched a new subprocess
     mock_exec.assert_not_called()
 
 
-async def test_ensure_ready_waits_for_ready_message(runtime):
-    """ensure_ready completes when subprocess sends a 'ready' message."""
+async def test_ensure_ready_sends_initialize_and_waits(runtime):
+    """ensure_ready completes when subprocess responds to initialize."""
     mock_proc = MagicMock()
-    mock_proc.stdin = AsyncMock()
     mock_proc.returncode = None
 
-    # Build a queue of bytes for stdout
-    messages = [b'{"type": "ready"}\n', b""]
+    # stdin
+    stdin_mock = MagicMock()
+    stdin_mock.write = MagicMock()
+    stdin_mock.drain = AsyncMock()
+    mock_proc.stdin = stdin_mock
+
+    # stdout: initialize response (id=1)
+    init_response = b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}\n'
+    messages = [init_response, b""]
     idx = 0
 
     async def mock_readline():
@@ -301,11 +296,8 @@ async def test_ensure_ready_waits_for_ready_message(runtime):
     mock_proc.stdout = MagicMock()
     mock_proc.stdout.readline = mock_readline
 
-    async def mock_stderr_readline():
-        return b""
-
     mock_proc.stderr = MagicMock()
-    mock_proc.stderr.readline = mock_stderr_readline
+    mock_proc.stderr.readline = AsyncMock(return_value=b"")
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
         await runtime.ensure_ready()
@@ -314,7 +306,7 @@ async def test_ensure_ready_waits_for_ready_message(runtime):
 
 
 async def test_ensure_ready_raises_on_timeout(tmp_path):
-    """ensure_ready raises RuntimeError when subprocess doesn't send 'ready' in time."""
+    """ensure_ready raises RuntimeError when initialize response never arrives."""
     settings = Settings(progress_debounce_seconds=0.0, permission_timeout_seconds=0.1)
     rt = ACPRuntime(
         session_id="slow-session",
@@ -327,7 +319,6 @@ async def test_ensure_ready_raises_on_timeout(tmp_path):
     mock_proc.stdin = AsyncMock()
     mock_proc.returncode = None
 
-    # stdout never sends ready
     async def block_forever():
         await asyncio.sleep(9999)
 
@@ -339,23 +330,23 @@ async def test_ensure_ready_raises_on_timeout(tmp_path):
     mock_proc.wait = AsyncMock(return_value=0)
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-        with patch(
-            "nextme.acp.runtime._READY_TIMEOUT_SECONDS", 0.05
-        ):
-            with pytest.raises(RuntimeError, match="timed out waiting for 'ready'"):
+        with patch("nextme.acp.runtime._INIT_TIMEOUT_SECONDS", 0.05):
+            with pytest.raises(RuntimeError, match="initialize timed out"):
                 await rt.ensure_ready()
 
 
-async def test_ensure_ready_ignores_non_ready_messages_before_ready(runtime):
-    """ensure_ready skips unexpected messages and waits for 'ready'."""
+async def test_ensure_ready_skips_notifications_before_initialize_response(runtime):
+    """Notifications arriving before the initialize response are stashed and re-queued."""
     mock_proc = MagicMock()
-    mock_proc.stdin = AsyncMock()
     mock_proc.returncode = None
+    mock_proc.stdin = MagicMock()
+    mock_proc.stdin.write = MagicMock()
+    mock_proc.stdin.drain = AsyncMock()
 
+    # A diagnostic non-JSON line, then notification, then initialize response
     messages = [
-        b'{"type": "info", "msg": "starting"}\n',
-        b'{"type": "debug", "msg": "loading"}\n',
-        b'{"type": "ready"}\n',
+        b'{"jsonrpc":"2.0","method":"session/update","params":{}}\n',
+        b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}\n',
         b"",
     ]
     idx = 0
@@ -379,13 +370,26 @@ async def test_ensure_ready_ignores_non_ready_messages_before_ready(runtime):
 
 
 # ---------------------------------------------------------------------------
-# Tests: execute (mock _client and _msg_queue directly)
+# execute (mock _client and _msg_queue directly)
 # ---------------------------------------------------------------------------
 
-def _setup_runtime_ready(runtime):
-    """Put the runtime in the ready/running state with mocked internals."""
+
+def _setup_runtime_ready(runtime, session_id_for_new="acp-new-123"):
+    """Put the runtime in ready/running state with a JSON-RPC mock client.
+
+    The mock send_request() auto-increments IDs. The queue is seeded
+    with a session/new response so execute() can complete session setup.
+    """
+    call_count = [0]
+
+    async def mock_send_request(method, params):
+        call_count[0] += 1
+        return call_count[0]
+
     mock_client = MagicMock()
-    mock_client.send = AsyncMock()
+    mock_client.send_request = AsyncMock(side_effect=mock_send_request)
+    mock_client.send_response = AsyncMock()
+    mock_client.send_error_response = AsyncMock()
     runtime._client = mock_client
 
     mock_proc = MagicMock()
@@ -395,14 +399,15 @@ def _setup_runtime_ready(runtime):
 
     queue = asyncio.Queue()
     runtime._msg_queue = queue
-    return mock_client, queue
+
+    return mock_client, queue, call_count
 
 
-async def test_execute_returns_done_content(runtime):
-    """execute returns the content from the 'done' message."""
-    mock_client, queue = _setup_runtime_ready(runtime)
+async def test_execute_returns_accumulated_content(runtime):
+    """execute returns accumulated content when prompt response arrives."""
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
 
-    task, replies = make_task("hello world")
+    task, _ = make_task("say hi")
 
     async def on_progress(delta, tool):
         pass
@@ -410,87 +415,51 @@ async def test_execute_returns_done_content(runtime):
     async def on_permission(req):
         return PermissionChoice(request_id="", option_index=1)
 
-    # Seed the queue with messages
-    await queue.put({"type": "session_created", "session_id": "acp-123"})
-    await queue.put({"type": "done", "content": "Hello world"})
+    # session/new response (id=1) and session/prompt response (id=2)
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "acp-abc"}})
+    await queue.put({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "acp-abc",
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Hi there!"}},
+        },
+    })
+    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
 
     result = await runtime.execute(task, on_progress, on_permission)
-
-    assert result == "Hello world"
-    assert runtime._actual_id == "acp-123"
-
-
-async def test_execute_sets_actual_id_from_session_created(runtime):
-    """session_created message updates _actual_id."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
-    task, _ = make_task("query")
-
-    async def on_progress(delta, tool):
-        pass
-
-    async def on_permission(req):
-        return PermissionChoice(request_id="", option_index=1)
-
-    await queue.put({"type": "session_created", "session_id": "acp-xyz-999"})
-    await queue.put({"type": "done", "content": "ok"})
-
-    await runtime.execute(task, on_progress, on_permission)
-
-    assert runtime._actual_id == "acp-xyz-999"
+    assert result == "Hi there!"
+    assert runtime._actual_id == "acp-abc"
 
 
-async def test_execute_accumulates_content_deltas(runtime):
-    """content_delta messages accumulate and are returned by done."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
+async def test_execute_accumulates_multiple_chunks(runtime):
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
     task, _ = make_task("tell me")
-    deltas_received = []
+    chunks = []
 
     async def on_progress(delta, tool):
         if delta:
-            deltas_received.append(delta)
+            chunks.append(delta)
 
     async def on_permission(req):
         return PermissionChoice(request_id="", option_index=1)
 
-    await queue.put({"type": "session_created", "session_id": "acp-1"})
-    await queue.put({"type": "content_delta", "delta": "Hello "})
-    await queue.put({"type": "content_delta", "delta": "world"})
-    # done without explicit content → use accumulated
-    await queue.put({"type": "done"})
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
+    await queue.put({"jsonrpc": "2.0", "method": "session/update", "params": {
+        "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Hello "}}
+    }})
+    await queue.put({"jsonrpc": "2.0", "method": "session/update", "params": {
+        "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "world"}}
+    }})
+    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
 
     result = await runtime.execute(task, on_progress, on_permission)
-
     assert result == "Hello world"
 
 
-async def test_execute_done_content_overrides_accumulated(runtime):
-    """When 'done' has explicit content field, it takes precedence over accumulated."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
-    task, _ = make_task("query")
-
-    async def on_progress(delta, tool):
-        pass
-
-    async def on_permission(req):
-        return PermissionChoice(request_id="", option_index=1)
-
-    await queue.put({"type": "session_created", "session_id": "acp-1"})
-    await queue.put({"type": "content_delta", "delta": "partial "})
-    await queue.put({"type": "done", "content": "final answer"})
-
-    result = await runtime.execute(task, on_progress, on_permission)
-
-    assert result == "final answer"
-
-
-async def test_execute_tool_use_calls_on_progress(runtime):
-    """tool_use messages invoke on_progress with the tool name."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
-    task, _ = make_task("use a tool")
+async def test_execute_tool_call_calls_on_progress(runtime):
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
+    task, _ = make_task("use tool")
     tool_events = []
 
     async def on_progress(delta, tool):
@@ -500,95 +469,93 @@ async def test_execute_tool_use_calls_on_progress(runtime):
     async def on_permission(req):
         return PermissionChoice(request_id="", option_index=1)
 
-    await queue.put({"type": "session_created", "session_id": "acp-1"})
-    await queue.put({"type": "tool_use", "name": "bash_tool"})
-    await queue.put({"type": "done", "content": "done"})
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
+    await queue.put({"jsonrpc": "2.0", "method": "session/update", "params": {
+        "update": {"sessionUpdate": "tool_call", "title": "Read file"}
+    }})
+    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
 
     await runtime.execute(task, on_progress, on_permission)
+    assert "Read file" in tool_events
 
-    assert "bash_tool" in tool_events
 
-
-async def test_execute_permission_request_calls_on_permission(runtime):
-    """permission_request messages invoke on_permission and send a response."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
-    task, _ = make_task("risky op")
-    permission_requests = []
+async def test_execute_handles_permission_request(runtime):
+    """session/request_permission inbound request triggers on_permission callback."""
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
+    task, _ = make_task("risky")
+    perm_calls = []
 
     async def on_progress(delta, tool):
         pass
 
     async def on_permission(req):
-        permission_requests.append(req)
-        return PermissionChoice(request_id=req.request_id, option_index=2)
+        perm_calls.append(req)
+        return PermissionChoice(request_id="", option_index=1)
 
-    await queue.put({"type": "session_created", "session_id": "acp-1"})
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
+    # Inbound permission request from cc-acp
     await queue.put({
-        "type": "permission_request",
-        "request_id": "req-001",
-        "description": "Run dangerous command?",
-        "options": [
-            {"index": 1, "label": "Deny"},
-            {"index": 2, "label": "Allow"},
-        ],
+        "jsonrpc": "2.0",
+        "id": 99,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "s1",
+            "toolCall": {"title": "Run bash command"},
+            "options": [
+                {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                {"optionId": "reject_once", "name": "Deny", "kind": "reject_once"},
+            ],
+        },
     })
-    await queue.put({"type": "done", "content": "completed"})
+    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
 
-    result = await runtime.execute(task, on_progress, on_permission)
+    await runtime.execute(task, on_progress, on_permission)
 
-    assert len(permission_requests) == 1
-    assert permission_requests[0].request_id == "req-001"
-    assert permission_requests[0].description == "Run dangerous command?"
-    # PermissionResponseMsg was sent
-    mock_client.send.assert_awaited()
-    result == "completed"
+    assert len(perm_calls) == 1
+    assert perm_calls[0].description == "Run bash command"
+    mock_client.send_response.assert_awaited_once_with(99, {"outcome": {"selected": {"optionId": "allow_once"}}})
 
 
-async def test_execute_permission_timeout_defaults_to_index_1(runtime):
-    """Permission request timeout defaults choice to option_index=1."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
-    # Use a short timeout
+async def test_execute_permission_timeout_uses_first_option(runtime):
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
     runtime._settings = Settings(
         progress_debounce_seconds=0.0,
         permission_timeout_seconds=0.05,
     )
-
-    task, _ = make_task("risky op")
+    task, _ = make_task("risky")
 
     async def on_progress(delta, tool):
         pass
 
     async def on_permission(req):
-        # Takes longer than the timeout
         await asyncio.sleep(9999)
-        return PermissionChoice(request_id=req.request_id, option_index=2)
+        return PermissionChoice(request_id="", option_index=2)
 
-    await queue.put({"type": "session_created", "session_id": "acp-1"})
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
     await queue.put({
-        "type": "permission_request",
-        "request_id": "req-timeout",
-        "description": "Allow?",
-        "options": [{"index": 1, "label": "Allow"}],
+        "jsonrpc": "2.0",
+        "id": 88,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "s1",
+            "toolCall": {},
+            "options": [{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"}],
+        },
     })
-    await queue.put({"type": "done", "content": "ok"})
+    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
 
-    result = await runtime.execute(task, on_progress, on_permission)
+    await runtime.execute(task, on_progress, on_permission)
 
-    # Should have sent a permission response with index 1 (the default)
-    sent_calls = [call.args[0] for call in mock_client.send.call_args_list]
-    from nextme.acp.protocol import PermissionResponseMsg
-    perm_responses = [m for m in sent_calls if isinstance(m, PermissionResponseMsg)]
-    assert len(perm_responses) == 1
-    assert perm_responses[0].choice == 1
+    # Should respond with the first option
+    mock_client.send_response.assert_awaited_once()
+    args = mock_client.send_response.call_args.args
+    assert args[1]["outcome"]["selected"]["optionId"] == "allow_once"
 
 
-async def test_execute_error_message_raises_runtime_error(runtime):
-    """An 'error' message from ACP raises RuntimeError."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
-    task, _ = make_task("bad op")
+async def test_execute_error_response_raises(runtime):
+    """Error JSON-RPC response on session/prompt raises RuntimeError."""
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
+    task, _ = make_task("bad")
 
     async def on_progress(delta, tool):
         pass
@@ -596,17 +563,15 @@ async def test_execute_error_message_raises_runtime_error(runtime):
     async def on_permission(req):
         return PermissionChoice(request_id="", option_index=1)
 
-    await queue.put({"type": "session_created", "session_id": "acp-1"})
-    await queue.put({"type": "error", "message": "something went wrong"})
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
+    await queue.put({"jsonrpc": "2.0", "id": 2, "error": {"code": -32000, "message": "Claude process failed"}})
 
-    with pytest.raises(RuntimeError, match="something went wrong"):
+    with pytest.raises(RuntimeError, match="Claude process failed"):
         await runtime.execute(task, on_progress, on_permission)
 
 
-async def test_execute_exception_in_queue_raises_runtime_error(runtime):
-    """An Exception object in the queue raises RuntimeError."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
+async def test_execute_exception_in_queue_raises(runtime):
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
     task, _ = make_task("query")
 
     async def on_progress(delta, tool):
@@ -615,17 +580,15 @@ async def test_execute_exception_in_queue_raises_runtime_error(runtime):
     async def on_permission(req):
         return PermissionChoice(request_id="", option_index=1)
 
-    await queue.put({"type": "session_created", "session_id": "acp-1"})
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
     await queue.put(ValueError("subprocess died"))
 
-    with pytest.raises(RuntimeError, match="subprocess error"):
+    with pytest.raises(RuntimeError, match="reader error"):
         await runtime.execute(task, on_progress, on_permission)
 
 
-async def test_execute_canceled_task_calls_cancel_and_returns(runtime):
-    """A pre-canceled task triggers cancel() and returns accumulated content."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
+async def test_execute_canceled_task_returns_immediately(runtime):
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
     task, _ = make_task("work", canceled=True)
 
     async def on_progress(delta, tool):
@@ -634,25 +597,19 @@ async def test_execute_canceled_task_calls_cancel_and_returns(runtime):
     async def on_permission(req):
         return PermissionChoice(request_id="", option_index=1)
 
-    # Queue has some content that won't be consumed because task is canceled
-    await queue.put({"type": "session_created", "session_id": "acp-1"})
+    # provide session/new response so setup can complete
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
 
     result = await runtime.execute(task, on_progress, on_permission)
-
-    # cancel() was called → client.send was called with CancelMsg
-    cancel_calls = [call.args[0] for call in mock_client.send.call_args_list]
-    from nextme.acp.protocol import CancelMsg
-    cancel_msgs = [m for m in cancel_calls if isinstance(m, CancelMsg)]
-    assert len(cancel_msgs) == 1
-    # Returns empty (no deltas accumulated)
     assert result == ""
+    # cancel() sends session/cancel request
+    methods_called = [call.args[0] for call in mock_client.send_request.call_args_list]
+    assert "session/cancel" in methods_called
 
 
-async def test_execute_timeout_raises_runtime_error(runtime):
-    """Task timeout raises RuntimeError when queue blocks."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
-    task, _ = make_task("slow query", timeout_seconds=0.05)
+async def test_execute_timeout_raises(runtime):
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
+    task, _ = make_task("slow", timeout_seconds=0.05)
 
     async def on_progress(delta, tool):
         pass
@@ -660,45 +617,16 @@ async def test_execute_timeout_raises_runtime_error(runtime):
     async def on_permission(req):
         return PermissionChoice(request_id="", option_index=1)
 
-    # Queue only has session_created; done never arrives
-    await queue.put({"type": "session_created", "session_id": "acp-1"})
+    # Only session/new response; prompt response never arrives
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
 
-    with pytest.raises(RuntimeError, match="timed out waiting for ACP response"):
+    with pytest.raises(RuntimeError, match="timed out"):
         await runtime.execute(task, on_progress, on_permission)
 
 
-async def test_execute_sends_new_session_when_no_actual_id(runtime):
-    """execute sends NewSessionMsg when _actual_id is None."""
-    from nextme.acp.protocol import NewSessionMsg
-
-    mock_client, queue = _setup_runtime_ready(runtime)
-    runtime._actual_id = None
-
-    task, _ = make_task("hello")
-
-    async def on_progress(delta, tool):
-        pass
-
-    async def on_permission(req):
-        return PermissionChoice(request_id="", option_index=1)
-
-    await queue.put({"type": "session_created", "session_id": "acp-new"})
-    await queue.put({"type": "done", "content": "ok"})
-
-    await runtime.execute(task, on_progress, on_permission)
-
-    sent_msgs = [call.args[0] for call in mock_client.send.call_args_list]
-    new_session_msgs = [m for m in sent_msgs if isinstance(m, NewSessionMsg)]
-    assert len(new_session_msgs) == 1
-
-
-async def test_execute_sends_load_session_when_actual_id_set(runtime):
-    """execute sends LoadSessionMsg when _actual_id is already known."""
-    from nextme.acp.protocol import LoadSessionMsg
-
-    mock_client, queue = _setup_runtime_ready(runtime)
-    runtime._actual_id = "existing-acp-id"
-
+async def test_execute_uses_load_session_when_actual_id_known(runtime):
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
+    runtime._actual_id = "existing-id"
     task, _ = make_task("follow-up")
 
     async def on_progress(delta, tool):
@@ -707,42 +635,22 @@ async def test_execute_sends_load_session_when_actual_id_set(runtime):
     async def on_permission(req):
         return PermissionChoice(request_id="", option_index=1)
 
-    await queue.put({"type": "done", "content": "response"})
+    # load_session response (id=1), prompt response (id=2)
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {}})
+    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
 
     await runtime.execute(task, on_progress, on_permission)
 
-    sent_msgs = [call.args[0] for call in mock_client.send.call_args_list]
-    load_session_msgs = [m for m in sent_msgs if isinstance(m, LoadSessionMsg)]
-    assert len(load_session_msgs) == 1
-    assert load_session_msgs[0].session_id == "existing-acp-id"
+    methods = [call.args[0] for call in mock_client.send_request.call_args_list]
+    assert methods[0] == "session/load"
+    params = mock_client.send_request.call_args_list[0].args[1]
+    assert params["sessionId"] == "existing-id"
 
 
-async def test_execute_unknown_message_type_is_ignored(runtime):
-    """Unknown message types are logged but do not crash execute."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
-    task, _ = make_task("query")
-
-    async def on_progress(delta, tool):
-        pass
-
-    async def on_permission(req):
-        return PermissionChoice(request_id="", option_index=1)
-
-    await queue.put({"type": "session_created", "session_id": "acp-1"})
-    await queue.put({"type": "some_unknown_event", "data": "blah"})
-    await queue.put({"type": "done", "content": "finished"})
-
-    result = await runtime.execute(task, on_progress, on_permission)
-
-    assert result == "finished"
-
-
-async def test_execute_content_delta_using_content_field(runtime):
-    """content_delta message with 'content' fallback field is accumulated."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
-    task, _ = make_task("query")
+async def test_execute_uses_new_session_when_no_actual_id(runtime):
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
+    runtime._actual_id = None
+    task, _ = make_task("first")
 
     async def on_progress(delta, tool):
         pass
@@ -750,20 +658,18 @@ async def test_execute_content_delta_using_content_field(runtime):
     async def on_permission(req):
         return PermissionChoice(request_id="", option_index=1)
 
-    await queue.put({"type": "session_created", "session_id": "acp-1"})
-    # Using 'content' key instead of 'delta'
-    await queue.put({"type": "content_delta", "content": "alt delta"})
-    await queue.put({"type": "done"})
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "brand-new"}})
+    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
 
-    result = await runtime.execute(task, on_progress, on_permission)
+    await runtime.execute(task, on_progress, on_permission)
 
-    assert result == "alt delta"
+    methods = [call.args[0] for call in mock_client.send_request.call_args_list]
+    assert methods[0] == "session/new"
+    assert runtime._actual_id == "brand-new"
 
 
 async def test_execute_updates_last_access(runtime):
-    """execute updates the _last_access timestamp."""
-    mock_client, queue = _setup_runtime_ready(runtime)
-
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
     before = runtime._last_access
     task, _ = make_task("query")
 
@@ -773,10 +679,48 @@ async def test_execute_updates_last_access(runtime):
     async def on_permission(req):
         return PermissionChoice(request_id="", option_index=1)
 
-    await queue.put({"type": "session_created", "session_id": "acp-1"})
-    await queue.put({"type": "done", "content": "ok"})
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
+    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
 
     await runtime.execute(task, on_progress, on_permission)
-
-    # last_access should be >= before
     assert runtime._last_access >= before
+
+
+async def test_execute_ignores_unknown_update_types(runtime):
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
+    task, _ = make_task("query")
+
+    async def on_progress(delta, tool):
+        pass
+
+    async def on_permission(req):
+        return PermissionChoice(request_id="", option_index=1)
+
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
+    await queue.put({"jsonrpc": "2.0", "method": "session/update", "params": {
+        "update": {"sessionUpdate": "some_unknown_event"}
+    }})
+    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
+
+    result = await runtime.execute(task, on_progress, on_permission)
+    assert result == ""
+
+
+async def test_execute_ignores_stale_response_ids(runtime):
+    """Response with an id that doesn't match the prompt request is silently ignored."""
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
+    task, _ = make_task("query")
+
+    async def on_progress(delta, tool):
+        pass
+
+    async def on_permission(req):
+        return PermissionChoice(request_id="", option_index=1)
+
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
+    # Stale response with wrong id (e.g. from a prior session/new that arrived late)
+    await queue.put({"jsonrpc": "2.0", "id": 999, "result": {"irrelevant": True}})
+    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
+
+    result = await runtime.execute(task, on_progress, on_permission)
+    assert result == ""
