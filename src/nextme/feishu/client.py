@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Optional
 
 import lark_oapi as lark
 
@@ -61,6 +62,8 @@ class FeishuClient:
         )
 
         self._stop_event: asyncio.Event = asyncio.Event()
+        # The fresh event loop used by the ws thread; set during start(), used by stop().
+        self._ws_loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -99,9 +102,11 @@ class FeishuClient:
             fresh = asyncio.new_event_loop()
             prev = _lark_ws_mod.loop
             _lark_ws_mod.loop = fresh
+            self._ws_loop = fresh  # expose for stop()
             try:
                 self._ws_client.start()
             finally:
+                self._ws_loop = None
                 _lark_ws_mod.loop = prev
                 fresh.close()
 
@@ -118,20 +123,35 @@ class FeishuClient:
             logger.info("FeishuClient WebSocket connection closed")
 
     async def stop(self) -> None:
-        """Gracefully disconnect the WebSocket connection."""
+        """Gracefully disconnect the WebSocket connection.
+
+        The lark SDK's ``ws.Client.start()`` blocks on an infinite
+        ``asyncio.sleep`` loop (``_select()``) inside a thread-executor.
+        There is no public ``stop()`` method.  We stop it by:
+
+        1. Disabling auto-reconnect so the client won't reopen after close.
+        2. Stopping the thread's private event loop via
+           ``call_soon_threadsafe(loop.stop)`` — this unblocks
+           ``loop.run_until_complete(_select())``.
+        """
         logger.info("Stopping Feishu WebSocket client")
+
+        # Disable reconnection so the client doesn't fight the shutdown.
         try:
-            # lark.ws.Client exposes a stop() method in recent SDK versions.
-            # Run it in executor since it may block briefly.
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._ws_client.stop)
-        except AttributeError:
-            # Older SDK versions may not have stop(); not fatal.
-            logger.debug("lark.ws.Client has no stop() method; skipping")
+            self._ws_client._auto_reconnect = False
         except Exception:
-            logger.exception("Error while stopping WebSocket client")
-        finally:
-            self._stop_event.set()
+            pass
+
+        # Stop the thread's event loop to unblock _select().
+        ws_loop = self._ws_loop
+        if ws_loop is not None and not ws_loop.is_closed():
+            try:
+                ws_loop.call_soon_threadsafe(ws_loop.stop)
+                logger.debug("Sent stop() to ws thread event loop")
+            except Exception:
+                logger.exception("Error stopping ws thread event loop")
+
+        self._stop_event.set()
 
     # ------------------------------------------------------------------
     # Factory

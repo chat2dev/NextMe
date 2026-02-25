@@ -199,55 +199,47 @@ class TestStart:
 
 class TestStop:
     async def test_stop_sets_stop_event(self, config, settings, handler):
+        """stop() always sets the stop event."""
         client = make_feishu_client(config, settings, handler)
-
-        async def fake_executor(exc, fn):
-            fn()
-
-        loop = asyncio.get_event_loop()
-        with patch.object(loop, "run_in_executor", side_effect=fake_executor):
-            await client.stop()
-
+        await client.stop()
         assert client._stop_event.is_set()
 
-    async def test_stop_calls_ws_client_stop(self, config, settings, handler):
+    async def test_stop_disables_auto_reconnect(self, config, settings, handler):
+        """stop() sets _auto_reconnect=False to prevent the SDK from reopening."""
         client = make_feishu_client(config, settings, handler)
-        called = []
+        client._ws_client._auto_reconnect = True
+        await client.stop()
+        assert client._ws_client._auto_reconnect is False
 
-        async def fake_executor(exc, fn):
-            fn()
-            called.append(fn)
-
-        loop = asyncio.get_event_loop()
-        with patch.object(loop, "run_in_executor", side_effect=fake_executor):
-            await client.stop()
-
-        assert len(called) == 1
-
-    async def test_stop_handles_attribute_error(self, config, settings, handler):
-        """If ws_client has no stop(), AttributeError is silently handled."""
+    async def test_stop_signals_ws_loop_when_set(self, config, settings, handler):
+        """stop() calls call_soon_threadsafe(loop.stop) on the ws thread loop."""
         client = make_feishu_client(config, settings, handler)
 
-        async def fake_executor(exc, fn):
-            raise AttributeError("no stop method")
+        fake_loop = MagicMock()
+        fake_loop.is_closed.return_value = False
+        client._ws_loop = fake_loop
 
-        loop = asyncio.get_event_loop()
-        with patch.object(loop, "run_in_executor", side_effect=fake_executor):
-            # Should not raise
-            await client.stop()
+        await client.stop()
 
+        fake_loop.call_soon_threadsafe.assert_called_once_with(fake_loop.stop)
+
+    async def test_stop_safe_when_ws_loop_is_none(self, config, settings, handler):
+        """stop() does not raise when _ws_loop is None (not yet started)."""
+        client = make_feishu_client(config, settings, handler)
+        client._ws_loop = None
+        # Should not raise
+        await client.stop()
         assert client._stop_event.is_set()
 
-    async def test_stop_handles_generic_exception(self, config, settings, handler):
-        """Generic exceptions during stop are logged, not re-raised."""
+    async def test_stop_safe_when_ws_loop_already_closed(self, config, settings, handler):
+        """stop() does not raise when _ws_loop is already closed."""
         client = make_feishu_client(config, settings, handler)
 
-        async def fake_executor(exc, fn):
-            raise OSError("network error")
+        fake_loop = MagicMock()
+        fake_loop.is_closed.return_value = True
+        client._ws_loop = fake_loop
 
-        loop = asyncio.get_event_loop()
-        with patch.object(loop, "run_in_executor", side_effect=fake_executor):
-            # Should not raise
-            await client.stop()
+        await client.stop()
 
+        fake_loop.call_soon_threadsafe.assert_not_called()
         assert client._stop_event.is_set()
