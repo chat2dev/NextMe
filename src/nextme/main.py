@@ -2,7 +2,8 @@
 """nextme — CLI entry point.
 
 Usage:
-    nextme up [--directory DIR] [--executor EXECUTOR] [--log-level LEVEL]
+    nextme up   [--directory DIR] [--executor EXECUTOR] [--log-level LEVEL]
+    nextme down [--timeout SECS]
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import argparse
 import asyncio
 import logging
 import logging.handlers
+import os
 import signal
 import sys
 from pathlib import Path
@@ -19,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 _NEXTME_HOME = Path("~/.nextme").expanduser()
 _LOG_FILE = _NEXTME_HOME / "logs" / "nextme.log"
+_PID_FILE = _NEXTME_HOME / "nextme.pid"
 
 # Maximum seconds to wait for in-flight tasks to drain on shutdown.
 _SHUTDOWN_DRAIN_TIMEOUT = 30
@@ -136,6 +139,13 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
 
     logger.info("nextme starting up (log_level=%s)", effective_log_level)
     logger.info("Config loaded: app_id=%s, projects=%d", config.app_id, len(config.projects))
+
+    # ------------------------------------------------------------------
+    # Write PID file so `nextme down` can target the exact process.
+    # ------------------------------------------------------------------
+    _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _PID_FILE.write_text(str(os.getpid()))
+    logger.debug("PID file written: %s (pid=%d)", _PID_FILE, os.getpid())
 
     # ------------------------------------------------------------------
     # Step 3: Validate credentials
@@ -334,7 +344,75 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
             except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
 
+    # Remove PID file on clean shutdown.
+    try:
+        _PID_FILE.unlink(missing_ok=True)
+        logger.debug("PID file removed: %s", _PID_FILE)
+    except Exception:
+        pass
+
     logger.info("nextme shutdown complete")
+
+
+# ---------------------------------------------------------------------------
+# nextme down helper
+# ---------------------------------------------------------------------------
+
+
+def _cmd_down(timeout: int) -> None:
+    """Send SIGTERM to the running nextme process identified by the PID file.
+
+    Waits up to *timeout* seconds for the process to exit, then sends SIGKILL
+    if it is still alive.  Safe to call when no instance is running.
+    """
+    import time
+
+    if not _PID_FILE.exists():
+        print("nextme is not running (no PID file found).", file=sys.stderr)
+        sys.exit(0)
+
+    try:
+        pid = int(_PID_FILE.read_text().strip())
+    except (ValueError, OSError) as exc:
+        print(f"Could not read PID file {_PID_FILE}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # Verify the process is still alive.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        print(f"Process {pid} is no longer running; removing stale PID file.")
+        _PID_FILE.unlink(missing_ok=True)
+        sys.exit(0)
+    except PermissionError:
+        # Process exists but belongs to another user — still try to signal.
+        pass
+
+    print(f"Sending SIGTERM to nextme (pid={pid})…")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        print("Process already exited.")
+        _PID_FILE.unlink(missing_ok=True)
+        sys.exit(0)
+
+    # Wait for process to exit.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            print(f"nextme (pid={pid}) stopped.")
+            sys.exit(0)
+        time.sleep(0.5)
+
+    # Still alive — escalate to SIGKILL.
+    print(f"Process {pid} did not exit in {timeout}s; sending SIGKILL.")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    _PID_FILE.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -368,10 +446,21 @@ def main() -> None:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
 
+    down_parser = subparsers.add_parser("down", help="Stop a running bot instance")
+    down_parser.add_argument(
+        "--timeout",
+        type=int,
+        default=10,
+        metavar="SECS",
+        help="Seconds to wait for graceful exit before SIGKILL (default: 10)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "up":
         asyncio.run(run(args.directory, args.executor, args.log_level))
+    elif args.command == "down":
+        _cmd_down(args.timeout)
     else:
         parser.print_help()
 

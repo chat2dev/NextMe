@@ -274,6 +274,7 @@ class TestRun:
 
         with (
             patch("nextme.main._setup_logging"),
+            patch("nextme.main._PID_FILE", tmp_path / "nextme.pid"),
             patch("nextme.config.loader.ConfigLoader.load_app_config", return_value=mock_config) as mock_loader,
             patch("nextme.config.loader.ConfigLoader.load_settings", return_value=mock_settings),
             pytest.raises(SystemExit) as exc_info,
@@ -285,3 +286,189 @@ class TestRun:
         mock_loader.assert_called_once()
         path_arg = mock_loader.call_args[0][0]
         assert path_arg is not None
+
+    async def test_run_writes_pid_file(self, tmp_path):
+        """run() writes the current PID to the PID file before credential check."""
+        import os
+        from nextme.main import run
+        from nextme.config.schema import AppConfig, Settings
+
+        pid_file = tmp_path / "nextme.pid"
+        empty_config = AppConfig(app_id="", app_secret="", projects=[])
+        mock_settings = Settings()
+
+        with (
+            patch("nextme.main._setup_logging"),
+            patch("nextme.main._PID_FILE", pid_file),
+            patch("nextme.config.loader.ConfigLoader.load_app_config", return_value=empty_config),
+            patch("nextme.config.loader.ConfigLoader.load_settings", return_value=mock_settings),
+            pytest.raises(SystemExit),
+        ):
+            await run(None, "claude-code-acp", "INFO")
+
+        assert pid_file.exists(), "PID file must be created by run()"
+        assert int(pid_file.read_text().strip()) == os.getpid()
+
+
+# ---------------------------------------------------------------------------
+# Tests: _cmd_down
+# ---------------------------------------------------------------------------
+
+
+class TestCmdDown:
+    def test_no_pid_file_exits_0(self, tmp_path):
+        """_cmd_down exits 0 with message when PID file doesn't exist."""
+        from nextme.main import _cmd_down
+
+        pid_file = tmp_path / "nextme.pid"
+        with (
+            patch("nextme.main._PID_FILE", pid_file),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _cmd_down(timeout=5)
+
+        assert exc_info.value.code == 0
+
+    def test_stale_pid_removes_file_and_exits_0(self, tmp_path):
+        """_cmd_down removes stale PID file and exits 0 when process is gone."""
+        from nextme.main import _cmd_down
+
+        pid_file = tmp_path / "nextme.pid"
+        pid_file.write_text("99999999")
+
+        def fake_kill(pid, sig):
+            raise ProcessLookupError("no such process")
+
+        with (
+            patch("nextme.main._PID_FILE", pid_file),
+            patch("os.kill", side_effect=fake_kill),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _cmd_down(timeout=5)
+
+        assert exc_info.value.code == 0
+        assert not pid_file.exists(), "Stale PID file must be removed"
+
+    def test_sends_sigterm_and_waits_for_exit(self, tmp_path):
+        """_cmd_down sends SIGTERM; exits 0 once the process disappears."""
+        from nextme.main import _cmd_down
+
+        pid_file = tmp_path / "nextme.pid"
+        pid_file.write_text("12345")
+
+        kill_calls: list[tuple[int, int]] = []
+
+        def fake_kill(pid: int, sig: int) -> None:
+            kill_calls.append((pid, sig))
+            # First os.kill(pid, 0): process alive (no exception).
+            # os.kill(pid, SIGTERM): signal delivered (no exception).
+            # Second os.kill(pid, 0) inside the wait loop: process gone.
+            if sig == 0 and len([c for c in kill_calls if c[1] == 0]) >= 2:
+                raise ProcessLookupError("process exited")
+
+        with (
+            patch("nextme.main._PID_FILE", pid_file),
+            patch("os.kill", side_effect=fake_kill),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _cmd_down(timeout=10)
+
+        assert exc_info.value.code == 0
+        assert (12345, signal.SIGTERM) in kill_calls
+
+    def test_escalates_to_sigkill_when_process_does_not_exit(self, tmp_path):
+        """_cmd_down sends SIGKILL after the timeout elapses."""
+        from nextme.main import _cmd_down
+
+        pid_file = tmp_path / "nextme.pid"
+        pid_file.write_text("12345")
+
+        kill_calls: list[tuple[int, int]] = []
+
+        def fake_kill(pid: int, sig: int) -> None:
+            # Process never dies — os.kill(pid, 0) always succeeds.
+            kill_calls.append((pid, sig))
+
+        with (
+            patch("nextme.main._PID_FILE", pid_file),
+            patch("os.kill", side_effect=fake_kill),
+            patch("time.sleep"),  # prevent actual sleeping
+        ):
+            # timeout=0 means deadline expires before the while loop executes.
+            _cmd_down(timeout=0)
+
+        assert any(sig == signal.SIGKILL for _, sig in kill_calls), (
+            "SIGKILL must be sent when process does not exit in time"
+        )
+
+    def test_permission_error_still_sends_sigterm(self, tmp_path):
+        """_cmd_down continues to send SIGTERM even when liveness check fails with PermissionError."""
+        from nextme.main import _cmd_down
+
+        pid_file = tmp_path / "nextme.pid"
+        pid_file.write_text("12345")
+
+        kill_calls: list[tuple[int, int]] = []
+
+        def fake_kill(pid: int, sig: int) -> None:
+            kill_calls.append((pid, sig))
+            if sig == 0:
+                if len([c for c in kill_calls if c[1] == 0]) == 1:
+                    raise PermissionError("not permitted")  # liveness check
+                raise ProcessLookupError("process exited")  # wait loop: done
+
+        with (
+            patch("nextme.main._PID_FILE", pid_file),
+            patch("os.kill", side_effect=fake_kill),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _cmd_down(timeout=10)
+
+        assert exc_info.value.code == 0
+        assert (12345, signal.SIGTERM) in kill_calls
+
+    def test_invalid_pid_file_exits_1(self, tmp_path):
+        """_cmd_down exits 1 when the PID file contains non-integer content."""
+        from nextme.main import _cmd_down
+
+        pid_file = tmp_path / "nextme.pid"
+        pid_file.write_text("not-a-pid")
+
+        with (
+            patch("nextme.main._PID_FILE", pid_file),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _cmd_down(timeout=5)
+
+        assert exc_info.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: main() CLI — nextme down subcommand
+# ---------------------------------------------------------------------------
+
+
+class TestMainDown:
+    def test_main_down_calls_cmd_down_with_default_timeout(self):
+        """main() with 'down' invokes _cmd_down(10)."""
+        from nextme.main import main
+
+        with (
+            patch("sys.argv", ["nextme", "down"]),
+            patch("nextme.main._cmd_down") as mock_down,
+        ):
+            main()
+
+        mock_down.assert_called_once_with(10)
+
+    def test_main_down_passes_custom_timeout(self):
+        """main() passes --timeout value to _cmd_down."""
+        from nextme.main import main
+
+        with (
+            patch("sys.argv", ["nextme", "down", "--timeout", "30"]),
+            patch("nextme.main._cmd_down") as mock_down,
+        ):
+            main()
+
+        mock_down.assert_called_once_with(30)

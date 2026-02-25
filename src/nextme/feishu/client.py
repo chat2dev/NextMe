@@ -83,10 +83,30 @@ class FeishuClient:
 
         self._stop_event.clear()
 
-        # lark.ws.Client.start() is blocking — run it in a thread so we don't
-        # stall the event loop.
+        # lark_oapi.ws.client stores a module-level ``loop`` variable captured
+        # via asyncio.get_event_loop() at first import.  When the module is
+        # first imported inside asyncio.run() (as is the case here due to lazy
+        # imports), that variable holds the *running* main event loop.  Calling
+        # loop.run_until_complete() on an already-running loop raises
+        # "RuntimeError: This event loop is already running".
+        #
+        # Fix: inside the thread executor, temporarily replace the module-level
+        # ``loop`` reference with a fresh event loop so lark's blocking
+        # run_until_complete() calls succeed.
+        import lark_oapi.ws.client as _lark_ws_mod  # noqa: PLC0415
+
+        def _run_ws() -> None:
+            fresh = asyncio.new_event_loop()
+            prev = _lark_ws_mod.loop
+            _lark_ws_mod.loop = fresh
+            try:
+                self._ws_client.start()
+            finally:
+                _lark_ws_mod.loop = prev
+                fresh.close()
+
         try:
-            await loop.run_in_executor(None, self._ws_client.start)
+            await loop.run_in_executor(None, _run_ws)
         except asyncio.CancelledError:
             logger.info("FeishuClient.start() cancelled")
             raise
