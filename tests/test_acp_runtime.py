@@ -5,7 +5,13 @@ import pytest
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from nextme.acp.runtime import ACPRuntime, _INIT_TIMEOUT_SECONDS, _STOP_GRACEFUL_TIMEOUT_SECONDS
+from nextme.acp.runtime import (
+    ACPRuntime,
+    _INIT_TIMEOUT_SECONDS,
+    _STOP_GRACEFUL_TIMEOUT_SECONDS,
+    _STRIP_ENV_EXACT,
+    _STRIP_ENV_PREFIX,
+)
 from nextme.config.schema import Settings
 from nextme.protocol.types import Task, PermissionChoice, PermOption, PermissionRequest
 
@@ -724,3 +730,114 @@ async def test_execute_ignores_stale_response_ids(runtime):
 
     result = await runtime.execute(task, on_progress, on_permission)
     assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# Environment variable filtering
+# ---------------------------------------------------------------------------
+
+
+def _build_child_env(parent_env: dict) -> dict:
+    """Replicate the env-building logic from ACPRuntime.ensure_ready."""
+    child_env = {
+        k: v
+        for k, v in parent_env.items()
+        if k not in _STRIP_ENV_EXACT and not k.startswith(_STRIP_ENV_PREFIX)
+    }
+    child_env["CI"] = "true"
+    child_env.setdefault("TERM", "xterm")
+    if "ANTHROPIC_API_KEY" not in child_env and "ANTHROPIC_AUTH_TOKEN" in parent_env:
+        child_env["ANTHROPIC_API_KEY"] = parent_env["ANTHROPIC_AUTH_TOKEN"]
+    return child_env
+
+
+def test_strip_claudecode_exact():
+    env = _build_child_env({"CLAUDECODE": "1", "PATH": "/usr/bin"})
+    assert "CLAUDECODE" not in env
+    assert env["PATH"] == "/usr/bin"
+
+
+def test_strip_claude_code_entrypoint():
+    env = _build_child_env({"CLAUDE_CODE_ENTRYPOINT": "cli", "HOME": "/home/user"})
+    assert "CLAUDE_CODE_ENTRYPOINT" not in env
+
+
+def test_strip_claude_code_experimental_agent_teams():
+    env = _build_child_env({"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"})
+    assert "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS" not in env
+
+
+def test_strip_all_claude_code_prefix_vars():
+    """Any CLAUDE_CODE_* var is stripped, even ones not explicitly listed."""
+    parent = {
+        "CLAUDE_CODE_ENTRYPOINT": "cli",
+        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+        "CLAUDE_CODE_API_USAGE_TELEMETRY": "on",
+        "CLAUDE_CODE_VERSION": "1.2.3",
+        "CLAUDE_CODE_UNKNOWN_FUTURE_VAR": "x",
+        "PATH": "/usr/bin",
+    }
+    env = _build_child_env(parent)
+    for key in parent:
+        if key.startswith("CLAUDE_CODE_"):
+            assert key not in env, f"{key} should be stripped"
+    assert env["PATH"] == "/usr/bin"
+
+
+def test_strip_anthropic_auth_token():
+    env = _build_child_env({"ANTHROPIC_AUTH_TOKEN": "cr_abc123"})
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+
+
+def test_promote_auth_token_to_api_key():
+    """ANTHROPIC_AUTH_TOKEN is promoted to ANTHROPIC_API_KEY when API key absent."""
+    env = _build_child_env({"ANTHROPIC_AUTH_TOKEN": "cr_abc123", "PATH": "/bin"})
+    assert env.get("ANTHROPIC_API_KEY") == "cr_abc123"
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+
+
+def test_no_promotion_when_api_key_already_present():
+    """Existing ANTHROPIC_API_KEY is preserved; auth token is still stripped."""
+    env = _build_child_env({
+        "ANTHROPIC_API_KEY": "sk-ant-real",
+        "ANTHROPIC_AUTH_TOKEN": "cr_override",
+    })
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-real"
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+
+
+def test_ci_always_set():
+    env = _build_child_env({"PATH": "/bin"})
+    assert env["CI"] == "true"
+
+
+def test_ci_overrides_existing():
+    """CI=true is forced even if parent had a different value."""
+    env = _build_child_env({"CI": "false"})
+    assert env["CI"] == "true"
+
+
+def test_term_defaulted_to_xterm():
+    env = _build_child_env({"PATH": "/bin"})
+    assert env["TERM"] == "xterm"
+
+
+def test_term_not_overridden_when_present():
+    env = _build_child_env({"TERM": "xterm-256color"})
+    assert env["TERM"] == "xterm-256color"
+
+
+def test_regular_vars_preserved():
+    parent = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/home/alice",
+        "USER": "alice",
+        "ANTHROPIC_API_KEY": "sk-ant-test",
+        "VIRTUAL_ENV": "/home/alice/.venv",
+    }
+    env = _build_child_env(parent)
+    assert env["PATH"] == parent["PATH"]
+    assert env["HOME"] == parent["HOME"]
+    assert env["USER"] == parent["USER"]
+    assert env["ANTHROPIC_API_KEY"] == parent["ANTHROPIC_API_KEY"]
+    assert env["VIRTUAL_ENV"] == parent["VIRTUAL_ENV"]

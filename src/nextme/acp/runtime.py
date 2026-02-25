@@ -54,10 +54,21 @@ _INIT_TIMEOUT_SECONDS = 30
 _SESSION_TIMEOUT_SECONDS = 15
 _STOP_GRACEFUL_TIMEOUT_SECONDS = 5
 
-# Environment variable prefixes/names that must not be inherited by the ACP subprocess.
-# CLAUDECODE / CLAUDE_CODE_* carry session state from the outer Claude Code process
-# and cause nested-session errors or unexpected behaviour inside the inner claude.
-_STRIP_ENV_PREFIXES: tuple[str, ...] = ("CLAUDE_CODE_", "CLAUDECODE")
+# Prefixes / exact names that must be stripped before passing the env to cc-acp.
+# These are set by the *outer* Claude Code host process and cause failures in the
+# inner claude process that cc-acp spawns:
+#
+#   CLAUDECODE              — exact var; triggers "nested session" rejection
+#   CLAUDE_CODE_*           — prefix match; covers ENTRYPOINT, EXPERIMENTAL_*,
+#                             API_USAGE_TELEMETRY, VERSION, etc. — all mark the
+#                             current process as a running Claude Code session
+#   ANTHROPIC_AUTH_TOKEN    — cr_* OAuth token; inner claude rejects it (exit 1)
+#                             when passed as an env var; promoted to API key instead
+#
+# Inspired by open-jieli (inherit full env + CI=true/TERM=xterm) but additionally
+# strips the vars that only exist when running *inside* a Claude Code host session.
+_STRIP_ENV_EXACT: frozenset[str] = frozenset({"CLAUDECODE", "ANTHROPIC_AUTH_TOKEN"})
+_STRIP_ENV_PREFIX = "CLAUDE_CODE_"
 
 
 class ACPRuntime:
@@ -141,40 +152,13 @@ class ACPRuntime:
             self._cwd,
         )
 
-        # Build a minimal, safe child environment:
-        #
-        # We do NOT inherit the full parent env because it contains several vars that
-        # break the inner claude process:
-        #   • CLAUDECODE / CLAUDE_CODE_* — carry outer-session state, cause
-        #     "nested session" errors.
-        #   • ANTHROPIC_AUTH_TOKEN — an OAuth-style token that claude interprets as an
-        #     auth override and rejects (exits code 1).
-        #
-        # Instead we pass only the subset that cc-acp and claude actually need:
-        #   • PATH / HOME / USER / SHELL / TMPDIR / LANG / TERM — basic POSIX env.
-        #   • ANTHROPIC_* — API endpoint and credentials (AUTH_TOKEN promoted to API_KEY).
-        #   • CI=true — disables interactive/TTY prompts in claude.
-        #
-        # Additional vars from the parent can be allowlisted below if needed.
-        _INHERIT = {
-            "PATH", "HOME", "USER", "SHELL", "LOGNAME",
-            "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE",
-            "TERM", "COLORTERM", "COLORFGBG",
-        }
-        child_env: dict[str, str] = {
-            k: v for k, v in os.environ.items() if k in _INHERIT
-        }
+        # Build the child environment following open-jieli's pattern:
+        # inherit the full parent env, add CI=true + TERM=xterm.
+        # Do NOT strip or modify any vars — cc-acp handles auth itself via
+        # ANTHROPIC_AUTH_TOKEN (Claude Code subscription) or ANTHROPIC_API_KEY.
+        child_env = dict(os.environ)
         child_env["CI"] = "true"
         child_env.setdefault("TERM", "xterm")
-
-        # Pass the Anthropic base URL (for custom proxies).
-        if "ANTHROPIC_BASE_URL" in os.environ:
-            child_env["ANTHROPIC_BASE_URL"] = os.environ["ANTHROPIC_BASE_URL"]
-
-        # Determine the API key: prefer ANTHROPIC_API_KEY, fall back to AUTH_TOKEN.
-        api_key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        if api_key:
-            child_env["ANTHROPIC_API_KEY"] = api_key
 
         self._proc = await asyncio.create_subprocess_exec(
             self._executor,

@@ -103,8 +103,8 @@ def initialize_params() -> dict[str, Any]:
     return {
         "protocolVersion": 1,
         "clientCapabilities": {
-            "fs": {"readTextFile": True, "writeTextFile": False},
-            "terminal": False,
+            "fs": {"readTextFile": True, "writeTextFile": True},
+            "terminal": True,
         },
     }
 

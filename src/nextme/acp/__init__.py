@@ -26,6 +26,7 @@ from .protocol import (
     permission_response_result,
     prompt_params,
 )
+from .direct_runtime import DirectClaudeRuntime
 from .runtime import ACPRuntime
 
 __all__ = [
@@ -48,6 +49,7 @@ __all__ = [
     "ACPClient",
     # runtime
     "ACPRuntime",
+    "DirectClaudeRuntime",
     # janitor
     "ACPRuntimeRegistry",
     "ACPJanitor",
