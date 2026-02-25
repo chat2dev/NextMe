@@ -416,13 +416,13 @@ class SessionWorker:
         if self._progress_message_id:
             try:
                 await self._replier.update_card(self._progress_message_id, card_json)
-                return
             except Exception:
                 logger.exception(
                     "SessionWorker[%s]: failed to update card in-place",
                     self._session.context_id,
                 )
-        # Fallback: no progress card available — send a new reply.
+            return  # always return — never create a second card when progress card exists
+        # Fallback: no progress card at all — send a new reply.
         try:
             if task.message_id:
                 await self._replier.reply_card(
