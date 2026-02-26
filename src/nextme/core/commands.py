@@ -25,11 +25,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 HELP_COMMANDS: list[tuple[str, str]] = [
-    ("/new", "重置 ACP Session（清除对话历史）"),
+    ("/new", "开启新对话（清除当前对话历史）"),
     ("/stop", "取消当前执行中的任务"),
     ("/help", "显示帮助"),
+    ("/skill", "列出所有 Skill"),
     ("/skill <trigger>", "触发指定 Skill"),
     ("/status", "显示所有 Session 状态"),
+    ("/task", "显示当前任务队列"),
+    ("/project", "列出所有项目"),
     ("/project <name>", "切换活跃项目"),
     ("/project bind <name>", "将当前群聊绑定到指定项目"),
     ("/project unbind", "解除当前群聊的项目绑定"),
@@ -74,7 +77,7 @@ async def handle_new(
             )
 
     try:
-        await replier.send_text(chat_id, "Session 已重置，对话历史已清除。")
+        await replier.send_text(chat_id, "已开启新对话，历史记录已清除。")
     except Exception:
         logger.exception("handle_new: failed to send confirmation to chat %r", chat_id)
 
@@ -165,12 +168,30 @@ async def handle_status(
     for project_name, session in user_ctx.sessions.items():
         active_marker = "★ " if project_name == user_ctx.active_project else ""
         queue_size = session.task_queue.qsize()
+
+        # Session ID label
+        if session.actual_id:
+            session_label = session.actual_id
+        elif session.status.value == "executing":
+            session_label = "(初始化中…)"
+        else:
+            session_label = "(无)"
+
+        # Active task label: show content preview instead of raw UUID
+        if session.active_task:
+            preview = session.active_task.content.replace("\n", " ")
+            if len(preview) > 40:
+                preview = preview[:40] + "…"
+            task_label = f"`{preview}`"
+        else:
+            task_label = "无"
+
         section = "\n".join([
             f"**{active_marker}{session.project_name}**",
             f"路径: `{session.project_path}`",
             f"状态: {session.status.value}  执行器: {session.executor}",
-            f"ACP Session: {session.actual_id or '(未初始化)'}",
-            f"当前任务: {session.active_task.id if session.active_task else '无'}  队列: {queue_size}",
+            f"Session: {session_label}",
+            f"当前任务: {task_label}  队列: {queue_size}",
         ])
         sections.append(section)
 

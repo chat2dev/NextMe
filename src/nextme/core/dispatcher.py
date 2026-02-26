@@ -23,6 +23,8 @@ from typing import Optional
 from ..acp.janitor import ACPRuntimeRegistry
 from ..config.schema import AppConfig, Settings
 from ..config.state_store import StateStore
+from ..skills.invoker import SkillInvoker
+from ..skills.registry import SkillRegistry
 from ..protocol.types import (
     PermissionChoice,
     Reply,
@@ -72,6 +74,7 @@ class TaskDispatcher:
         path_lock_registry: PathLockRegistry,
         feishu_client: IMAdapter,
         state_store: Optional[StateStore] = None,
+        skill_registry: Optional[SkillRegistry] = None,
     ) -> None:
         self._config = config
         self._settings = settings
@@ -80,6 +83,7 @@ class TaskDispatcher:
         self._path_lock_registry = path_lock_registry
         self._feishu_client = feishu_client
         self._state_store = state_store
+        self._skill_registry: SkillRegistry = skill_registry or SkillRegistry()
 
         # worker_key (context_id:project_name) -> asyncio.Task (running worker)
         self._worker_tasks: dict[str, asyncio.Task] = {}
@@ -352,14 +356,19 @@ class TaskDispatcher:
 
         elif command == "/project":
             if not arg:
-                available = ", ".join(
-                    f"`{p.name}`" for p in self._config.projects
-                )
-                await replier.send_text(
-                    chat_id,
-                    f"用法: `/project <name>` 或 `/project bind <name>` 或 `/project unbind`\n"
-                    f"可用项目: {available or '(无)'}",
-                )
+                active = user_ctx.active_project
+                bound = self._resolve_bound_project(chat_id)
+                lines = ["**项目列表:**\n"]
+                for p in self._config.projects:
+                    markers = []
+                    if p.name == active:
+                        markers.append("★ 活跃")
+                    if bound and p.name == bound:
+                        markers.append("⚓ 绑定")
+                    marker_str = f"  `{'  '.join(markers)}`" if markers else ""
+                    lines.append(f"• **{p.name}**{marker_str}  `{p.path}`")
+                lines.append("\n用法: `/project <name>` 切换 | `/project bind <name>` 绑定 | `/project unbind` 解绑")
+                await replier.send_text(chat_id, "\n".join(lines))
                 return
 
             sub_parts = arg.split(maxsplit=1)
@@ -389,13 +398,66 @@ class TaskDispatcher:
 
         elif command == "/skill":
             if not arg:
-                await replier.send_text(chat_id, "用法: `/skill <trigger>`")
+                skills = self._skill_registry.list_all()
+                if not skills:
+                    await replier.send_text(chat_id, "当前没有已注册的 Skill。")
+                else:
+                    lines = ["**已注册 Skills:**\n"]
+                    for s in sorted(skills, key=lambda x: x.meta.trigger):
+                        lines.append(f"• `/skill {s.meta.trigger}` — {s.meta.description}")
+                    await replier.send_text(chat_id, "\n".join(lines))
                 return
-            # Skill invocation is handled at a higher layer; acknowledge here.
+            # Look up the skill and enqueue a rendered prompt as a normal task.
+            trigger, _, user_input = arg.partition(" ")
+            skill = self._skill_registry.get(trigger.strip())
+            if skill is None:
+                available = ", ".join(
+                    f"`{s.meta.trigger}`"
+                    for s in sorted(self._skill_registry.list_all(), key=lambda x: x.meta.trigger)
+                )
+                await replier.send_text(
+                    chat_id,
+                    f"未找到 Skill `{trigger}`。\n可用: {available or '(无)'}",
+                )
+                return
             logger.info(
-                "TaskDispatcher: /skill trigger=%r from context_id=%r", arg, context_id
+                "TaskDispatcher: invoking skill %r for context_id=%r", trigger, context_id
             )
-            await replier.send_text(chat_id, f"正在触发 Skill: `{arg}`…")
+            prompt = SkillInvoker().build_prompt(skill, user_input=user_input.strip())
+            skill_task = Task(
+                id=str(uuid.uuid4()),
+                content=prompt,
+                session_id=task.session_id,
+                reply_fn=task.reply_fn,
+                timeout=task.timeout,
+            )
+            try:
+                session.task_queue.put_nowait(skill_task)
+                session.pending_tasks.append(skill_task)
+                skill_task.was_queued = session.task_queue.qsize() > 1
+            except asyncio.QueueFull:
+                await replier.send_text(chat_id, "任务队列已满，请稍后再试。")
+                return
+            await self._ensure_worker(session, replier)
+
+        elif command == "/task":
+            lines = ["**当前任务队列:**\n"]
+            has_any = False
+            for project_name, sess in user_ctx.sessions.items():
+                active_marker = "★ " if project_name == user_ctx.active_project else ""
+                active_task = sess.active_task
+                queue_size = sess.task_queue.qsize()
+                if active_task or queue_size > 0:
+                    has_any = True
+                    lines.append(f"**{active_marker}{project_name}**")
+                    if active_task:
+                        lines.append(f"  执行中: `{active_task.id[:8]}…` {active_task.content[:40]}")
+                    if queue_size > 0:
+                        lines.append(f"  队列等待: {queue_size} 个任务")
+            if not has_any:
+                await replier.send_text(chat_id, "当前没有进行中的任务。")
+            else:
+                await replier.send_text(chat_id, "\n".join(lines))
 
         else:
             logger.debug(
