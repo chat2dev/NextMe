@@ -193,6 +193,17 @@ async def test_send_result_fallback_uses_reply_card_when_no_progress_card(worker
     replier.update_card.assert_not_awaited()
 
 
+async def test_send_result_no_fallback_when_update_card_fails(worker, replier):
+    """Even if update_card raises, reply_card must NOT be called (no duplicate card)."""
+    worker._progress_message_id = "prog_msg_id"
+    replier.update_card.side_effect = Exception("API error")
+    task, _ = make_task("hello")
+    task.message_id = "om_src"
+    await worker._send_result(task, "result")
+    replier.update_card.assert_awaited_once()
+    replier.reply_card.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # _send_error tests
 # ---------------------------------------------------------------------------
