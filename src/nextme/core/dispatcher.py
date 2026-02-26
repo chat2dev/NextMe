@@ -23,6 +23,7 @@ from typing import Optional
 from ..acp.janitor import ACPRuntimeRegistry
 from ..config.schema import AppConfig, Settings
 from ..config.state_store import StateStore
+from ..memory.manager import MemoryManager
 from ..skills.invoker import SkillInvoker
 from ..skills.registry import SkillRegistry
 from ..protocol.types import (
@@ -39,6 +40,7 @@ from .commands import (
     handle_help,
     handle_new,
     handle_project,
+    handle_remember,
     handle_status,
     handle_stop,
 )
@@ -75,6 +77,7 @@ class TaskDispatcher:
         feishu_client: IMAdapter,
         state_store: Optional[StateStore] = None,
         skill_registry: Optional[SkillRegistry] = None,
+        memory_manager: Optional[MemoryManager] = None,
     ) -> None:
         self._config = config
         self._settings = settings
@@ -84,6 +87,7 @@ class TaskDispatcher:
         self._feishu_client = feishu_client
         self._state_store = state_store
         self._skill_registry: SkillRegistry = skill_registry or SkillRegistry()
+        self._memory_manager = memory_manager
 
         # worker_key (context_id:project_name) -> asyncio.Task (running worker)
         self._worker_tasks: dict[str, asyncio.Task] = {}
@@ -344,6 +348,11 @@ class TaskDispatcher:
                 return
             runtime = self._acp_registry.get(f"{context_id}:{session.project_name}")
             await handle_new(session, runtime, replier, chat_id)
+            # Clear persisted session id so the next task starts a truly fresh session.
+            if self._state_store is not None:
+                self._state_store.save_project_actual_id(
+                    context_id, session.project_name, ""
+                )
 
         elif command == "/stop":
             if session is None:
@@ -459,6 +468,15 @@ class TaskDispatcher:
             else:
                 await replier.send_text(chat_id, "\n".join(lines))
 
+        elif command == "/remember":
+            if not arg:
+                await replier.send_text(chat_id, "用法: `/remember <text>`")
+                return
+            if self._memory_manager is None:
+                await replier.send_text(chat_id, "记忆功能未启用。")
+                return
+            await handle_remember(context_id, arg, self._memory_manager, replier, chat_id)
+
         else:
             logger.debug(
                 "TaskDispatcher: unknown command %r from context_id=%r",
@@ -549,6 +567,8 @@ class TaskDispatcher:
             replier=replier,
             settings=self._settings,
             path_lock_registry=self._path_lock_registry,
+            state_store=self._state_store,
+            memory_manager=self._memory_manager,
         )
         worker_task = asyncio.create_task(
             worker.run(),

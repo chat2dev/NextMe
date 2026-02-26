@@ -15,11 +15,13 @@ Turn Feishu group chats and direct messages into an interactive Claude Code term
 | ACPRuntime (optional) | JSON-RPC 2.0 over `cc-acp` subprocess |
 | Streaming progress cards | Card updated every 3 s during execution; live tool-call display |
 | Permission flow | Agent pushes a confirmation card for write operations; user replies with a number |
-| Session isolation | Each user has an independent session; multi-user fully parallel |
-| Persistent memory | User facts and preferences persist across restarts; injected into agent system prompt |
+| Multi-project parallel | Each `(user, project)` pair gets an independent worker; multiple projects run concurrently |
+| Chat binding | Bind a group chat to a specific project (`/project bind <name>`) |
+| Session persistence | Claude session ID survives bot restarts; conversation history seamlessly resumed |
+| Long-term memory | `/remember <text>` saves user facts; facts are injected into new sessions automatically |
 | Context compression | Oversized contexts auto-compressed with zlib / lzma / brotli |
 | Skills system | Markdown prompt templates; `/review` `/commit` `/test` etc. |
-| Meta-commands | `/new` `/stop` `/help` `/status` `/project` |
+| Meta-commands | `/new` `/stop` `/help` `/status` `/project` `/task` `/remember` |
 | Path lock | Only one session may write to a given project directory at a time |
 | Graceful shutdown | SIGTERM/SIGINT → drain in-flight tasks → flush state → exit |
 
@@ -113,12 +115,18 @@ Send any message to the bot. The agent executes the task inside the configured p
 
 | Command | Description |
 |---------|-------------|
-| `/new` | Reset conversation history (start a new session) |
+| `/new` | Start a new conversation (clears history) |
 | `/stop` | Cancel the currently running task |
 | `/help` | Show the help card |
-| `/status` | Show current session status |
+| `/status` | Show all session statuses |
+| `/task` | Show active tasks and queue depth per project |
+| `/project` | List all configured projects |
 | `/project <name>` | Switch the active project |
-| `/skill <trigger>` | Manually invoke a skill |
+| `/project bind <name>` | Permanently bind this chat to a project |
+| `/project unbind` | Remove the chat-to-project binding |
+| `/skill` | List all registered skills |
+| `/skill <trigger>` | Invoke a skill by trigger name |
+| `/remember <text>` | Save a fact to long-term memory |
 
 ### Built-in skills
 
@@ -166,10 +174,28 @@ Reply with the corresponding number to continue.
 | `app_id` | string | Feishu app App ID |
 | `app_secret` | string | Feishu app App Secret |
 | `projects` | array | Project list (`name` / `path` / `executor`) |
+| `bindings` | object | Static chat→project bindings (`chat_id: project_name`) |
 
 `executor` values:
 - `"claude"` (default) — DirectClaudeRuntime, uses local `claude` CLI
 - `"cc-acp"` — ACPRuntime, uses `cc-acp` subprocess (JSON-RPC 2.0)
+
+**Multi-project example:**
+
+```json
+{
+  "app_id": "cli_xxx",
+  "app_secret": "xxx",
+  "projects": [
+    {"name": "backend", "path": "/path/to/backend"},
+    {"name": "frontend", "path": "/path/to/frontend"},
+    {"name": "infra", "path": "/path/to/infra"}
+  ],
+  "bindings": {
+    "oc_groupchat_devops": "infra"
+  }
+}
+```
 
 ### `~/.nextme/settings.json` fields
 
@@ -301,10 +327,40 @@ uv run pytest
 
 ---
 
+## Multi-project Parallel Execution
+
+NextMe assigns an independent asyncio worker to each `(user, project)` pair, so tasks for different projects run concurrently without blocking each other.
+
+**Routing priority (highest → lowest):**
+
+1. Static binding in `nextme.json` (`bindings` field)
+2. Dynamic binding set via `/project bind <name>` (persisted in `state.json`)
+3. User's current active project (`/project <name>`)
+4. First project in the `projects` list (default)
+
+---
+
+## Session Persistence & Memory
+
+**Session persistence** — The Claude session ID (`actual_id`) is saved to `~/.nextme/state.json` after each task. On bot restart, NextMe passes `--resume <id>` to the `claude` CLI so conversation history is seamlessly resumed.
+
+**Long-term memory** — Use `/remember <text>` to save facts. On new sessions (not resumed ones), the top-10 highest-confidence facts are prepended to the task prompt automatically:
+
+```
+[用户记忆]
+- I prefer Python over JavaScript
+- Use pytest for tests
+
+[用户消息]
+<your message here>
+```
+
+---
+
 ## Roadmap
 
 - **Phase 1 ✅** — Feishu WebSocket + agent subprocess + session isolation + streaming progress + permission confirmation
-- **Phase 2 ✅** — Skills system, persistent memory (facts injection), context compression, multi-project switching, path lock
+- **Phase 2 ✅** — Skills system, multi-project parallel, session persistence across restarts, long-term memory (`/remember`), context compression, path lock
 - **Phase 3** — Config hot-reload, Slack / DingTalk adapter, multi-agent orchestration
 
 ---

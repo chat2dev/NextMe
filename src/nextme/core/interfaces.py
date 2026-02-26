@@ -230,6 +230,14 @@ class AgentRuntime(Protocol):
         """Clear the session id so the next ``execute`` starts a fresh session."""
         ...
 
+    async def restore_session(self, actual_id: str) -> None:
+        """Set the session id so the next ``execute`` resumes a prior session.
+
+        Symmetric to :meth:`reset_session`.  Called on bot restart when a
+        persisted *actual_id* is found in the state store.
+        """
+        ...
+
     async def stop(self) -> None:
         """Terminate the subprocess gracefully.  Safe to call if not running."""
         ...

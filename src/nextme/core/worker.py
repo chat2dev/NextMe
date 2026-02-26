@@ -16,12 +16,15 @@ asyncio Task.  The worker:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import time
 from typing import Optional
 
 from ..acp.janitor import ACPRuntimeRegistry
 from ..config.schema import Settings
+from ..config.state_store import StateStore
+from ..memory.manager import MemoryManager
 from ..protocol.types import (
     PermissionChoice,
     PermissionRequest,
@@ -63,12 +66,16 @@ class SessionWorker:
         replier: Replier,
         settings: Settings,
         path_lock_registry: PathLockRegistry,
+        state_store: Optional[StateStore] = None,
+        memory_manager: Optional[MemoryManager] = None,
     ) -> None:
         self._session = session
         self._acp_registry = acp_registry
         self._replier = replier
         self._settings = settings
         self._path_lock_registry = path_lock_registry
+        self._state_store = state_store
+        self._memory_manager = memory_manager
 
         # State maintained across _on_progress calls for a single task.
         self._progress_message_id: Optional[str] = None
@@ -279,6 +286,42 @@ class SessionWorker:
             if runtime.actual_id and not self._session.actual_id:
                 self._session.actual_id = runtime.actual_id
 
+            # Restore persisted session id to runtime (enables --resume on restart).
+            if not runtime.actual_id and self._state_store is not None:
+                persisted_id = self._state_store.get_project_actual_id(
+                    self._session.context_id, self._session.project_name
+                )
+                if persisted_id:
+                    await runtime.restore_session(persisted_id)
+                    self._session.actual_id = persisted_id
+                    logger.info(
+                        "SessionWorker[%s]: restored session id %r for project %r",
+                        self._session.context_id,
+                        persisted_id,
+                        self._session.project_name,
+                    )
+
+            # Inject user memory facts into the task prompt for new sessions only.
+            if not runtime.actual_id and self._memory_manager is not None:
+                try:
+                    await self._memory_manager.load(self._session.context_id)
+                except Exception:
+                    logger.exception(
+                        "SessionWorker[%s]: failed to load memory", self._session.context_id
+                    )
+                facts = self._memory_manager.get_top_facts(self._session.context_id, n=10)
+                if facts:
+                    fact_lines = "\n".join(f"- {f.text}" for f in facts)
+                    task = dataclasses.replace(
+                        task,
+                        content=f"[用户记忆]\n{fact_lines}\n\n[用户消息]\n{task.content}",
+                    )
+                    logger.debug(
+                        "SessionWorker[%s]: injected %d memory facts",
+                        self._session.context_id,
+                        len(facts),
+                    )
+
             # Step 4 — Execute.
             try:
                 final_content = await runtime.execute(
@@ -303,6 +346,14 @@ class SessionWorker:
             # Sync actual_id back to session after execute.
             if runtime.actual_id:
                 self._session.actual_id = runtime.actual_id
+
+            # Persist session id for restart resumption.
+            if self._state_store is not None and runtime.actual_id:
+                self._state_store.save_project_actual_id(
+                    self._session.context_id,
+                    self._session.project_name,
+                    runtime.actual_id,
+                )
 
         # Step 5 — Send final result card.
         self._session.status = TaskStatus.DONE

@@ -15,11 +15,13 @@
 | ACPRuntime（可选） | JSON-RPC 2.0 over `cc-acp` 子进程 |
 | 流式进度卡片 | 每 3s 更新一次执行进度，工具调用实时显示 |
 | 权限确认流程 | Agent 执行写操作时推送确认卡片，用户回复数字继续 |
-| Session 隔离 | 每个用户独立 Session，多用户完全并行 |
-| 持久化内存 | 用户事实、偏好跨会话保留，注入 Agent system prompt |
+| 多项目并行执行 | 每个 `(用户, 项目)` 组合独立 Worker，多项目任务并行不阻塞 |
+| 群聊绑定 | `/project bind <name>` 将群聊永久绑定到指定项目 |
+| Session 持久化 | Claude Session ID 跨重启保留，自动 `--resume` 续接对话历史 |
+| 长期记忆 | `/remember <text>` 保存用户事实；新 Session 自动注入 |
 | 上下文压缩 | 超大上下文自动 zlib/lzma/brotli 压缩存储 |
 | Skills 系统 | Markdown 文件定义 Skill，`/review` `/commit` 等一键触发 |
-| 元命令 | `/new` `/stop` `/help` `/status` `/project` |
+| 元命令 | `/new` `/stop` `/help` `/status` `/project` `/task` `/remember` |
 | 路径锁 | 同一物理路径同时只允许一个 Session 写入 |
 | 优雅停机 | SIGTERM/SIGINT → 等待任务完成 → 刷新状态 → 退出 |
 
@@ -113,12 +115,18 @@ nextme down
 
 | 命令 | 说明 |
 |------|------|
-| `/new` | 重置对话历史（开启新 Session） |
+| `/new` | 开启新对话（清除当前对话历史） |
 | `/stop` | 取消当前正在执行的任务 |
 | `/help` | 显示帮助卡片 |
-| `/status` | 查看当前 Session 状态 |
+| `/status` | 查看所有 Session 状态 |
+| `/task` | 查看各项目当前任务和队列深度 |
+| `/project` | 列出所有配置的项目 |
 | `/project <name>` | 切换活跃项目 |
+| `/project bind <name>` | 将当前群聊永久绑定到指定项目 |
+| `/project unbind` | 解除群聊绑定 |
+| `/skill` | 列出所有已注册 Skills |
 | `/skill <trigger>` | 手动触发指定 Skill |
+| `/remember <text>` | 保存一条长期记忆 |
 
 ### 内置 Skills
 
@@ -166,10 +174,28 @@ Agent 即将执行以下操作：...
 | `app_id` | string | 飞书应用 App ID |
 | `app_secret` | string | 飞书应用 App Secret |
 | `projects` | array | 项目列表（name / path / executor） |
+| `bindings` | object | 静态群聊→项目绑定（`chat_id: project_name`） |
 
 `executor` 可选值：
 - `"claude"`（默认）— DirectClaudeRuntime，使用本地 `claude` CLI
 - `"cc-acp"` — ACPRuntime，使用 `cc-acp` 子进程（JSON-RPC 2.0）
+
+**多项目配置示例：**
+
+```json
+{
+  "app_id": "cli_xxx",
+  "app_secret": "xxx",
+  "projects": [
+    {"name": "backend", "path": "/path/to/backend"},
+    {"name": "frontend", "path": "/path/to/frontend"},
+    {"name": "infra", "path": "/path/to/infra"}
+  ],
+  "bindings": {
+    "oc_groupchat_devops": "infra"
+  }
+}
+```
 
 ### `~/.nextme/settings.json` 字段
 
@@ -301,10 +327,40 @@ uv run pytest
 
 ---
 
+## 多项目并行执行
+
+NextMe 为每个 `(用户, 项目)` 组合分配独立的 asyncio Worker，多个项目任务可以同时运行，互不阻塞。
+
+**消息路由优先级（高→低）：**
+
+1. `nextme.json` 中的静态绑定（`bindings` 字段）
+2. `/project bind <name>` 设置的动态绑定（持久化于 `state.json`）
+3. 用户当前活跃项目（`/project <name>` 切换）
+4. 配置文件第一个项目（默认）
+
+---
+
+## Session 持久化与长期记忆
+
+**Session 持久化** — 每次任务执行后，Claude Session ID（`actual_id`）自动保存到 `~/.nextme/state.json`。Bot 重启后，NextMe 自动传入 `--resume <id>` 恢复对话历史，用户无感知。
+
+**长期记忆** — 使用 `/remember <text>` 保存事实。仅对新 Session（非恢复的），最多注入 10 条置信度最高的事实：
+
+```
+[用户记忆]
+- 我偏好 Python 而非 JavaScript
+- 使用 pytest 编写测试
+
+[用户消息]
+<你的消息>
+```
+
+---
+
 ## 路线图
 
 - **Phase 1 ✅** — 飞书 WebSocket + Agent 子进程 + Session 隔离 + 流式进度 + 权限确认
-- **Phase 2 ✅** — Skills 系统、持久化内存（facts 注入）、上下文压缩、多项目切换、路径锁
+- **Phase 2 ✅** — Skills 系统、多项目并行、Session 持久化跨重启恢复、长期记忆（`/remember`）、上下文压缩、路径锁
 - **Phase 3** — 配置热重载、Slack / 钉钉适配、多 Agent 编排
 
 ---

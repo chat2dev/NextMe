@@ -18,7 +18,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from .schema import GlobalState, Settings, UserState
+from .schema import GlobalState, ProjectState, Settings, UserState
 
 _NEXTME_HOME = Path("~/.nextme").expanduser()
 _STATE_FILE = _NEXTME_HOME / "state.json"
@@ -115,6 +115,36 @@ class StateStore:
     def get_all_bindings(self) -> dict[str, str]:
         """Return a copy of all dynamic chat→project bindings."""
         return dict(self._require_loaded().bindings)
+
+    def save_project_actual_id(
+        self, context_id: str, project_name: str, actual_id: str
+    ) -> None:
+        """Persist the Claude session id for a project (enables --resume on restart).
+
+        Args:
+            context_id: The user context id (``chatID:userID``).
+            project_name: The project name.
+            actual_id: The Claude session UUID to persist.  Pass ``""`` to clear.
+        """
+        user_state = self.get_user_state(context_id)
+        if project_name not in user_state.projects:
+            user_state.projects[project_name] = ProjectState()
+        user_state.projects[project_name].actual_id = actual_id
+        self._dirty = True
+
+    def get_project_actual_id(self, context_id: str, project_name: str) -> str:
+        """Return the persisted Claude session id for *project_name*, or ``""`` if none.
+
+        Args:
+            context_id: The user context id (``chatID:userID``).
+            project_name: The project name.
+        """
+        state = self._require_loaded()
+        user_state = state.contexts.get(context_id)
+        if user_state is None:
+            return ""
+        project_state = user_state.projects.get(project_name)
+        return project_state.actual_id if project_state else ""
 
     async def flush(self) -> None:
         """Force-write the current in-memory state to disk atomically.

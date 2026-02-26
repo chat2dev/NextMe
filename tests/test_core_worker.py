@@ -707,3 +707,160 @@ async def test_execute_task_card_id_set_when_create_card_succeeds(
     task, _ = make_task("hello")
     await worker._execute_task(task)
     assert worker._card_id == "card_abc"
+
+
+# ---------------------------------------------------------------------------
+# state_store persistence
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def state_store_mock():
+    from unittest.mock import MagicMock
+    store = MagicMock()
+    store.get_project_actual_id = MagicMock(return_value="")
+    store.save_project_actual_id = MagicMock()
+    return store
+
+
+async def test_worker_persists_actual_id_after_execute(
+    session, acp_registry, replier, settings, path_lock_registry, state_store_mock
+):
+    """Worker should call save_project_actual_id after executing a task."""
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = "sess-uuid-xyz"
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        state_store=state_store_mock,
+    )
+    task, _ = make_task("hello")
+    await worker._execute_task(task)
+    state_store_mock.save_project_actual_id.assert_called_once_with(
+        session.context_id, session.project_name, "sess-uuid-xyz"
+    )
+
+
+async def test_worker_restores_session_from_state_store(
+    session, acp_registry, replier, settings, path_lock_registry, state_store_mock
+):
+    """Worker should call restore_session when state_store has a persisted id."""
+    registry, mock_runtime = acp_registry
+    # Runtime starts with no actual_id (new process after restart)
+    mock_runtime.actual_id = None
+    state_store_mock.get_project_actual_id = MagicMock(return_value="persisted-id")
+    mock_runtime.restore_session = AsyncMock()
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        state_store=state_store_mock,
+    )
+    task, _ = make_task("hello")
+    await worker._execute_task(task)
+    mock_runtime.restore_session.assert_awaited_once_with("persisted-id")
+
+
+async def test_worker_skips_restore_when_no_persisted_id(
+    session, acp_registry, replier, settings, path_lock_registry, state_store_mock
+):
+    """Worker should not call restore_session when state_store returns empty string."""
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = None
+    state_store_mock.get_project_actual_id = MagicMock(return_value="")
+    mock_runtime.restore_session = AsyncMock()
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        state_store=state_store_mock,
+    )
+    task, _ = make_task("hello")
+    await worker._execute_task(task)
+    mock_runtime.restore_session.assert_not_awaited()
+
+
+async def test_worker_skips_persist_when_no_state_store(
+    session, acp_registry, replier, settings, path_lock_registry
+):
+    """Worker without state_store should not raise and should complete normally."""
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = "some-id"
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        # No state_store passed
+    )
+    task, _ = make_task("hello")
+    # Should complete without error
+    await worker._execute_task(task)
+
+
+# ---------------------------------------------------------------------------
+# memory injection
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def memory_manager_mock():
+    from unittest.mock import AsyncMock, MagicMock
+    from nextme.memory.schema import Fact
+    mgr = MagicMock()
+    mgr.load = AsyncMock()
+    mgr.get_top_facts = MagicMock(return_value=[])
+    return mgr
+
+
+async def test_worker_injects_memory_for_new_session(
+    session, acp_registry, replier, settings, path_lock_registry, memory_manager_mock
+):
+    """Worker injects memory facts into task content when session is new."""
+    from nextme.memory.schema import Fact
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = None  # new session
+    fact = Fact(text="User prefers Python", source="user_command")
+    memory_manager_mock.get_top_facts = MagicMock(return_value=[fact])
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        memory_manager=memory_manager_mock,
+    )
+    task, _ = make_task("what language should I use?")
+    await worker._execute_task(task)
+    # The injected content should include the memory header
+    injected_content = mock_runtime.execute.call_args[1]["task"].content
+    assert "[用户记忆]" in injected_content
+    assert "User prefers Python" in injected_content
+    assert "what language should I use?" in injected_content
+
+
+async def test_worker_skips_memory_injection_for_resumed_session(
+    session, acp_registry, replier, settings, path_lock_registry, memory_manager_mock
+):
+    """Worker does NOT inject memory when session already has an actual_id (resumed)."""
+    from nextme.memory.schema import Fact
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = "existing-session-id"  # resumed session
+    fact = Fact(text="Should not be injected", source="user_command")
+    memory_manager_mock.get_top_facts = MagicMock(return_value=[fact])
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        memory_manager=memory_manager_mock,
+    )
+    task, _ = make_task("hello again")
+    await worker._execute_task(task)
+    # Original content, no memory injection
+    executed_content = mock_runtime.execute.call_args[1]["task"].content
+    assert "[用户记忆]" not in executed_content
+    assert "hello again" == executed_content
+
+
+async def test_worker_skips_memory_injection_when_no_facts(
+    session, acp_registry, replier, settings, path_lock_registry, memory_manager_mock
+):
+    """Worker does not inject memory header when there are no facts."""
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = None
+    memory_manager_mock.get_top_facts = MagicMock(return_value=[])
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        memory_manager=memory_manager_mock,
+    )
+    task, _ = make_task("plain message")
+    await worker._execute_task(task)
+    executed_content = mock_runtime.execute.call_args[1]["task"].content
+    assert "[用户记忆]" not in executed_content
+    assert "plain message" == executed_content

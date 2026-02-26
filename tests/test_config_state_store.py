@@ -400,3 +400,64 @@ async def test_multiple_bindings_stored_correctly(tmp_path):
     store.set_binding("oc_chat_B", "repo-Y")
     bindings = store.get_all_bindings()
     assert bindings == {"oc_chat_A": "repo-X", "oc_chat_B": "repo-Y"}
+
+
+# ---------------------------------------------------------------------------
+# save_project_actual_id / get_project_actual_id
+# ---------------------------------------------------------------------------
+
+
+async def test_save_project_actual_id_persists_value(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store.save_project_actual_id("ctx1:user1", "repo-a", "sess-uuid-123")
+    assert store.get_project_actual_id("ctx1:user1", "repo-a") == "sess-uuid-123"
+
+
+async def test_get_project_actual_id_returns_empty_for_unknown_context(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    assert store.get_project_actual_id("nonexistent", "repo-a") == ""
+
+
+async def test_get_project_actual_id_returns_empty_for_unknown_project(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store.save_project_actual_id("ctx1:user1", "repo-a", "sess-abc")
+    assert store.get_project_actual_id("ctx1:user1", "repo-b") == ""
+
+
+async def test_save_project_actual_id_marks_dirty(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store._dirty = False
+    store.save_project_actual_id("ctx1:user1", "repo-a", "sess-xyz")
+    assert store._dirty is True
+
+
+async def test_save_project_actual_id_clear_with_empty_string(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store.save_project_actual_id("ctx1:user1", "repo-a", "sess-abc")
+    store.save_project_actual_id("ctx1:user1", "repo-a", "")
+    assert store.get_project_actual_id("ctx1:user1", "repo-a") == ""
+
+
+async def test_save_project_actual_id_multiple_projects_independent(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store.save_project_actual_id("ctx1:user1", "repo-a", "sess-a")
+    store.save_project_actual_id("ctx1:user1", "repo-b", "sess-b")
+    assert store.get_project_actual_id("ctx1:user1", "repo-a") == "sess-a"
+    assert store.get_project_actual_id("ctx1:user1", "repo-b") == "sess-b"
+
+
+async def test_save_project_actual_id_persists_across_flush_reload(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store.save_project_actual_id("ctx1:user1", "repo-a", "sess-persist")
+    await store.flush()
+
+    store2 = make_store(tmp_path)
+    await store2.load()
+    assert store2.get_project_actual_id("ctx1:user1", "repo-a") == "sess-persist"

@@ -447,3 +447,10 @@ class DirectClaudeRuntime:
         """Clear the stored session id so the next execute starts fresh."""
         logger.info("DirectClaudeRuntime[%s]: resetting session id", self._session_id)
         self._actual_id = None
+
+    async def restore_session(self, actual_id: str) -> None:
+        """Set the session id so the next execute resumes a prior session."""
+        logger.info(
+            "DirectClaudeRuntime[%s]: restoring session id %r", self._session_id, actual_id
+        )
+        self._actual_id = actual_id if actual_id else None

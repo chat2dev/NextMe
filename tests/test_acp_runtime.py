@@ -126,6 +126,22 @@ async def test_reset_session_idempotent(runtime):
     assert runtime._actual_id is None
 
 
+async def test_restore_session_sets_actual_id(runtime):
+    await runtime.restore_session("restored-id")
+    assert runtime._actual_id == "restored-id"
+
+
+async def test_restore_session_clears_on_empty_string(runtime):
+    runtime._actual_id = "existing"
+    await runtime.restore_session("")
+    assert runtime._actual_id is None
+
+
+async def test_restore_session_actual_id_property(runtime):
+    await runtime.restore_session("prop-test-id")
+    assert runtime.actual_id == "prop-test-id"
+
+
 # ---------------------------------------------------------------------------
 # cancel
 # ---------------------------------------------------------------------------

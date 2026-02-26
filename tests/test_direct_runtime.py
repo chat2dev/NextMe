@@ -185,6 +185,25 @@ async def test_reset_session_clears_actual_id(tmp_path):
     assert rt._actual_id is None
 
 
+async def test_restore_session_sets_actual_id(tmp_path):
+    rt = make_runtime(tmp_path)
+    await rt.restore_session("my-session-id")
+    assert rt._actual_id == "my-session-id"
+
+
+async def test_restore_session_clears_on_empty_string(tmp_path):
+    rt = make_runtime(tmp_path)
+    rt._actual_id = "existing"
+    await rt.restore_session("")
+    assert rt._actual_id is None
+
+
+async def test_restore_session_actual_id_property(tmp_path):
+    rt = make_runtime(tmp_path)
+    await rt.restore_session("sess-abc")
+    assert rt.actual_id == "sess-abc"
+
+
 # ---------------------------------------------------------------------------
 # cancel
 # ---------------------------------------------------------------------------

@@ -269,6 +269,7 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
         feishu_client=_PlaceholderFeishuClient(),  # type: ignore[arg-type]
         state_store=state_store,
         skill_registry=skill_registry,
+        memory_manager=memory_manager,
     )
 
     handler = MessageHandler(dedup=dedup, dispatcher=dispatcher)

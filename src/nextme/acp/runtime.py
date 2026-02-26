@@ -505,6 +505,13 @@ class ACPRuntime:
         logger.info("ACPRuntime[%s]: resetting ACP session id", self._session_id)
         self._actual_id = None
 
+    async def restore_session(self, actual_id: str) -> None:
+        """Set the ACP session id so the next ``execute`` loads a prior session."""
+        logger.info(
+            "ACPRuntime[%s]: restoring ACP session id %r", self._session_id, actual_id
+        )
+        self._actual_id = actual_id if actual_id else None
+
     async def stop(self) -> None:
         """Terminate the ACP subprocess gracefully (SIGTERM → SIGKILL)."""
         if self._proc is None:

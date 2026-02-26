@@ -10,12 +10,15 @@ from __future__ import annotations
 import logging
 
 import json
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from ..config.schema import AppConfig, Settings
 from ..protocol.types import TaskStatus
 from .interfaces import AgentRuntime, Replier
 from .session import Session, UserContext
+
+if TYPE_CHECKING:
+    from ..memory.manager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,7 @@ HELP_COMMANDS: list[tuple[str, str]] = [
     ("/project <name>", "切换活跃项目"),
     ("/project bind <name>", "将当前群聊绑定到指定项目"),
     ("/project unbind", "解除当前群聊的项目绑定"),
+    ("/remember <text>", "记住一条信息（长期记忆）"),
 ]
 
 
@@ -292,6 +296,47 @@ async def handle_unbind(chat_id: str, replier: Replier) -> bool:
             "handle_unbind: failed to send confirmation to chat %r", chat_id
         )
     return True
+
+
+async def handle_remember(
+    context_id: str,
+    text: str,
+    memory_manager: "MemoryManager",
+    replier: Replier,
+    chat_id: str,
+) -> None:
+    """Save a user-supplied fact to long-term memory.
+
+    Loads the user's memory context if not already cached, appends the fact,
+    and sends a confirmation message.
+
+    Args:
+        context_id: The user context id (``chatID:userID``).
+        text: The fact text to remember.
+        memory_manager: The :class:`~nextme.memory.manager.MemoryManager` instance.
+        replier: Feishu message sender.
+        chat_id: Target chat.
+    """
+    from ..memory.manager import MemoryManager as _MemoryManager  # local import avoids cycle
+    from ..memory.schema import Fact
+
+    logger.info(
+        "handle_remember: saving fact for context_id=%r: %r", context_id, text
+    )
+    try:
+        await memory_manager.load(context_id)
+        fact = Fact(text=text, source="user_command")
+        memory_manager.add_fact(context_id, fact)
+    except Exception:
+        logger.exception(
+            "handle_remember: error saving fact for context_id=%r", context_id
+        )
+    try:
+        await replier.send_text(chat_id, f"已记住：{text}")
+    except Exception:
+        logger.exception(
+            "handle_remember: failed to send confirmation to chat %r", chat_id
+        )
 
 
 async def handle_project(

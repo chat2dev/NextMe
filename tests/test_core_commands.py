@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from nextme.core.commands import (
     HELP_COMMANDS, handle_new, handle_stop, handle_help,
-    handle_status, handle_project, handle_bind, handle_unbind,
+    handle_status, handle_project, handle_bind, handle_unbind, handle_remember,
 )
 from nextme.config.schema import AppConfig, Project, Settings
 from nextme.core.session import Session, UserContext
@@ -57,7 +57,7 @@ def replier():
 
 def test_help_commands_is_list_of_tuples():
     assert isinstance(HELP_COMMANDS, list)
-    assert len(HELP_COMMANDS) == 11
+    assert len(HELP_COMMANDS) == 12
 
 
 def test_help_commands_each_item_has_two_strings():
@@ -394,3 +394,60 @@ async def test_handle_unbind_handles_send_text_exception_gracefully():
     # Should not raise; return True regardless
     result = await handle_unbind("oc_chat", bad_replier)
     assert result is True
+
+
+# ---------------------------------------------------------------------------
+# handle_remember tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def memory_manager():
+    from unittest.mock import AsyncMock, MagicMock
+    mgr = MagicMock()
+    mgr.load = AsyncMock()
+    mgr.add_fact = MagicMock()
+    mgr.get_top_facts = MagicMock(return_value=[])
+    return mgr
+
+
+async def test_handle_remember_sends_confirmation(memory_manager, replier):
+    await handle_remember("oc_chat:ou_user", "I like Python", memory_manager, replier, "oc_chat")
+    replier.send_text.assert_awaited_once()
+    call_args = replier.send_text.call_args[0]
+    assert call_args[0] == "oc_chat"
+    assert "I like Python" in call_args[1]
+
+
+async def test_handle_remember_calls_add_fact(memory_manager, replier):
+    await handle_remember("oc_chat:ou_user", "remember this", memory_manager, replier, "oc_chat")
+    memory_manager.add_fact.assert_called_once()
+    fact = memory_manager.add_fact.call_args[0][1]
+    assert fact.text == "remember this"
+    assert fact.source == "user_command"
+
+
+async def test_handle_remember_loads_memory_before_add(memory_manager, replier):
+    await handle_remember("oc_chat:ou_user", "some fact", memory_manager, replier, "oc_chat")
+    memory_manager.load.assert_awaited_once_with("oc_chat:ou_user")
+
+
+async def test_handle_remember_sends_to_correct_chat(memory_manager, replier):
+    await handle_remember("ctx", "fact", memory_manager, replier, "target_chat")
+    call_args = replier.send_text.call_args[0]
+    assert call_args[0] == "target_chat"
+
+
+async def test_handle_remember_handles_send_text_exception_gracefully(memory_manager):
+    bad_replier = MagicMock()
+    bad_replier.send_text = AsyncMock(side_effect=RuntimeError("send failed"))
+    # Should not raise
+    await handle_remember("ctx", "fact", memory_manager, bad_replier, "oc_chat")
+
+
+async def test_handle_remember_handles_memory_manager_exception_gracefully(replier):
+    bad_mgr = MagicMock()
+    bad_mgr.load = AsyncMock(side_effect=RuntimeError("load failed"))
+    bad_mgr.add_fact = MagicMock()
+    # Should not raise; still tries to send confirmation
+    await handle_remember("ctx", "fact", bad_mgr, replier, "oc_chat")
