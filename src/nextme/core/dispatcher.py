@@ -415,11 +415,11 @@ class TaskDispatcher:
                 if not skills:
                     await replier.send_text(chat_id, "当前没有已注册的 Skill。")
                 else:
-                    source_order = ["project", "nextme", "claude", "builtin"]
+                    source_order = ["project", "nextme", "global", "builtin"]
                     source_labels = {
                         "project": "项目级",
                         "nextme": "NextMe 全局",
-                        "claude": "Claude 全局",
+                        "global": "全局",
                         "builtin": "内置",
                     }
                     by_source: dict[str, list] = {}

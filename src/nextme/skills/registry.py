@@ -55,7 +55,11 @@ class SkillRegistry:
     # Public API
     # ------------------------------------------------------------------
 
-    def load(self, project_path: Path | None = None) -> None:
+    def load(
+        self,
+        project_path: Path | None = None,
+        executors: set[str] | None = None,
+    ) -> None:
         """Scan all skill directories and register skills by trigger.
 
         Directories are scanned in order from *lowest* to *highest*
@@ -67,10 +71,16 @@ class SkillRegistry:
         project_path:
             Optional project root directory.  When provided, the
             ``.nextme/skills/`` subdirectory within it is also scanned.
+        executors:
+            Set of executor names used across all configured projects
+            (e.g. ``{"claude", "cc-acp"}``).  When *None* the method falls
+            back to including global skills for all known executor types.
+            Currently only ``"claude"``-prefixed executors map to a global
+            skill directory (``~/.claude/skills/``).
         """
         self._skills.clear()
 
-        # Order: built-in (lowest) → claude-global → nextme-global → project-local (highest)
+        # Order: built-in (lowest) → nextme-global → project-local (highest)
         directories: list[tuple[Path, str]] = [
             (_BUILTIN_SKILLS_DIR, "builtin"),
             (_NEXTME_HOME / "skills", "nextme"),
@@ -81,8 +91,10 @@ class SkillRegistry:
         for directory, source in directories:
             self._load_directory(directory, source=source)
 
-        # Claude global skills live in subdirectories: ~/.claude/skills/<name>/SKILL.md
-        self._load_claude_skills()
+        # Global skills from executor-specific directories.
+        # ~/.claude/skills/<name>/SKILL.md — only for claude-based executors.
+        if executors is None or any(e.startswith("claude") for e in executors):
+            self._load_claude_skills()
 
     def get(self, trigger: str) -> Optional[Skill]:
         """Return the :class:`Skill` registered for *trigger*, or ``None``.
@@ -163,7 +175,7 @@ class SkillRegistry:
                 skill = load_skill_file(
                     skill_file,
                     trigger_override=trigger,
-                    source="claude",
+                    source="global",
                 )
             except (ValueError, OSError) as exc:
                 logger.warning(
@@ -174,7 +186,7 @@ class SkillRegistry:
             loaded += 1
 
         if loaded:
-            logger.info("SkillRegistry: %d Claude global skill(s) loaded", loaded)
+            logger.info("SkillRegistry: %d global skill(s) loaded", loaded)
 
     def _register(self, skill: "Skill", path: Path) -> None:
         """Insert *skill* into the registry, logging overrides."""

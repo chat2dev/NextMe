@@ -212,7 +212,8 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     memory_manager = MemoryManager(settings)
     context_manager = ContextManager(settings)
     skill_registry = SkillRegistry()
-    skill_registry.load(project_path=cwd)
+    executors = {p.executor for p in config.projects}
+    skill_registry.load(project_path=cwd, executors=executors)
     logger.info("SkillRegistry: %d skill(s) loaded", len(skill_registry.list_all()))
 
     # ------------------------------------------------------------------
