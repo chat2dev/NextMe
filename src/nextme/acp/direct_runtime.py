@@ -164,6 +164,7 @@ class DirectClaudeRuntime:
             "--output-format", "stream-json",
             "--verbose",
             "--dangerously-skip-permissions",
+            "--include-partial-messages",
         ]
         if self._actual_id:
             args.extend(["--resume", self._actual_id])
@@ -284,27 +285,27 @@ class DirectClaudeRuntime:
                         sid,
                     )
 
+                elif etype == "stream_event":
+                    # Incremental token events emitted by --include-partial-messages.
+                    # content_block_delta/text_delta carries individual text tokens
+                    # — forward each one to on_progress for real-time streaming.
+                    inner = event.get("event") or {}
+                    if inner.get("type") == "content_block_delta":
+                        delta_block = inner.get("delta") or {}
+                        if delta_block.get("type") == "text_delta":
+                            text_token: str = delta_block.get("text", "")
+                            if text_token:
+                                await _flush_progress(delta=text_token)
+
                 elif etype == "assistant":
-                    # Text/content blocks from the model.
-                    # stream-json delivers the full text in one shot (not token-by-
-                    # token).  Split into ≤ 8 equal chunks emitted 200 ms apart so
-                    # the progress card updates gradually (typewriter effect).
+                    # Full assembled message — accumulate for final result.
+                    # Text was already streamed token-by-token via stream_event above.
                     msg = event.get("message") or {}
                     for block in msg.get("content") or []:
                         if block.get("type") == "text":
                             delta: str = block.get("text", "")
                             if delta:
                                 accumulated.append(delta)
-                                n_chunks = min(8, max(1, len(delta) // 30))
-                                chunk_size = max(1, -(-len(delta) // n_chunks))
-                                chunks = [
-                                    delta[i:i + chunk_size]
-                                    for i in range(0, len(delta), chunk_size)
-                                ]
-                                for j, chunk in enumerate(chunks):
-                                    await _flush_progress(delta=chunk)
-                                    if j < len(chunks) - 1:
-                                        await asyncio.sleep(0.2)
 
                 elif etype == "tool_use":
                     tool_name: str = event.get("name") or "tool"

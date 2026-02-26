@@ -240,7 +240,8 @@ async def test_execute_accumulates_assistant_chunks(tmp_path):
     assert result == "Hello world"
 
 
-async def test_execute_calls_on_progress_with_delta(tmp_path):
+async def test_execute_calls_on_progress_with_stream_event_text_delta(tmp_path):
+    """stream_event/text_delta tokens are forwarded to on_progress immediately."""
     rt = make_runtime(tmp_path)
     progress_calls = []
 
@@ -249,15 +250,50 @@ async def test_execute_calls_on_progress_with_delta(tmp_path):
 
     lines = make_ndjson(
         {"type": "system", "session_id": "s1"},
-        {"type": "assistant", "message": {"content": [{"type": "text", "text": "chunk1"}]}},
-        {"type": "result", "is_error": False, "result": "chunk1", "session_id": "s1"},
+        {"type": "stream_event", "event": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hello"},
+        }},
+        {"type": "stream_event", "event": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": " world"},
+        }},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello world"}]}},
+        {"type": "result", "is_error": False, "result": "Hello world", "session_id": "s1"},
     )
     proc = mock_proc_with_output(lines)
 
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         await rt.execute(make_task("hi"), record_progress, noop_permission)
 
-    assert any(d == "chunk1" for d, t in progress_calls)
+    text_deltas = [d for d, t in progress_calls if d]
+    assert "Hello" in text_deltas
+    assert " world" in text_deltas
+
+
+async def test_execute_assistant_event_does_not_call_on_progress(tmp_path):
+    """assistant/text event adds to accumulated but does NOT call on_progress directly."""
+    rt = make_runtime(tmp_path)
+    progress_calls = []
+
+    async def record_progress(delta, tool):
+        progress_calls.append((delta, tool))
+
+    lines = make_ndjson(
+        {"type": "system", "session_id": "s1"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "full text"}]}},
+        {"type": "result", "is_error": False, "result": "full text", "session_id": "s1"},
+    )
+    proc = mock_proc_with_output(lines)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await rt.execute(make_task("hi"), record_progress, noop_permission)
+
+    assert result == "full text"
+    # No text progress from assistant event — only stream_event/text_delta fires it
+    assert not any(d for d, t in progress_calls)
 
 
 async def test_execute_calls_on_progress_with_tool_name(tmp_path):
@@ -434,3 +470,4 @@ async def test_execute_dangerously_skip_permissions_flag(tmp_path):
     assert "--output-format" in captured_args
     assert "stream-json" in captured_args
     assert "--verbose" in captured_args
+    assert "--include-partial-messages" in captured_args
