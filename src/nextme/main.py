@@ -15,6 +15,7 @@ import logging.handlers
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -142,8 +143,41 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
 
     # ------------------------------------------------------------------
     # Write PID file so `nextme down` can target the exact process.
+    # If a previous instance is still running, stop it first so only
+    # one nextme process is ever active at a time.
     # ------------------------------------------------------------------
     _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if _PID_FILE.exists():
+        try:
+            old_pid = int(_PID_FILE.read_text().strip())
+            if old_pid != os.getpid():
+                try:
+                    os.kill(old_pid, 0)  # probe: raises if not running
+                    logger.info(
+                        "nextme up: previous instance (pid=%d) still running, sending SIGTERM",
+                        old_pid,
+                    )
+                    os.kill(old_pid, signal.SIGTERM)
+                    # Wait up to 5 s for graceful exit.
+                    for _ in range(50):
+                        time.sleep(0.1)
+                        try:
+                            os.kill(old_pid, 0)
+                        except ProcessLookupError:
+                            break
+                    else:
+                        logger.warning(
+                            "nextme up: previous instance (pid=%d) did not exit, sending SIGKILL",
+                            old_pid,
+                        )
+                        try:
+                            os.kill(old_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                except ProcessLookupError:
+                    pass  # Already gone — stale PID file.
+        except (ValueError, OSError):
+            pass  # Unreadable PID file — ignore.
     _PID_FILE.write_text(str(os.getpid()))
     logger.debug("PID file written: %s (pid=%d)", _PID_FILE, os.getpid())
 
