@@ -34,6 +34,10 @@ select = ["E", "F", "I"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Coverage policy:
+#   - Total coverage must stay ≥ 85% (enforced by --cov-fail-under).
+#   - New/modified code added in each PR must achieve ≥ 90% coverage
+#     (verified manually or via `uv run diff-cover coverage.xml --compare-branch=main`).
 addopts = "--cov=nextme --cov-report=term-missing --cov-fail-under=85"
 
 [tool.coverage.run]

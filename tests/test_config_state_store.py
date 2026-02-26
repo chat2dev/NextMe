@@ -317,3 +317,86 @@ async def test_debounce_loop_does_not_flush_when_not_dirty(tmp_path):
     # verify the loop ran without errors
     await store.stop()
     # The stop() will flush, so just assert no exception was raised
+
+
+# ---------------------------------------------------------------------------
+# set_binding / remove_binding / get_all_bindings
+# ---------------------------------------------------------------------------
+
+
+async def test_set_binding_stores_chat_to_project(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store.set_binding("oc_chat_001", "repo-A")
+    assert store.get_all_bindings() == {"oc_chat_001": "repo-A"}
+
+
+async def test_set_binding_overwrites_existing(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store.set_binding("oc_chat_001", "repo-A")
+    store.set_binding("oc_chat_001", "repo-B")
+    assert store.get_all_bindings()["oc_chat_001"] == "repo-B"
+
+
+async def test_set_binding_marks_dirty(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store._dirty = False
+    store.set_binding("oc_chat_001", "repo-A")
+    assert store._dirty is True
+
+
+async def test_set_binding_persists_after_flush(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store.set_binding("oc_chat_001", "repo-A")
+    await store.flush()
+    # Reload from disk
+    store2 = make_store(tmp_path)
+    await store2.load()
+    assert store2.get_all_bindings() == {"oc_chat_001": "repo-A"}
+
+
+async def test_remove_binding_removes_existing(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store.set_binding("oc_chat_001", "repo-A")
+    store._dirty = False
+    store.remove_binding("oc_chat_001")
+    assert "oc_chat_001" not in store.get_all_bindings()
+    assert store._dirty is True
+
+
+async def test_remove_binding_noop_for_missing(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store._dirty = False
+    store.remove_binding("nonexistent_chat")
+    # Should not mark dirty when nothing was removed
+    assert store._dirty is False
+
+
+async def test_get_all_bindings_returns_copy(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store.set_binding("oc_chat_001", "repo-A")
+    bindings = store.get_all_bindings()
+    bindings["mutated"] = "oops"
+    # Original should be unaffected
+    assert "mutated" not in store.get_all_bindings()
+
+
+async def test_get_all_bindings_empty_when_no_bindings(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    assert store.get_all_bindings() == {}
+
+
+async def test_multiple_bindings_stored_correctly(tmp_path):
+    store = make_store(tmp_path)
+    await store.load()
+    store.set_binding("oc_chat_A", "repo-X")
+    store.set_binding("oc_chat_B", "repo-Y")
+    bindings = store.get_all_bindings()
+    assert bindings == {"oc_chat_A": "repo-X", "oc_chat_B": "repo-Y"}
