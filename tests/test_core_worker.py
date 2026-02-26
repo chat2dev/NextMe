@@ -68,6 +68,10 @@ def replier():
     r.update_card = AsyncMock()
     r.reply_text = AsyncMock(return_value="thread_msg_456")
     r.reply_card = AsyncMock(return_value="thread_card_789")
+    # Streaming methods — return "" so worker falls back to debounce path.
+    r.get_card_id = AsyncMock(return_value="")
+    r.stream_append_text = AsyncMock()
+    r.stream_set_status = AsyncMock()
     r.build_help_card = MagicMock(return_value='{"card": "help"}')
     r.build_permission_card = MagicMock(return_value='{"card": "perm"}')
     r.build_progress_card = MagicMock(return_value='{"card": "progress"}')
@@ -552,3 +556,62 @@ async def test_send_result_includes_elapsed_in_card(worker, session, replier, ac
     call_kwargs = replier.build_result_card.call_args.kwargs
     assert "elapsed" in call_kwargs
     assert call_kwargs["elapsed"]  # non-empty elapsed string
+
+
+# ---------------------------------------------------------------------------
+# _on_progress streaming path tests
+# ---------------------------------------------------------------------------
+
+async def test_on_progress_streaming_path_calls_stream_append_text(worker, replier):
+    """When card_id is set, _on_progress uses stream_append_text instead of update_card."""
+    worker._card_id = "card_abc"
+    worker._sequence = 0
+    replier.stream_append_text = AsyncMock()
+    await worker._on_progress("hello", "")
+    replier.stream_append_text.assert_awaited_once_with("card_abc", "hello", 1)
+    replier.update_card.assert_not_awaited()
+
+
+async def test_on_progress_streaming_path_calls_stream_set_status(worker, replier):
+    """When card_id is set, tool_name triggers stream_set_status."""
+    worker._card_id = "card_abc"
+    worker._sequence = 0
+    replier.stream_set_status = AsyncMock()
+    await worker._on_progress("", "Bash(ls)")
+    replier.stream_set_status.assert_awaited_once()
+    call_args = replier.stream_set_status.call_args
+    assert call_args.args[0] == "card_abc"
+    assert "Bash(ls)" in call_args.args[1]
+    replier.update_card.assert_not_awaited()
+
+
+async def test_on_progress_streaming_path_increments_sequence(worker, replier):
+    """sequence counter increments on each streaming call."""
+    worker._card_id = "card_abc"
+    worker._sequence = 0
+    replier.stream_append_text = AsyncMock()
+    replier.stream_set_status = AsyncMock()
+    await worker._on_progress("a", "")
+    assert worker._sequence == 1
+    await worker._on_progress("b", "Bash")
+    assert worker._sequence == 3  # +1 for text, +1 for tool
+
+
+async def test_on_progress_streaming_fallback_when_stream_append_raises(worker, replier):
+    """Streaming exceptions are caught; no re-raise."""
+    worker._card_id = "card_abc"
+    worker._sequence = 0
+    replier.stream_append_text = AsyncMock(side_effect=RuntimeError("network error"))
+    # Should not raise
+    await worker._on_progress("hello", "")
+
+
+async def test_on_progress_no_streaming_when_card_id_none(worker, replier):
+    """Without card_id, fallback debounce path is used."""
+    worker._card_id = None
+    worker._progress_message_id = "msg_123"
+    worker._last_progress_update = 0.0
+    replier.stream_append_text = AsyncMock()
+    await worker._on_progress("hello", "")
+    replier.stream_append_text.assert_not_awaited()
+    replier.update_card.assert_awaited()

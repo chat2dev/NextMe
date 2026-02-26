@@ -44,6 +44,42 @@ logger = logging.getLogger(__name__)
 _STOP_GRACEFUL_TIMEOUT_SECONDS = 5
 
 
+def _truncate(s: str, max_len: int) -> str:
+    return s if len(s) <= max_len else s[: max_len - 1] + "…"
+
+
+def _format_tool_call(name: str, input_json: str) -> str:
+    """Format ``name(key_arg)`` from a tool's accumulated input JSON.
+
+    Extracts the single most-relevant argument for common tool names so the
+    progress card status shows e.g. ``Fetch(https://...)`` or ``Bash(ls -la)``.
+    Falls back to just ``name`` when the JSON is empty or unparseable.
+    """
+    try:
+        args: dict = json.loads(input_json) if input_json.strip() else {}
+    except json.JSONDecodeError:
+        return name
+    if not args:
+        return name
+    if name in ("Fetch", "WebFetch", "web_fetch"):
+        val = args.get("url", "")
+    elif name in ("Bash", "computer"):
+        val = args.get("command", args.get("action", ""))
+    elif name in ("Read", "Write", "Edit", "NotebookEdit"):
+        val = args.get("file_path", args.get("notebook_path", ""))
+    elif name in ("Glob",):
+        val = args.get("pattern", "")
+    elif name in ("Grep",):
+        val = args.get("pattern", "")
+    elif name in ("Task",):
+        val = args.get("description", args.get("prompt", ""))
+    else:
+        val = str(next(iter(args.values()), ""))
+    if not val:
+        return name
+    return f"{name}({_truncate(val, 60)})"
+
+
 class DirectClaudeRuntime:
     """Drives a locally-installed ``claude`` CLI without going through cc-acp.
 
@@ -227,6 +263,8 @@ class DirectClaudeRuntime:
         )
 
         accumulated: list[str] = []
+        # Per-execute tool-block tracking: index → {name, partial_json}
+        tool_blocks: dict[int, dict] = {}
         timeout_secs = task.timeout.total_seconds()
 
         async def _flush_progress(delta: str = "", tool_name: str = "") -> None:
@@ -288,26 +326,51 @@ class DirectClaudeRuntime:
                 elif etype == "stream_event":
                     # Incremental events from --include-partial-messages.
                     # content_block_delta/text_delta — individual text tokens.
-                    # content_block_start with tool_use — tool is being invoked
-                    # (replaces the top-level tool_use event when partial msgs on).
+                    # content_block_delta/input_json_delta — tool input being built.
+                    # content_block_start with tool_use — tool is being invoked.
+                    # content_block_stop — tool input complete; emit formatted name.
                     inner = event.get("event") or {}
                     itype = inner.get("type", "")
+                    idx: int = inner.get("index", -1)
+
                     if itype == "content_block_delta":
                         delta_block = inner.get("delta") or {}
-                        if delta_block.get("type") == "text_delta":
+                        delta_type = delta_block.get("type", "")
+                        if delta_type == "text_delta":
                             text_token: str = delta_block.get("text", "")
                             if text_token:
                                 await _flush_progress(delta=text_token)
+                        elif delta_type == "input_json_delta":
+                            if idx in tool_blocks:
+                                tool_blocks[idx]["partial_json"] += delta_block.get(
+                                    "partial_json", ""
+                                )
+
                     elif itype == "content_block_start":
                         block = inner.get("content_block") or {}
                         if block.get("type") == "tool_use":
                             tool_name_str: str = block.get("name") or "tool"
+                            tool_blocks[idx] = {"name": tool_name_str, "partial_json": ""}
                             logger.debug(
-                                "DirectClaudeRuntime[%s]: tool_use (via stream_event) %r",
+                                "DirectClaudeRuntime[%s]: tool_use start %r (index=%d)",
                                 self._session_id,
                                 tool_name_str,
+                                idx,
                             )
+                            # Show tool name immediately while args are still streaming.
                             await _flush_progress(tool_name=tool_name_str)
+
+                    elif itype == "content_block_stop":
+                        # Tool input JSON is complete — emit formatted ToolName(args).
+                        if idx in tool_blocks:
+                            blk = tool_blocks.pop(idx)
+                            formatted = _format_tool_call(blk["name"], blk["partial_json"])
+                            logger.debug(
+                                "DirectClaudeRuntime[%s]: tool_use done %r",
+                                self._session_id,
+                                formatted,
+                            )
+                            await _flush_progress(tool_name=formatted)
 
                 elif etype == "assistant":
                     # Full assembled message — accumulate for final result.

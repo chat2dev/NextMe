@@ -66,6 +66,21 @@ class Replier(Protocol):
         """Reply to an existing message with an interactive card.  Returns the new message_id."""
         ...
 
+    async def get_card_id(self, message_id: str) -> str:
+        """Convert an im message_id to a cardkit card_id for streaming updates.
+
+        Returns ``""`` if streaming is not supported by this replier.
+        """
+        ...
+
+    async def stream_append_text(self, card_id: str, text: str, sequence: int) -> None:
+        """Append *text* to the content element of a streaming card."""
+        ...
+
+    async def stream_set_status(self, card_id: str, status_text: str, sequence: int) -> None:
+        """Replace the status element of a streaming card with *status_text*."""
+        ...
+
     # ------------------------------------------------------------------
     # Sync card builders
     # ------------------------------------------------------------------

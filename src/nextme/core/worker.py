@@ -78,6 +78,10 @@ class SessionWorker:
         self._active_message_id: str = ""   # original Feishu message_id
         self._active_in_thread: bool = False  # thread vs quote-reply mode
 
+        # Streaming card state (reset per-task).
+        self._card_id: Optional[str] = None   # cardkit card_id (None = use fallback)
+        self._sequence: int = 0               # strictly-increasing sequence counter
+
     @property
     def _proj(self) -> str:
         """Return a bracketed project name tag for card titles, e.g. '【myproject】'."""
@@ -171,6 +175,8 @@ class SessionWorker:
         self._task_start = time.monotonic()
         self._active_message_id = task.message_id
         self._active_in_thread = task.chat_type == "group"
+        self._card_id = None
+        self._sequence = 0
 
         # group → thread reply; p2p → quote reply; no message_id → top-level.
         in_thread = self._active_in_thread
@@ -197,6 +203,21 @@ class SessionWorker:
                 self._session.context_id,
                 self._progress_message_id,
             )
+            # Obtain cardkit card_id for streaming element updates.
+            try:
+                self._card_id = await self._replier.get_card_id(self._progress_message_id) or None
+                if self._card_id:
+                    logger.debug(
+                        "SessionWorker[%s]: streaming card_id=%s",
+                        self._session.context_id,
+                        self._card_id,
+                    )
+            except Exception:
+                logger.debug(
+                    "SessionWorker[%s]: get_card_id failed, using fallback debounce",
+                    self._session.context_id,
+                )
+                self._card_id = None
         except Exception:
             logger.exception(
                 "SessionWorker[%s]: failed to send initial progress card",
@@ -277,18 +298,58 @@ class SessionWorker:
     # ------------------------------------------------------------------
 
     async def _on_progress(self, delta: str, tool_name: str) -> None:
-        """Receive a progress delta from ACPRuntime and debounce card updates.
+        """Receive a progress delta from ACPRuntime and forward to the card.
 
-        Accumulates content in an internal buffer and only updates the card if
-        ``settings.progress_debounce_seconds`` have elapsed since the last update.
+        Two modes:
+        - **Streaming** (``_card_id`` set): directly patches card elements via
+          the cardkit API — no debounce needed, no full card re-render.
+        - **Fallback** (``_card_id`` is None): accumulates text and rebuilds
+          the full card on a debounce timer (``progress_debounce_seconds``).
 
         Args:
             delta: Text delta emitted by the ACP subprocess.
-            tool_name: Name of the tool currently being used (may be empty).
+            tool_name: Name (and optional args) of the tool being invoked.
         """
         if delta:
             self._progress_buffer.append(delta)
 
+        # ------------------------------------------------------------------
+        # Streaming path — cardkit element-level updates (no debounce).
+        # ------------------------------------------------------------------
+        if self._card_id:
+            elapsed_str = _format_elapsed(int(time.monotonic() - self._task_start))
+            if delta:
+                self._sequence += 1
+                try:
+                    await self._replier.stream_append_text(
+                        self._card_id, delta, self._sequence
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "SessionWorker[%s]: stream_append_text failed (seq=%d): %s",
+                        self._session.context_id,
+                        self._sequence,
+                        exc,
+                    )
+            if tool_name:
+                self._sequence += 1
+                status = f"_{tool_name} · {elapsed_str}_"
+                try:
+                    await self._replier.stream_set_status(
+                        self._card_id, status, self._sequence
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "SessionWorker[%s]: stream_set_status failed (seq=%d): %s",
+                        self._session.context_id,
+                        self._sequence,
+                        exc,
+                    )
+            return
+
+        # ------------------------------------------------------------------
+        # Fallback path — debounced full-card PATCH.
+        # ------------------------------------------------------------------
         now = time.monotonic()
         elapsed = now - self._last_progress_update
 

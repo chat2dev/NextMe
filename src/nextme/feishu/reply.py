@@ -10,6 +10,14 @@ import json
 import logging
 
 import lark_oapi as lark
+from lark_oapi.api.cardkit.v1 import (
+    ContentCardElementRequest,
+    ContentCardElementRequestBody,
+    IdConvertCardRequest,
+    IdConvertCardRequestBody,
+    PatchCardElementRequest,
+    PatchCardElementRequestBody,
+)
 from lark_oapi.api.im.v1 import (
     CreateMessageRequest,
     CreateMessageRequestBody,
@@ -21,6 +29,10 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequest,
     ReplyMessageRequestBody,
 )
+
+# Element IDs used in streaming progress cards (must match build_progress_card).
+_CONTENT_ELEMENT_ID = "content_el"
+_STATUS_ELEMENT_ID = "status_el"
 
 from nextme.protocol.types import PermOption
 
@@ -112,6 +124,95 @@ class FeishuReplier:
             )
         else:
             logger.debug("update_card ok: message_id=%s", message_id)
+
+    async def get_card_id(self, message_id: str) -> str:
+        """Convert an im *message_id* to a cardkit *card_id* for streaming updates.
+
+        Returns ``""`` on failure (caller falls back to full-card PATCH).
+        """
+        request = (
+            IdConvertCardRequest.builder()
+            .request_body(
+                IdConvertCardRequestBody.builder()
+                .message_id(message_id)
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.cardkit.v1.card.aid_convert(request)
+        if not response.success():
+            logger.warning(
+                "get_card_id failed: message_id=%s code=%s msg=%s",
+                message_id,
+                response.code,
+                response.msg,
+            )
+            return ""
+        card_id: str = response.data.card_id or ""  # type: ignore[union-attr]
+        logger.debug("get_card_id: message_id=%s -> card_id=%s", message_id, card_id)
+        return card_id
+
+    async def stream_append_text(self, card_id: str, text: str, sequence: int) -> None:
+        """Append *text* to the content element of a streaming card.
+
+        Uses the cardkit ``PATCH /elements/:element_id`` endpoint with
+        ``partial_element``, which appends text in streaming mode without
+        triggering a full card re-render.  The *sequence* number must be
+        strictly increasing across all calls for the same card.
+        """
+        partial = json.dumps({"tag": "markdown", "content": text}, ensure_ascii=False)
+        request = (
+            PatchCardElementRequest.builder()
+            .card_id(card_id)
+            .element_id(_CONTENT_ELEMENT_ID)
+            .request_body(
+                PatchCardElementRequestBody.builder()
+                .partial_element(partial)
+                .sequence(sequence)
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.cardkit.v1.card_element.apatch(request)
+        if not response.success():
+            logger.warning(
+                "stream_append_text failed: card_id=%s seq=%d code=%s msg=%s",
+                card_id,
+                sequence,
+                response.code,
+                response.msg,
+            )
+
+    async def stream_set_status(self, card_id: str, status_text: str, sequence: int) -> None:
+        """Replace the status element content of a streaming card.
+
+        Uses the cardkit ``PUT /elements/:element_id/content`` endpoint to
+        set (not append) the full text of the status line.
+        """
+        content = json.dumps(
+            {"tag": "markdown", "content": status_text}, ensure_ascii=False
+        )
+        request = (
+            ContentCardElementRequest.builder()
+            .card_id(card_id)
+            .element_id(_STATUS_ELEMENT_ID)
+            .request_body(
+                ContentCardElementRequestBody.builder()
+                .content(content)
+                .sequence(sequence)
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.cardkit.v1.card_element.acontent(request)
+        if not response.success():
+            logger.warning(
+                "stream_set_status failed: card_id=%s seq=%d code=%s msg=%s",
+                card_id,
+                sequence,
+                response.code,
+                response.msg,
+            )
 
     async def send_reaction(self, message_id: str, emoji: str = "SMILE") -> None:
         """Add an emoji reaction to the message identified by *message_id*."""
@@ -224,17 +325,27 @@ class FeishuReplier:
         content: str,
         title: str = "思考中...",
     ) -> str:
-        """Return a card JSON string for in-progress status updates."""
+        """Return a card JSON string for in-progress status updates.
+
+        Includes ``streaming_mode: true`` and explicit element ``id`` fields so
+        that :meth:`stream_append_text` / :meth:`stream_set_status` can target
+        individual elements without replacing the whole card.
+        """
         elements: list[dict] = [
-            {"tag": "markdown", "content": content},
+            {"tag": "markdown", "content": content, "id": _CONTENT_ELEMENT_ID},
         ]
         if status:
             elements.append(
-                {"tag": "markdown", "content": f"_{status}_"}
+                {"tag": "markdown", "content": f"_{status}_", "id": _STATUS_ELEMENT_ID}
+            )
+        else:
+            # Always include the status element so it can be targeted later.
+            elements.append(
+                {"tag": "markdown", "content": "", "id": _STATUS_ELEMENT_ID}
             )
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "streaming_mode": True},
             "header": {
                 "title": {"tag": "plain_text", "content": title},
                 "template": "yellow",

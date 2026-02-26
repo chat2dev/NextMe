@@ -6,7 +6,11 @@ import pytest
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from nextme.acp.direct_runtime import DirectClaudeRuntime, _STOP_GRACEFUL_TIMEOUT_SECONDS
+from nextme.acp.direct_runtime import (
+    DirectClaudeRuntime,
+    _STOP_GRACEFUL_TIMEOUT_SECONDS,
+    _format_tool_call,
+)
 from nextme.config.schema import Settings
 from nextme.protocol.types import PermissionChoice, PermissionRequest, Task
 
@@ -471,3 +475,137 @@ async def test_execute_dangerously_skip_permissions_flag(tmp_path):
     assert "stream-json" in captured_args
     assert "--verbose" in captured_args
     assert "--include-partial-messages" in captured_args
+
+
+# ---------------------------------------------------------------------------
+# _format_tool_call unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_format_tool_call_fetch_extracts_url():
+    assert _format_tool_call("Fetch", '{"url": "https://example.com/path"}') == \
+        "Fetch(https://example.com/path)"
+
+
+def test_format_tool_call_bash_extracts_command():
+    assert _format_tool_call("Bash", '{"command": "ls -la /tmp"}') == "Bash(ls -la /tmp)"
+
+
+def test_format_tool_call_read_extracts_file_path():
+    assert _format_tool_call("Read", '{"file_path": "/src/main.py"}') == "Read(/src/main.py)"
+
+
+def test_format_tool_call_grep_extracts_pattern():
+    assert _format_tool_call("Grep", '{"pattern": "def foo"}') == "Grep(def foo)"
+
+
+def test_format_tool_call_empty_json_returns_name():
+    assert _format_tool_call("Bash", "") == "Bash"
+
+
+def test_format_tool_call_invalid_json_returns_name():
+    assert _format_tool_call("Bash", "{not json}") == "Bash"
+
+
+def test_format_tool_call_truncates_long_args():
+    long_url = "https://example.com/" + "x" * 100
+    result = _format_tool_call("Fetch", f'{{"url": "{long_url}"}}')
+    assert len(result) < len(long_url) + 10
+    assert "Fetch(" in result
+    assert "…" in result
+
+
+def test_format_tool_call_no_matching_key_uses_first_value():
+    result = _format_tool_call("Custom", '{"some_key": "some_value"}')
+    assert "Custom(" in result
+    assert "some_value" in result
+
+
+# ---------------------------------------------------------------------------
+# execute — tool input_json_delta accumulation and content_block_stop
+# ---------------------------------------------------------------------------
+
+
+async def test_execute_tool_name_emitted_on_content_block_start(tmp_path):
+    """tool_name is emitted immediately on content_block_start."""
+    rt = make_runtime(tmp_path)
+    tool_events = []
+
+    async def record_progress(delta, tool):
+        if tool:
+            tool_events.append(tool)
+
+    lines = make_ndjson(
+        {"type": "system", "session_id": "s1"},
+        {"type": "stream_event", "event": {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "tool_use", "id": "t1", "name": "Bash"},
+        }},
+        {"type": "stream_event", "event": {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": '{"command": "ls"}'},
+        }},
+        {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
+        {"type": "result", "is_error": False, "result": "ok", "session_id": "s1"},
+    )
+    proc = mock_proc_with_output(lines)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await rt.execute(make_task("run"), record_progress, noop_permission)
+
+    # First event: just "Bash"; last event: "Bash(ls)" from content_block_stop.
+    assert any(t == "Bash" for t in tool_events), "tool name not emitted on start"
+    assert any("Bash(" in t and "ls" in t for t in tool_events), "formatted tool not emitted on stop"
+
+
+async def test_execute_formatted_tool_from_fetch(tmp_path):
+    """Fetch tool gets URL formatted in the tool_name."""
+    rt = make_runtime(tmp_path)
+    tool_events = []
+
+    async def record_progress(delta, tool):
+        if tool:
+            tool_events.append(tool)
+
+    lines = make_ndjson(
+        {"type": "system", "session_id": "s1"},
+        {"type": "stream_event", "event": {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "tool_use", "id": "t2", "name": "Fetch"},
+        }},
+        {"type": "stream_event", "event": {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": '{"url": "https://example.com"}'},
+        }},
+        {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
+        {"type": "result", "is_error": False, "result": "ok", "session_id": "s1"},
+    )
+    proc = mock_proc_with_output(lines)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        await rt.execute(make_task("fetch"), record_progress, noop_permission)
+
+    final_tool = tool_events[-1]
+    assert "Fetch(" in final_tool
+    assert "https://example.com" in final_tool
+
+
+async def test_execute_input_json_delta_for_non_tool_block_ignored(tmp_path):
+    """input_json_delta for a block not in tool_blocks is safely ignored."""
+    rt = make_runtime(tmp_path)
+
+    lines = make_ndjson(
+        {"type": "system", "session_id": "s1"},
+        # input_json_delta for index 99 which was never started
+        {"type": "stream_event", "event": {
+            "type": "content_block_delta", "index": 99,
+            "delta": {"type": "input_json_delta", "partial_json": '{"x": 1}'},
+        }},
+        {"type": "result", "is_error": False, "result": "ok", "session_id": "s1"},
+    )
+    proc = mock_proc_with_output(lines)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await rt.execute(make_task("hi"), noop_progress, noop_permission)
+
+    assert result == "ok"

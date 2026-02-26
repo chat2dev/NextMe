@@ -79,6 +79,24 @@ class TestBuildProgressCard:
         parsed = json.loads(replier.build_progress_card("", "content"))
         assert parsed["config"]["wide_screen_mode"] is True
 
+    def test_streaming_mode_enabled(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_progress_card("", "content"))
+        assert parsed["config"]["streaming_mode"] is True
+
+    def test_content_element_has_id(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_progress_card("", "content"))
+        elements = parsed["body"]["elements"]
+        assert elements[0].get("id") == "content_el"
+
+    def test_status_element_has_id(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_progress_card("", "content"))
+        elements = parsed["body"]["elements"]
+        # Second element is always the status element (may be empty)
+        assert elements[1].get("id") == "status_el"
+
     def test_non_ascii_content_preserved(self):
         replier, _ = make_replier()
         parsed = json.loads(replier.build_progress_card("", "中文内容"))
@@ -728,3 +746,86 @@ class TestBuildResultCardElapsed:
         )
         assert footer_md is not None
         assert "2m" in footer_md["content"]
+
+
+# ---------------------------------------------------------------------------
+# get_card_id / stream_append_text / stream_set_status (async)
+# ---------------------------------------------------------------------------
+
+
+class TestGetCardId:
+    async def test_success_returns_card_id(self):
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        ok.data.card_id = "card_abc"
+        mock_client.cardkit.v1.card.aid_convert = AsyncMock(return_value=ok)
+
+        result = await replier.get_card_id("om_msg_123")
+
+        assert result == "card_abc"
+        mock_client.cardkit.v1.card.aid_convert.assert_awaited_once()
+
+    async def test_failure_returns_empty_string(self):
+        replier, mock_client = make_replier()
+        fail = MagicMock()
+        fail.success.return_value = False
+        fail.code = 400
+        fail.msg = "bad"
+        mock_client.cardkit.v1.card.aid_convert = AsyncMock(return_value=fail)
+
+        result = await replier.get_card_id("om_msg_bad")
+
+        assert result == ""
+
+
+class TestStreamAppendText:
+    async def test_success_calls_apatch(self):
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        mock_client.cardkit.v1.card_element.apatch = AsyncMock(return_value=ok)
+
+        await replier.stream_append_text("card_123", "hello", 1)
+
+        mock_client.cardkit.v1.card_element.apatch.assert_awaited_once()
+
+    async def test_failure_no_exception(self, caplog):
+        import logging
+        replier, mock_client = make_replier()
+        fail = MagicMock()
+        fail.success.return_value = False
+        fail.code = 500
+        fail.msg = "server error"
+        mock_client.cardkit.v1.card_element.apatch = AsyncMock(return_value=fail)
+
+        with caplog.at_level(logging.WARNING, logger="nextme.feishu.reply"):
+            await replier.stream_append_text("card_999", "text", 5)
+
+        assert "stream_append_text failed" in caplog.text
+
+
+class TestStreamSetStatus:
+    async def test_success_calls_acontent(self):
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        mock_client.cardkit.v1.card_element.acontent = AsyncMock(return_value=ok)
+
+        await replier.stream_set_status("card_123", "_Bash · 5s_", 2)
+
+        mock_client.cardkit.v1.card_element.acontent.assert_awaited_once()
+
+    async def test_failure_no_exception(self, caplog):
+        import logging
+        replier, mock_client = make_replier()
+        fail = MagicMock()
+        fail.success.return_value = False
+        fail.code = 500
+        fail.msg = "server error"
+        mock_client.cardkit.v1.card_element.acontent = AsyncMock(return_value=fail)
+
+        with caplog.at_level(logging.WARNING, logger="nextme.feishu.reply"):
+            await replier.stream_set_status("card_x", "status", 3)
+
+        assert "stream_set_status failed" in caplog.text
