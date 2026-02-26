@@ -33,8 +33,13 @@ class SkillInvoker:
         str
             The fully-rendered prompt string.
         """
-        return (
+        result = (
             skill.template
             .replace("{user_input}", user_input)
             .replace("{context}", context)
         )
+        # Claude global skills lack a {user_input} placeholder — append the
+        # user's request so the agent still knows what to do.
+        if user_input and "{user_input}" not in skill.template:
+            result = f"{result}\n\nUser request: {user_input}"
+        return result

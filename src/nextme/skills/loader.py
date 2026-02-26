@@ -51,6 +51,7 @@ class Skill(BaseModel):
 
     meta: SkillMeta
     template: str  # the markdown body after frontmatter
+    source: str = ""  # "builtin" | "claude" | "nextme" | "project"
 
 
 # ---------------------------------------------------------------------------
@@ -121,13 +122,25 @@ def _parse_frontmatter(text: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def load_skill_file(path: Path) -> Skill:
+def load_skill_file(
+    path: Path,
+    *,
+    trigger_override: str = "",
+    source: str = "",
+) -> Skill:
     """Parse a ``.md`` skill file with YAML frontmatter.
 
     Parameters
     ----------
     path:
         Absolute or relative path to a ``.md`` skill file.
+    trigger_override:
+        When provided, used as the trigger if the frontmatter does not
+        contain a ``trigger`` field (e.g. Claude global skills whose
+        trigger is the directory name).
+    source:
+        Origin label for display purposes: ``"builtin"``, ``"claude"``,
+        ``"nextme"``, or ``"project"``.
 
     Returns
     -------
@@ -138,7 +151,7 @@ def load_skill_file(path: Path) -> Skill:
     ------
     ValueError
         If the file has no valid frontmatter block or is missing required
-        fields (``name``, ``trigger``).
+        fields (``name``, ``trigger``) and no override was provided.
     OSError
         If the file cannot be read.
     """
@@ -156,6 +169,11 @@ def load_skill_file(path: Path) -> Skill:
 
     meta_dict = _parse_frontmatter(frontmatter_text)
 
+    # Apply overrides for fields absent in the frontmatter.
+    if trigger_override:
+        meta_dict.setdefault("trigger", trigger_override)
+        meta_dict.setdefault("name", trigger_override)
+
     # Validate required fields early with a helpful message.
     for required in ("name", "trigger"):
         if required not in meta_dict or not meta_dict[required]:
@@ -164,4 +182,4 @@ def load_skill_file(path: Path) -> Skill:
             )
 
     meta = SkillMeta.model_validate(meta_dict)
-    return Skill(meta=meta, template=template)
+    return Skill(meta=meta, template=template, source=source)

@@ -351,13 +351,25 @@ class TestSkillInvoker:
         result = invoker.build_prompt(skill, "my input")
         assert result == "Input: my input\nContext: "
 
-    def test_build_prompt_works_when_template_has_no_placeholders(self):
+    def test_build_prompt_appends_user_input_when_no_placeholder(self):
+        # Claude global skills have no {user_input} placeholder; user's request
+        # should be appended so the agent knows what to do.
         invoker = SkillInvoker()
         skill = Skill(
             meta=SkillMeta(name="Test", trigger="test"),
             template="This template has no placeholders at all.",
         )
         result = invoker.build_prompt(skill, "some input", "some context")
+        assert result == "This template has no placeholders at all.\n\nUser request: some input"
+
+    def test_build_prompt_no_append_when_user_input_empty(self):
+        # If user_input is empty, nothing should be appended even without placeholder.
+        invoker = SkillInvoker()
+        skill = Skill(
+            meta=SkillMeta(name="Test", trigger="test"),
+            template="This template has no placeholders at all.",
+        )
+        result = invoker.build_prompt(skill, "", "some context")
         assert result == "This template has no placeholders at all."
 
     def test_build_prompt_replaces_all_occurrences(self):

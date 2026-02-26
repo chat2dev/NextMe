@@ -415,9 +415,23 @@ class TaskDispatcher:
                 if not skills:
                     await replier.send_text(chat_id, "当前没有已注册的 Skill。")
                 else:
-                    lines = ["**已注册 Skills:**\n"]
+                    source_order = ["project", "nextme", "claude", "builtin"]
+                    source_labels = {
+                        "project": "项目级",
+                        "nextme": "NextMe 全局",
+                        "claude": "Claude 全局",
+                        "builtin": "内置",
+                    }
+                    by_source: dict[str, list] = {}
                     for s in sorted(skills, key=lambda x: x.meta.trigger):
-                        lines.append(f"• `/skill {s.meta.trigger}` — {s.meta.description}")
+                        by_source.setdefault(s.source or "builtin", []).append(s)
+                    lines = ["**已注册 Skills:**"]
+                    for src in source_order:
+                        if src not in by_source:
+                            continue
+                        lines.append(f"\n**{source_labels[src]}**")
+                        for s in by_source[src]:
+                            lines.append(f"  • `/skill {s.meta.trigger}` — {s.meta.description}")
                     await replier.send_text(chat_id, "\n".join(lines))
                 return
             # Look up the skill and enqueue a rendered prompt as a normal task.

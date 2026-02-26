@@ -21,6 +21,7 @@ from .loader import Skill, load_skill_file
 logger = logging.getLogger(__name__)
 
 _NEXTME_HOME = Path("~/.nextme").expanduser()
+_CLAUDE_HOME = Path("~/.claude").expanduser()
 
 # Built-in skills directory: go up four levels from this file
 # (src/nextme/skills/registry.py → src/nextme/skills → src/nextme → src → project root)
@@ -69,16 +70,19 @@ class SkillRegistry:
         """
         self._skills.clear()
 
-        # Order: built-in (lowest) → user-global → project-local (highest)
-        directories: list[Path] = [
-            _BUILTIN_SKILLS_DIR,
-            _NEXTME_HOME / "skills",
+        # Order: built-in (lowest) → claude-global → nextme-global → project-local (highest)
+        directories: list[tuple[Path, str]] = [
+            (_BUILTIN_SKILLS_DIR, "builtin"),
+            (_NEXTME_HOME / "skills", "nextme"),
         ]
         if project_path is not None:
-            directories.append(project_path / ".nextme" / "skills")
+            directories.append((project_path / ".nextme" / "skills", "project"))
 
-        for directory in directories:
-            self._load_directory(directory)
+        for directory, source in directories:
+            self._load_directory(directory, source=source)
+
+        # Claude global skills live in subdirectories: ~/.claude/skills/<name>/SKILL.md
+        self._load_claude_skills()
 
     def get(self, trigger: str) -> Optional[Skill]:
         """Return the :class:`Skill` registered for *trigger*, or ``None``.
@@ -98,7 +102,7 @@ class SkillRegistry:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _load_directory(self, directory: Path) -> None:
+    def _load_directory(self, directory: Path, *, source: str = "") -> None:
         """Load all ``.md`` files from *directory* into the registry.
 
         Non-existent directories are silently skipped.  Files that fail
@@ -121,31 +125,73 @@ class SkillRegistry:
 
         for path in skill_files:
             try:
-                skill = load_skill_file(path)
+                skill = load_skill_file(path, source=source)
             except (ValueError, OSError) as exc:
                 logger.warning(
                     "SkillRegistry: failed to load skill file %r: %s", str(path), exc
                 )
                 continue
 
-            trigger = skill.meta.trigger
-            if trigger in self._skills:
-                logger.debug(
-                    "SkillRegistry: overriding trigger %r with skill from %s",
-                    trigger,
-                    path,
-                )
-            else:
-                logger.debug(
-                    "SkillRegistry: registered skill %r (trigger=%r) from %s",
-                    skill.meta.name,
-                    trigger,
-                    path,
-                )
-            self._skills[trigger] = skill
+            self._register(skill, path)
 
         logger.info(
             "SkillRegistry: %d skill(s) registered after loading %s",
             len(self._skills),
             directory,
         )
+
+    def _load_claude_skills(self) -> None:
+        """Load Claude global skills from ``~/.claude/skills/<name>/SKILL.md``.
+
+        Each subdirectory represents one skill; the directory name is used as
+        the trigger.  Skills loaded here have source ``"claude"`` and are
+        inserted between built-in and nextme-global in priority, so they can
+        be overridden by user / project skills.
+        """
+        claude_skills_dir = _CLAUDE_HOME / "skills"
+        if not claude_skills_dir.is_dir():
+            logger.debug("SkillRegistry: Claude skills dir not found: %s", claude_skills_dir)
+            return
+
+        loaded = 0
+        for skill_dir in sorted(claude_skills_dir.iterdir()):
+            skill_file = skill_dir / "SKILL.md"
+            if not skill_file.is_file():
+                continue
+            trigger = skill_dir.name
+            try:
+                skill = load_skill_file(
+                    skill_file,
+                    trigger_override=trigger,
+                    source="claude",
+                )
+            except (ValueError, OSError) as exc:
+                logger.warning(
+                    "SkillRegistry: failed to load Claude skill %r: %s", trigger, exc
+                )
+                continue
+            self._register(skill, skill_file)
+            loaded += 1
+
+        if loaded:
+            logger.info("SkillRegistry: %d Claude global skill(s) loaded", loaded)
+
+    def _register(self, skill: "Skill", path: Path) -> None:
+        """Insert *skill* into the registry, logging overrides."""
+        trigger = skill.meta.trigger
+        if trigger in self._skills:
+            logger.debug(
+                "SkillRegistry: overriding trigger %r (source=%r) with skill from %s",
+                trigger,
+                skill.source,
+                path,
+            )
+        else:
+            logger.debug(
+                "SkillRegistry: registered skill %r (trigger=%r, source=%r) from %s",
+                skill.meta.name,
+                trigger,
+                skill.source,
+                path,
+            )
+        self._skills[trigger] = skill
