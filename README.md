@@ -18,9 +18,9 @@ Turn Feishu group chats and direct messages into an interactive Claude Code term
 | Multi-project parallel | Each `(user, project)` pair gets an independent worker; multiple projects run concurrently |
 | Chat binding | Bind a group chat to a specific project (`/project bind <name>`) |
 | Session persistence | Claude session ID survives bot restarts; conversation history seamlessly resumed |
-| Long-term memory | `/remember <text>` saves user facts; facts are injected into new sessions automatically |
+| Long-term memory | `/remember <text>` saves user-level facts (shared across all chats); injected into new sessions automatically |
 | Context compression | Oversized contexts auto-compressed with zlib / lzma / brotli |
-| Skills system | Markdown prompt templates; `/review` `/commit` `/test` etc. |
+| Skills system | Markdown prompt templates; tiered discovery (built-in / global / nextme / project); `/review` `/commit` `/test` etc. |
 | Meta-commands | `/new` `/stop` `/help` `/status` `/project` `/task` `/remember` |
 | Path lock | Only one session may write to a given project directory at a time |
 | Graceful shutdown | SIGTERM/SIGINT → drain in-flight tasks → flush state → exit |
@@ -124,7 +124,7 @@ Send any message to the bot. The agent executes the task inside the configured p
 | `/project <name>` | Switch the active project |
 | `/project bind <name>` | Permanently bind this chat to a project |
 | `/project unbind` | Remove the chat-to-project binding |
-| `/skill` | List all registered skills |
+| `/skill` | List all registered skills grouped by tier (项目级 / NextMe 全局 / 全局 / 内置) |
 | `/skill <trigger>` | Invoke a skill by trigger name |
 | `/remember <text>` | Save a fact to long-term memory |
 
@@ -223,13 +223,18 @@ NEXTME_ACP_IDLE_TIMEOUT_SECONDS=7200
 
 ## Custom Skills
 
-Place a `.md` file in any of the following directories (higher priority overrides lower):
+Skills are discovered from four tiers (higher priority overrides lower):
 
-1. `{project_path}/.nextme/skills/*.md` — project-local
-2. `~/.nextme/skills/*.md` — user-global
-3. `{package}/skills/*.md` — built-in
+| Priority | Directory | Source label |
+|----------|-----------|--------------|
+| 4 — highest | `{project_path}/.nextme/skills/*.md` | 项目级 |
+| 3 | `~/.nextme/skills/*.md` | NextMe 全局 |
+| 2 | `~/.claude/skills/<name>/SKILL.md` | 全局 (claude executor only) |
+| 1 — lowest | `{package}/skills/*.md` | 内置 |
 
-File format:
+The **全局** tier (`~/.claude/skills/`) is only scanned when at least one configured project uses `executor: "claude"`. Skills installed via Claude Code (`/install-github-app`) appear here automatically.
+
+**NextMe / project skill format** (with `{user_input}` placeholder):
 
 ```markdown
 ---
@@ -244,11 +249,23 @@ You are a ...
 
 User request: {user_input}
 Context: {context}
-
-Please complete the following task ...
 ```
 
-Invoke with `/skill myskill` or directly `/myskill`.
+**Claude global skill format** (no `trigger` or `{user_input}` — trigger = directory name):
+
+```markdown
+---
+name: My Global Skill
+description: What this skill does
+allowed-tools: [bash, read]
+---
+
+You are a specialist in ...
+```
+
+When a global skill template has no `{user_input}` placeholder, NextMe appends `User request: <input>` automatically so the agent knows what to do.
+
+Invoke with `/skill myskill`.
 
 ---
 
@@ -344,7 +361,7 @@ NextMe assigns an independent asyncio worker to each `(user, project)` pair, so 
 
 **Session persistence** — The Claude session ID (`actual_id`) is saved to `~/.nextme/state.json` after each task. On bot restart, NextMe passes `--resume <id>` to the `claude` CLI so conversation history is seamlessly resumed.
 
-**Long-term memory** — Use `/remember <text>` to save facts. On new sessions (not resumed ones), the top-10 highest-confidence facts are prepended to the task prompt automatically:
+**Long-term memory** — Use `/remember <text>` to save facts. Facts are stored at the **user level** and shared across all chats for the same user. On new sessions (not resumed ones), the top-10 highest-confidence facts are prepended to the task prompt automatically:
 
 ```
 [用户记忆]
