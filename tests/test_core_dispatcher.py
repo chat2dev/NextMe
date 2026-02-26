@@ -141,14 +141,15 @@ async def test_dispatch_new_command(dispatcher, mock_replier):
 
 
 async def test_dispatch_new_command_passes_runtime(dispatcher, acp_registry, mock_replier):
-    """/new looks up the runtime from acp_registry."""
+    """/new looks up the runtime from acp_registry using context_id:project_name key."""
     mock_runtime = MagicMock()
     acp_registry.get.return_value = mock_runtime
     task = make_task("/new")
     with patch("nextme.core.dispatcher.handle_new", new_callable=AsyncMock) as mock_new:
         await dispatcher.dispatch(task)
-    # acp_registry.get was called with the context_id
-    acp_registry.get.assert_called_once_with(task.session_id)
+    # acp_registry.get was called with the scoped key (context_id:project_name)
+    call_arg = acp_registry.get.call_args[0][0]
+    assert call_arg.startswith(task.session_id + ":")
     # The runtime was passed to handle_new
     call_args = mock_new.call_args
     assert call_args.args[1] is mock_runtime or call_args.kwargs.get("runtime") is mock_runtime
@@ -267,9 +268,8 @@ async def test_dispatch_normal_message_starts_worker(dispatcher):
         await dispatcher.dispatch(task)
 
     MockWorker.assert_called_once()
-    # Worker task should be registered
-    context_id = task.session_id
-    assert context_id in dispatcher._worker_tasks
+    # Worker task should be registered under context_id:project_name key
+    assert any(k.startswith(task.session_id + ":") for k in dispatcher._worker_tasks)
 
 
 async def test_dispatch_does_not_restart_running_worker(dispatcher):
@@ -550,8 +550,10 @@ async def test_dispatch_restarts_finished_worker(dispatcher):
         await dispatcher.dispatch(task1)
 
         # Allow the worker task to complete
-        context_id = task1.session_id
-        worker_asyncio_task = dispatcher._worker_tasks.get(context_id)
+        worker_asyncio_task = next(
+            (t for k, t in dispatcher._worker_tasks.items() if k.startswith(task1.session_id + ":")),
+            None,
+        )
         if worker_asyncio_task:
             await asyncio.sleep(0)  # yield control so task can complete
             await asyncio.sleep(0)
@@ -648,3 +650,207 @@ async def test_dispatch_reply_fn_uses_send_card_when_no_message_id(dispatcher, m
     await task.reply_fn(reply)
     mock_replier.send_card.assert_awaited()
     mock_replier.reply_card.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Tests: chat binding routing
+# ---------------------------------------------------------------------------
+
+
+def make_bound_dispatcher(config, settings, acp_registry, feishu_client, path_lock_registry, session_registry):
+    """Create a dispatcher with a static binding: chat_abc → myproj."""
+    return TaskDispatcher(
+        config=config,
+        settings=settings,
+        session_registry=session_registry,
+        acp_registry=acp_registry,
+        path_lock_registry=path_lock_registry,
+        feishu_client=feishu_client,
+    )
+
+
+async def test_dispatch_static_binding_routes_to_bound_project(
+    config, settings, acp_registry, feishu_client, path_lock_registry, session_registry, project
+):
+    """Static binding in config routes all messages to the bound project."""
+    bound_config = AppConfig(
+        app_id="x", app_secret="y",
+        projects=[project],
+        bindings={"chat_abc": project.name},
+    )
+    d = TaskDispatcher(
+        config=bound_config, settings=settings,
+        session_registry=session_registry, acp_registry=acp_registry,
+        path_lock_registry=path_lock_registry, feishu_client=feishu_client,
+    )
+    task = make_task("hello", session_id="chat_abc:user_xyz")
+    with patch("nextme.core.dispatcher.SessionWorker") as MockWorker:
+        mock_instance = MagicMock()
+        mock_instance.run = AsyncMock()
+        MockWorker.return_value = mock_instance
+        await d.dispatch(task)
+
+    user_ctx = session_registry.get("chat_abc:user_xyz")
+    assert user_ctx is not None
+    assert project.name in user_ctx.sessions
+
+
+async def test_dispatch_dynamic_binding_routes_to_bound_project(
+    config, settings, acp_registry, feishu_client, path_lock_registry, session_registry, project
+):
+    """Dynamic binding (_dynamic_bindings) routes messages to the bound project."""
+    d = TaskDispatcher(
+        config=config, settings=settings,
+        session_registry=session_registry, acp_registry=acp_registry,
+        path_lock_registry=path_lock_registry, feishu_client=feishu_client,
+    )
+    d._dynamic_bindings["chat_abc"] = project.name
+    task = make_task("hello", session_id="chat_abc:user_xyz")
+    with patch("nextme.core.dispatcher.SessionWorker") as MockWorker:
+        mock_instance = MagicMock()
+        mock_instance.run = AsyncMock()
+        MockWorker.return_value = mock_instance
+        await d.dispatch(task)
+
+    user_ctx = session_registry.get("chat_abc:user_xyz")
+    assert user_ctx is not None
+    assert project.name in user_ctx.sessions
+
+
+async def test_dispatch_static_binding_takes_precedence_over_dynamic(
+    config, settings, acp_registry, feishu_client, path_lock_registry, session_registry, project, tmp_path
+):
+    """Static config binding wins over dynamic binding when both exist."""
+    project_b = Project(name="repo-B", path=str(tmp_path / "repo_b"), executor="claude")
+    bound_config = AppConfig(
+        app_id="x", app_secret="y",
+        projects=[project, project_b],
+        bindings={"chat_abc": project.name},   # static → project
+    )
+    d = TaskDispatcher(
+        config=bound_config, settings=settings,
+        session_registry=session_registry, acp_registry=acp_registry,
+        path_lock_registry=path_lock_registry, feishu_client=feishu_client,
+    )
+    d._dynamic_bindings["chat_abc"] = project_b.name  # dynamic → repo-B
+
+    task = make_task("hello", session_id="chat_abc:user_xyz")
+    with patch("nextme.core.dispatcher.SessionWorker") as MockWorker:
+        mock_instance = MagicMock()
+        mock_instance.run = AsyncMock()
+        MockWorker.return_value = mock_instance
+        await d.dispatch(task)
+
+    user_ctx = session_registry.get("chat_abc:user_xyz")
+    # Static binding (project.name) should win
+    assert project.name in user_ctx.sessions
+
+
+async def test_dispatch_binding_unknown_project_falls_back_to_default(
+    config, settings, acp_registry, feishu_client, path_lock_registry, session_registry, project
+):
+    """If binding points to an unknown project, fall back to default."""
+    bound_config = AppConfig(
+        app_id="x", app_secret="y",
+        projects=[project],
+        bindings={"chat_abc": "nonexistent-project"},
+    )
+    d = TaskDispatcher(
+        config=bound_config, settings=settings,
+        session_registry=session_registry, acp_registry=acp_registry,
+        path_lock_registry=path_lock_registry, feishu_client=feishu_client,
+    )
+    task = make_task("hello", session_id="chat_abc:user_xyz")
+    with patch("nextme.core.dispatcher.SessionWorker") as MockWorker:
+        mock_instance = MagicMock()
+        mock_instance.run = AsyncMock()
+        MockWorker.return_value = mock_instance
+        await d.dispatch(task)
+
+    user_ctx = session_registry.get("chat_abc:user_xyz")
+    # Falls back to default project (the only configured project)
+    assert project.name in user_ctx.sessions
+
+
+async def test_dispatch_project_bind_subcommand_updates_dynamic_bindings(
+    dispatcher, mock_replier, project
+):
+    """/project bind <name> updates _dynamic_bindings."""
+    task = make_task(f"/project bind {project.name}")
+    with patch("nextme.core.dispatcher.handle_bind", new_callable=AsyncMock, return_value=project.name):
+        await dispatcher.dispatch(task)
+    assert dispatcher._dynamic_bindings.get("chat_abc") == project.name
+
+
+async def test_dispatch_project_unbind_subcommand_clears_dynamic_bindings(
+    dispatcher, mock_replier, project
+):
+    """/project unbind removes chat from _dynamic_bindings."""
+    dispatcher._dynamic_bindings["chat_abc"] = project.name
+    task = make_task("/project unbind")
+    with patch("nextme.core.dispatcher.handle_unbind", new_callable=AsyncMock, return_value=True):
+        await dispatcher.dispatch(task)
+    assert "chat_abc" not in dispatcher._dynamic_bindings
+
+
+async def test_dispatch_project_bind_no_arg_sends_usage(dispatcher, mock_replier):
+    """/project bind without arg sends usage hint."""
+    task = make_task("/project bind")
+    await dispatcher.dispatch(task)
+    mock_replier.send_text.assert_awaited()
+    text = mock_replier.send_text.call_args[0][1]
+    assert "bind" in text
+
+
+async def test_dispatch_state_store_set_binding_called_on_bind(
+    config, settings, acp_registry, feishu_client, path_lock_registry, session_registry, project
+):
+    """/project bind persists binding to state_store."""
+    mock_store = MagicMock()
+    mock_store.get_all_bindings = MagicMock(return_value={})
+    mock_store.set_binding = MagicMock()
+    d = TaskDispatcher(
+        config=config, settings=settings,
+        session_registry=session_registry, acp_registry=acp_registry,
+        path_lock_registry=path_lock_registry, feishu_client=feishu_client,
+        state_store=mock_store,
+    )
+    task = make_task(f"/project bind {project.name}")
+    with patch("nextme.core.dispatcher.handle_bind", new_callable=AsyncMock, return_value=project.name):
+        await d.dispatch(task)
+    mock_store.set_binding.assert_called_once_with("chat_abc", project.name)
+
+
+async def test_dispatch_state_store_remove_binding_called_on_unbind(
+    config, settings, acp_registry, feishu_client, path_lock_registry, session_registry, project
+):
+    """/project unbind removes binding from state_store."""
+    mock_store = MagicMock()
+    mock_store.get_all_bindings = MagicMock(return_value={"chat_abc": project.name})
+    mock_store.remove_binding = MagicMock()
+    d = TaskDispatcher(
+        config=config, settings=settings,
+        session_registry=session_registry, acp_registry=acp_registry,
+        path_lock_registry=path_lock_registry, feishu_client=feishu_client,
+        state_store=mock_store,
+    )
+    d._dynamic_bindings["chat_abc"] = project.name
+    task = make_task("/project unbind")
+    with patch("nextme.core.dispatcher.handle_unbind", new_callable=AsyncMock, return_value=True):
+        await d.dispatch(task)
+    mock_store.remove_binding.assert_called_once_with("chat_abc")
+
+
+async def test_dispatcher_loads_dynamic_bindings_from_state_store(
+    config, settings, acp_registry, feishu_client, path_lock_registry, session_registry, project
+):
+    """Dispatcher loads existing bindings from state_store at construction."""
+    mock_store = MagicMock()
+    mock_store.get_all_bindings = MagicMock(return_value={"oc_existing": project.name})
+    d = TaskDispatcher(
+        config=config, settings=settings,
+        session_registry=session_registry, acp_registry=acp_registry,
+        path_lock_registry=path_lock_registry, feishu_client=feishu_client,
+        state_store=mock_store,
+    )
+    assert d._dynamic_bindings == {"oc_existing": project.name}

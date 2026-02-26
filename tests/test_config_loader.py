@@ -191,8 +191,12 @@ class TestLoadAppConfig:
         result = ConfigLoader.load_app_config(cwd=tmp_path)
         assert result.app_id == "env_wins"
 
-    def test_projects_loaded_from_local_json(self, tmp_path, monkeypatch):
+    def test_projects_loaded_from_local_json(self, tmp_path, monkeypatch, tmp_path_factory):
+        """Local project appears in the result (may be merged with global)."""
         monkeypatch.delenv("NEXTME_APP_ID", raising=False)
+        # Isolate from real ~/.nextme/nextme.json by redirecting _NEXTME_HOME
+        fake_home = tmp_path_factory.mktemp("home")
+        monkeypatch.setattr("nextme.config.loader._NEXTME_HOME", fake_home)
         projects = [{"name": "myproj", "path": str(tmp_path)}]
         local_cfg = {"app_id": "id", "projects": projects}
         (tmp_path / "nextme.json").write_text(json.dumps(local_cfg), encoding="utf-8")
@@ -250,3 +254,162 @@ class TestLoadSettings:
         # Defaults should be used (unless ~/.nextme/settings.json overrides them)
         assert isinstance(result, Settings)
         assert result.log_level in ("INFO", "DEBUG", "WARNING", "ERROR", "CRITICAL")
+
+
+# ---------------------------------------------------------------------------
+# Merge behaviour for projects and bindings
+# ---------------------------------------------------------------------------
+
+
+class TestMergeBehaviour:
+    """Verify that projects and bindings are merged (not replaced) across sources."""
+
+    def _isolated_loader(self, monkeypatch, tmp_path_factory, global_cfg, local_cfg, local_dir):
+        """Helper: write global and local nextme.json with isolated _NEXTME_HOME."""
+        fake_home = tmp_path_factory.mktemp("home")
+        monkeypatch.setattr("nextme.config.loader._NEXTME_HOME", fake_home)
+        (fake_home / "nextme.json").write_text(json.dumps(global_cfg), encoding="utf-8")
+        (local_dir / "nextme.json").write_text(json.dumps(local_cfg), encoding="utf-8")
+        return ConfigLoader.load_app_config(cwd=local_dir)
+
+    # -- projects --
+
+    def test_projects_merged_local_adds_to_global(self, tmp_path, monkeypatch, tmp_path_factory):
+        """Local projects are added to global projects when names differ."""
+        result = self._isolated_loader(
+            monkeypatch, tmp_path_factory,
+            global_cfg={"projects": [{"name": "global-proj", "path": str(tmp_path / "g")}]},
+            local_cfg={"projects": [{"name": "local-proj", "path": str(tmp_path / "l")}]},
+            local_dir=tmp_path,
+        )
+        names = {p.name for p in result.projects}
+        assert "global-proj" in names
+        assert "local-proj" in names
+        assert len(result.projects) == 2
+
+    def test_projects_local_wins_on_name_conflict(self, tmp_path, monkeypatch, tmp_path_factory):
+        """When the same project name exists in both sources, local path wins."""
+        global_path = str(tmp_path / "global_path")
+        local_path = str(tmp_path / "local_path")
+        result = self._isolated_loader(
+            monkeypatch, tmp_path_factory,
+            global_cfg={"projects": [{"name": "shared", "path": global_path}]},
+            local_cfg={"projects": [{"name": "shared", "path": local_path}]},
+            local_dir=tmp_path,
+        )
+        assert len(result.projects) == 1
+        assert result.projects[0].name == "shared"
+        assert result.projects[0].path == local_path
+
+    def test_projects_global_only_preserved_when_local_has_different_names(
+        self, tmp_path, monkeypatch, tmp_path_factory
+    ):
+        """Global projects that have no name clash with local are kept."""
+        result = self._isolated_loader(
+            monkeypatch, tmp_path_factory,
+            global_cfg={"projects": [
+                {"name": "alpha", "path": str(tmp_path / "a")},
+                {"name": "beta", "path": str(tmp_path / "b")},
+            ]},
+            local_cfg={"projects": [{"name": "gamma", "path": str(tmp_path / "g")}]},
+            local_dir=tmp_path,
+        )
+        names = {p.name for p in result.projects}
+        assert names == {"alpha", "beta", "gamma"}
+
+    def test_projects_order_global_first_then_local_additions(
+        self, tmp_path, monkeypatch, tmp_path_factory
+    ):
+        """Merged projects list: global entries come first, then local-only additions."""
+        result = self._isolated_loader(
+            monkeypatch, tmp_path_factory,
+            global_cfg={"projects": [{"name": "g1", "path": str(tmp_path / "g1")}]},
+            local_cfg={"projects": [{"name": "l1", "path": str(tmp_path / "l1")}]},
+            local_dir=tmp_path,
+        )
+        # g1 was in global dict first, l1 added after
+        names = [p.name for p in result.projects]
+        assert names.index("g1") < names.index("l1")
+
+    def test_projects_empty_local_preserves_global(self, tmp_path, monkeypatch, tmp_path_factory):
+        """Local config with no 'projects' key leaves global projects intact."""
+        result = self._isolated_loader(
+            monkeypatch, tmp_path_factory,
+            global_cfg={"projects": [{"name": "g1", "path": str(tmp_path / "g")}]},
+            local_cfg={"app_id": "only_scalars"},
+            local_dir=tmp_path,
+        )
+        assert any(p.name == "g1" for p in result.projects)
+
+    def test_projects_empty_global_uses_local_only(self, tmp_path, monkeypatch, tmp_path_factory):
+        """No global projects → only local projects appear."""
+        result = self._isolated_loader(
+            monkeypatch, tmp_path_factory,
+            global_cfg={},
+            local_cfg={"projects": [{"name": "local-only", "path": str(tmp_path / "l")}]},
+            local_dir=tmp_path,
+        )
+        assert len(result.projects) == 1
+        assert result.projects[0].name == "local-only"
+
+    # -- bindings --
+
+    def test_bindings_merged_local_adds_to_global(self, tmp_path, monkeypatch, tmp_path_factory):
+        """Local bindings are added to global bindings when keys differ."""
+        result = self._isolated_loader(
+            monkeypatch, tmp_path_factory,
+            global_cfg={"bindings": {"chat_global": "repo-G"}},
+            local_cfg={"bindings": {"chat_local": "repo-L"}},
+            local_dir=tmp_path,
+        )
+        assert result.bindings == {"chat_global": "repo-G", "chat_local": "repo-L"}
+
+    def test_bindings_local_wins_on_key_conflict(self, tmp_path, monkeypatch, tmp_path_factory):
+        """When the same chat_id exists in both, local value wins."""
+        result = self._isolated_loader(
+            monkeypatch, tmp_path_factory,
+            global_cfg={"bindings": {"chat_shared": "repo-global"}},
+            local_cfg={"bindings": {"chat_shared": "repo-local"}},
+            local_dir=tmp_path,
+        )
+        assert result.bindings == {"chat_shared": "repo-local"}
+
+    def test_bindings_empty_local_preserves_global(self, tmp_path, monkeypatch, tmp_path_factory):
+        """Local config with no 'bindings' key leaves global bindings intact."""
+        result = self._isolated_loader(
+            monkeypatch, tmp_path_factory,
+            global_cfg={"bindings": {"chat_g": "repo-G"}},
+            local_cfg={"app_id": "no_bindings"},
+            local_dir=tmp_path,
+        )
+        assert result.bindings.get("chat_g") == "repo-G"
+
+    def test_bindings_empty_global_uses_local_only(self, tmp_path, monkeypatch, tmp_path_factory):
+        """No global bindings → only local bindings appear."""
+        result = self._isolated_loader(
+            monkeypatch, tmp_path_factory,
+            global_cfg={},
+            local_cfg={"bindings": {"chat_l": "repo-L"}},
+            local_dir=tmp_path,
+        )
+        assert result.bindings == {"chat_l": "repo-L"}
+
+    def test_bindings_and_projects_merged_simultaneously(
+        self, tmp_path, monkeypatch, tmp_path_factory
+    ):
+        """Both projects and bindings are merged in the same load call."""
+        result = self._isolated_loader(
+            monkeypatch, tmp_path_factory,
+            global_cfg={
+                "projects": [{"name": "g-proj", "path": str(tmp_path / "gp")}],
+                "bindings": {"chat_g": "g-proj"},
+            },
+            local_cfg={
+                "projects": [{"name": "l-proj", "path": str(tmp_path / "lp")}],
+                "bindings": {"chat_l": "l-proj"},
+            },
+            local_dir=tmp_path,
+        )
+        proj_names = {p.name for p in result.projects}
+        assert proj_names == {"g-proj", "l-proj"}
+        assert result.bindings == {"chat_g": "g-proj", "chat_l": "l-proj"}

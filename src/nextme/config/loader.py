@@ -125,10 +125,21 @@ class ConfigLoader:
         else:
             local_data = _read_json(Path.cwd() / "nextme.json")
 
-        # Deep-merge: scalar fields are replaced; projects list is replaced
-        # entirely by the more-local source when present.
+        # Merge rules:
+        #   - projects: union by name; local entry wins on name conflict.
+        #   - bindings: dict merge; local entry wins on key conflict.
+        #   - all other fields: local value replaces global value.
         for key, value in local_data.items():
-            merged[key] = value
+            if key == "projects" and "projects" in merged:
+                global_by_name = {p["name"]: p for p in merged["projects"] if isinstance(p, dict)}
+                for proj in value:
+                    if isinstance(proj, dict):
+                        global_by_name[proj["name"]] = proj
+                merged["projects"] = list(global_by_name.values())
+            elif key == "bindings" and "bindings" in merged:
+                merged["bindings"] = {**merged["bindings"], **value}
+            else:
+                merged[key] = value
 
         # --- Layer 3: dotenv overrides (AppConfig fields only) -----------
         dotenv_overrides = _collect_dotenv_overrides(cwd)

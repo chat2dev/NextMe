@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from nextme.core.commands import (
     HELP_COMMANDS, handle_new, handle_stop, handle_help,
-    handle_status, handle_project,
+    handle_status, handle_project, handle_bind, handle_unbind,
 )
 from nextme.config.schema import AppConfig, Project, Settings
 from nextme.core.session import Session, UserContext
@@ -57,7 +57,7 @@ def replier():
 
 def test_help_commands_is_list_of_tuples():
     assert isinstance(HELP_COMMANDS, list)
-    assert len(HELP_COMMANDS) == 6
+    assert len(HELP_COMMANDS) == 11
 
 
 def test_help_commands_each_item_has_two_strings():
@@ -201,35 +201,53 @@ async def test_handle_help_handles_send_card_exception_gracefully():
 # handle_status tests
 # ---------------------------------------------------------------------------
 
-async def test_handle_status_calls_send_card(session, replier):
-    await handle_status(session, replier, "oc_chat")
+async def test_handle_status_empty_user_ctx_sends_text(user_ctx, replier):
+    """No sessions → send_text with 'no active session' message."""
+    await handle_status(user_ctx, replier, "oc_chat")
+    replier.send_text.assert_awaited_once()
+    call_args = replier.send_text.call_args[0]
+    assert call_args[0] == "oc_chat"
+
+
+async def test_handle_status_calls_send_card(user_ctx, session, project, settings, replier):
+    user_ctx.get_or_create_session(project, settings)
+    await handle_status(user_ctx, replier, "oc_chat")
     replier.send_card.assert_awaited_once()
     call_args = replier.send_card.call_args[0]
     assert call_args[0] == "oc_chat"
 
 
-async def test_handle_status_card_contains_session_info(session, replier):
+async def test_handle_status_card_contains_session_info(user_ctx, session, project, settings, replier):
     import json
-    await handle_status(session, replier, "oc_chat")
+    user_ctx.get_or_create_session(project, settings)
+    await handle_status(user_ctx, replier, "oc_chat")
     call_args = replier.send_card.call_args[0]
     card_json = call_args[1]
     card = json.loads(card_json)
-    # Verify card structure
     assert card["schema"] == "2.0"
     assert "body" in card
     elements = card["body"]["elements"]
     assert len(elements) >= 1
     content = elements[0]["content"]
-    # Should contain project name
     assert session.project_name in content
 
 
-async def test_handle_status_handles_exception_gracefully(session):
+async def test_handle_status_active_project_marked_with_star(user_ctx, project, settings, replier):
+    import json
+    user_ctx.get_or_create_session(project, settings)
+    await handle_status(user_ctx, replier, "oc_chat")
+    card_json = replier.send_card.call_args[0][1]
+    content = json.loads(card_json)["body"]["elements"][0]["content"]
+    assert "★" in content
+
+
+async def test_handle_status_handles_exception_gracefully(user_ctx, project, settings):
     """handle_status should not propagate exceptions from replier."""
+    user_ctx.get_or_create_session(project, settings)
     bad_replier = MagicMock()
     bad_replier.send_card = AsyncMock(side_effect=RuntimeError("send failed"))
     # Should not raise
-    await handle_status(session, bad_replier, "oc_chat")
+    await handle_status(user_ctx, bad_replier, "oc_chat")
 
 
 # ---------------------------------------------------------------------------
@@ -304,3 +322,75 @@ async def test_handle_project_send_text_exception_gracefully(
     bad_replier.send_text = AsyncMock(side_effect=RuntimeError("send failed"))
     # Should not raise
     await handle_project(user_ctx, project.name, config, settings, bad_replier, "oc_chat")
+
+
+# ---------------------------------------------------------------------------
+# handle_bind tests
+# ---------------------------------------------------------------------------
+
+async def test_handle_bind_returns_project_name_when_found(project, replier):
+    config = AppConfig(app_id="x", app_secret="y", projects=[project])
+    result = await handle_bind("oc_chat", project.name, config, replier)
+    assert result == project.name
+
+
+async def test_handle_bind_returns_none_when_not_found(replier):
+    config = AppConfig(app_id="x", app_secret="y", projects=[])
+    result = await handle_bind("oc_chat", "missing", config, replier)
+    assert result is None
+
+
+async def test_handle_bind_sends_confirmation_when_found(project, replier):
+    config = AppConfig(app_id="x", app_secret="y", projects=[project])
+    await handle_bind("oc_chat", project.name, config, replier)
+    replier.send_text.assert_awaited_once()
+    text_arg = replier.send_text.call_args[0][1]
+    assert project.name in text_arg
+
+
+async def test_handle_bind_sends_error_when_not_found(replier):
+    config = AppConfig(app_id="x", app_secret="y", projects=[])
+    await handle_bind("oc_chat", "missing", config, replier)
+    replier.send_text.assert_awaited_once()
+    text_arg = replier.send_text.call_args[0][1]
+    assert "missing" in text_arg
+
+
+async def test_handle_bind_sends_to_correct_chat(project, replier):
+    config = AppConfig(app_id="x", app_secret="y", projects=[project])
+    await handle_bind("oc_target_chat", project.name, config, replier)
+    call_args = replier.send_text.call_args[0]
+    assert call_args[0] == "oc_target_chat"
+
+
+async def test_handle_bind_handles_send_text_exception_gracefully(project):
+    config = AppConfig(app_id="x", app_secret="y", projects=[project])
+    bad_replier = MagicMock()
+    bad_replier.send_text = AsyncMock(side_effect=RuntimeError("send failed"))
+    # Should not raise; result is still the project name
+    result = await handle_bind("oc_chat", project.name, config, bad_replier)
+    assert result == project.name
+
+
+# ---------------------------------------------------------------------------
+# handle_unbind tests
+# ---------------------------------------------------------------------------
+
+async def test_handle_unbind_returns_true(replier):
+    result = await handle_unbind("oc_chat", replier)
+    assert result is True
+
+
+async def test_handle_unbind_sends_confirmation(replier):
+    await handle_unbind("oc_chat", replier)
+    replier.send_text.assert_awaited_once()
+    call_args = replier.send_text.call_args[0]
+    assert call_args[0] == "oc_chat"
+
+
+async def test_handle_unbind_handles_send_text_exception_gracefully():
+    bad_replier = MagicMock()
+    bad_replier.send_text = AsyncMock(side_effect=RuntimeError("send failed"))
+    # Should not raise; return True regardless
+    result = await handle_unbind("oc_chat", bad_replier)
+    assert result is True

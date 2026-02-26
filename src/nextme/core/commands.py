@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import logging
 
+import json
+from typing import Optional
+
 from ..config.schema import AppConfig, Settings
 from ..protocol.types import TaskStatus
 from .interfaces import AgentRuntime, Replier
@@ -22,12 +25,17 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 HELP_COMMANDS: list[tuple[str, str]] = [
-    ("/new", "重置 ACP Session（清除对话历史）"),
+    ("/new", "开启新对话（清除当前对话历史）"),
     ("/stop", "取消当前执行中的任务"),
     ("/help", "显示帮助"),
+    ("/skill", "列出所有 Skill"),
     ("/skill <trigger>", "触发指定 Skill"),
-    ("/status", "显示当前 Session 状态"),
+    ("/status", "显示所有 Session 状态"),
+    ("/task", "显示当前任务队列"),
+    ("/project", "列出所有项目"),
     ("/project <name>", "切换活跃项目"),
+    ("/project bind <name>", "将当前群聊绑定到指定项目"),
+    ("/project unbind", "解除当前群聊的项目绑定"),
 ]
 
 
@@ -69,7 +77,7 @@ async def handle_new(
             )
 
     try:
-        await replier.send_text(chat_id, "Session 已重置，对话历史已清除。")
+        await replier.send_text(chat_id, "已开启新对话，历史记录已清除。")
     except Exception:
         logger.exception("handle_new: failed to send confirmation to chat %r", chat_id)
 
@@ -128,38 +136,66 @@ async def handle_help(replier: Replier, chat_id: str) -> None:
 
 
 async def handle_status(
-    session: Session,
+    user_ctx: UserContext,
     replier: Replier,
     chat_id: str,
 ) -> None:
-    """Send a status card showing the current session state.
+    """Send a status card showing all active project sessions for *user_ctx*.
 
-    Displayed fields:
-    - Project name and path
-    - Current status
-    - ACP session ID (if known)
-    - Active task ID (if any)
-    - Queue depth
+    Each session is rendered as a separate section showing project name, path,
+    current status, executor, ACP session ID, active task and queue depth.
+    The active project is highlighted with a star prefix.
 
     Args:
-        session: The active session.
+        user_ctx: The user context containing all sessions.
         replier: Feishu message sender.
         chat_id: Target chat.
     """
     logger.debug(
-        "handle_status: sending status for context_id=%r", session.context_id
+        "handle_status: sending status for context_id=%r", user_ctx.context_id
     )
-    queue_size = session.task_queue.qsize()
-    lines: list[str] = [
-        f"**项目**: {session.project_name}",
-        f"**路径**: `{session.project_path}`",
-        f"**状态**: {session.status.value}",
-        f"**执行器**: {session.executor}",
-        f"**ACP Session**: {session.actual_id or '(未初始化)'}",
-        f"**当前任务**: {session.active_task.id if session.active_task else '无'}",
-        f"**队列深度**: {queue_size}",
-    ]
-    content = "\n".join(lines)
+
+    if not user_ctx.sessions:
+        try:
+            await replier.send_text(chat_id, "当前没有活跃 Session。")
+        except Exception:
+            logger.exception(
+                "handle_status: failed to send empty-status message to chat %r", chat_id
+            )
+        return
+
+    sections: list[str] = []
+    for project_name, session in user_ctx.sessions.items():
+        active_marker = "★ " if project_name == user_ctx.active_project else ""
+        queue_size = session.task_queue.qsize()
+
+        # Session ID label
+        if session.actual_id:
+            session_label = session.actual_id
+        elif session.status.value == "executing":
+            session_label = "(初始化中…)"
+        else:
+            session_label = "(无)"
+
+        # Active task label: show content preview instead of raw UUID
+        if session.active_task:
+            preview = session.active_task.content.replace("\n", " ")
+            if len(preview) > 40:
+                preview = preview[:40] + "…"
+            task_label = f"`{preview}`"
+        else:
+            task_label = "无"
+
+        section = "\n".join([
+            f"**{active_marker}{session.project_name}**",
+            f"路径: `{session.project_path}`",
+            f"状态: {session.status.value}  执行器: {session.executor}",
+            f"Session: {session_label}",
+            f"当前任务: {task_label}  队列: {queue_size}",
+        ])
+        sections.append(section)
+
+    content = "\n\n---\n\n".join(sections)
 
     card = {
         "schema": "2.0",
@@ -175,14 +211,87 @@ async def handle_status(
         },
     }
 
-    import json
-
     try:
         await replier.send_card(chat_id, json.dumps(card, ensure_ascii=False))
     except Exception:
         logger.exception(
             "handle_status: failed to send status card to chat %r", chat_id
         )
+
+
+async def handle_bind(
+    chat_id: str,
+    project_name: str,
+    config: AppConfig,
+    replier: Replier,
+) -> Optional[str]:
+    """Bind *chat_id* to *project_name*, returning the name on success or ``None``.
+
+    Validates that the project exists in *config* before accepting the binding.
+    Sends a confirmation or error message to the chat.
+
+    Args:
+        chat_id: Feishu chat identifier to bind.
+        project_name: Name of the project to bind this chat to.
+        config: Application configuration containing the project list.
+        replier: Feishu message sender.
+
+    Returns:
+        *project_name* when the project was found and the binding is accepted;
+        ``None`` when the project does not exist.
+    """
+    project = config.get_project(project_name)
+    if project is None:
+        available = ", ".join(f"`{p.name}`" for p in config.projects)
+        msg = (
+            f"未找到项目 `{project_name}`。\n"
+            f"可用项目: {available or '(无)'}。\n"
+            "请检查配置文件。"
+        )
+        try:
+            await replier.send_text(chat_id, msg)
+        except Exception:
+            logger.exception(
+                "handle_bind: failed to send 'not found' message to chat %r", chat_id
+            )
+        return None
+
+    logger.info("handle_bind: binding chat %r → project %r", chat_id, project_name)
+    try:
+        await replier.send_text(
+            chat_id,
+            f"已将当前群聊绑定到项目 **{project.name}**\n"
+            f"路径: `{project.path}`\n"
+            "后续消息将自动路由到该项目。",
+        )
+    except Exception:
+        logger.exception(
+            "handle_bind: failed to send confirmation to chat %r", chat_id
+        )
+    return project_name
+
+
+async def handle_unbind(chat_id: str, replier: Replier) -> bool:
+    """Remove a chat→project binding for *chat_id*.
+
+    Always sends a confirmation message.  Returns ``True`` so the caller can
+    update its in-memory binding map and the persistent store.
+
+    Args:
+        chat_id: Feishu chat identifier whose binding should be removed.
+        replier: Feishu message sender.
+
+    Returns:
+        ``True`` (always; the caller decides what to do if no binding existed).
+    """
+    logger.info("handle_unbind: removing binding for chat %r", chat_id)
+    try:
+        await replier.send_text(chat_id, "已解除当前群聊的项目绑定，恢复使用活跃项目。")
+    except Exception:
+        logger.exception(
+            "handle_unbind: failed to send confirmation to chat %r", chat_id
+        )
+    return True
 
 
 async def handle_project(

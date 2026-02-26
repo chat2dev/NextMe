@@ -25,12 +25,18 @@ class AppConfig(BaseModel):
     app_id: str = ""
     app_secret: str = ""
     projects: list[Project] = Field(default_factory=list)
+    bindings: dict[str, str] = Field(default_factory=dict)
+    """Static chat→project bindings from nextme.json.  Key: chat_id, value: project name."""
 
     def get_project(self, name: str) -> Optional[Project]:
         for p in self.projects:
             if p.name == name:
                 return p
         return None
+
+    def get_binding(self, chat_id: str) -> Optional[str]:
+        """Return the project name bound to *chat_id*, or ``None``."""
+        return self.bindings.get(chat_id)
 
     @property
     def default_project(self) -> Optional[Project]:
@@ -70,3 +76,5 @@ class GlobalState(BaseModel):
     """~/.nextme/state.json top-level structure."""
 
     contexts: dict[str, UserState] = Field(default_factory=dict)
+    bindings: dict[str, str] = Field(default_factory=dict)
+    """Dynamic chat→project bindings set via ``/project bind``.  Key: chat_id, value: project name."""
