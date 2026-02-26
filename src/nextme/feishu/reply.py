@@ -13,6 +13,8 @@ import lark_oapi as lark
 from lark_oapi.api.cardkit.v1 import (
     ContentCardElementRequest,
     ContentCardElementRequestBody,
+    CreateCardRequest,
+    CreateCardRequestBody,
     IdConvertCardRequest,
     IdConvertCardRequestBody,
     PatchCardElementRequest,
@@ -124,6 +126,107 @@ class FeishuReplier:
             )
         else:
             logger.debug("update_card ok: message_id=%s", message_id)
+
+    async def create_card(self, card_json: str) -> str:
+        """Create a card via the cardkit API and return its *card_id*.
+
+        The card JSON should be built with :meth:`build_streaming_progress_card`
+        (includes element ``id`` fields and ``streaming_mode: true``).  Once
+        created, the card can be sent to a chat via :meth:`send_card_by_id` or
+        :meth:`reply_card_by_id` and updated element-by-element via
+        :meth:`stream_append_text` / :meth:`stream_set_status`.
+
+        Returns ``""`` on failure (caller falls back to regular card flow).
+        """
+        request = (
+            CreateCardRequest.builder()
+            .request_body(
+                CreateCardRequestBody.builder()
+                .type("card_json")
+                .data(card_json)
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.cardkit.v1.card.acreate(request)
+        if not response.success():
+            logger.warning(
+                "create_card failed: code=%s msg=%s",
+                response.code,
+                response.msg,
+            )
+            return ""
+        card_id: str = response.data.card_id or ""  # type: ignore[union-attr]
+        logger.debug("create_card -> card_id=%s", card_id)
+        return card_id
+
+    async def send_card_by_id(self, chat_id: str, card_id: str) -> str:
+        """Send a cardkit card (referenced by *card_id*) to *chat_id*.
+
+        Uses ``im/v1`` with ``msg_type="interactive"`` and content
+        ``{"card_id": "..."}`` so Feishu resolves the live card from cardkit.
+        Returns the new ``message_id``, or ``""`` on failure.
+        """
+        content = json.dumps({"card_id": card_id})
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("interactive")
+                .content(content)
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.im.v1.message.acreate(request)
+        if not response.success():
+            logger.error(
+                "send_card_by_id failed: chat_id=%s code=%s msg=%s",
+                chat_id,
+                response.code,
+                response.msg,
+            )
+            return ""
+        message_id: str = response.data.message_id  # type: ignore[union-attr]
+        logger.debug("send_card_by_id -> message_id=%s", message_id)
+        return message_id
+
+    async def reply_card_by_id(
+        self, message_id: str, card_id: str, in_thread: bool = True
+    ) -> str:
+        """Reply to *message_id* with a cardkit card referenced by *card_id*.
+
+        Uses ``im/v1`` reply with ``msg_type="interactive"`` and content
+        ``{"card_id": "..."}`` so Feishu resolves the live card from cardkit.
+        Returns the new ``message_id``, or ``""`` on failure.
+        """
+        content = json.dumps({"card_id": card_id})
+        request = (
+            ReplyMessageRequest.builder()
+            .message_id(message_id)
+            .request_body(
+                ReplyMessageRequestBody.builder()
+                .msg_type("interactive")
+                .content(content)
+                .reply_in_thread(in_thread)
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.im.v1.message.areply(request)
+        if not response.success():
+            logger.error(
+                "reply_card_by_id failed: message_id=%s code=%s msg=%s",
+                message_id,
+                response.code,
+                response.msg,
+            )
+            return ""
+        new_id: str = response.data.message_id  # type: ignore[union-attr]
+        logger.debug("reply_card_by_id -> new message_id=%s", new_id)
+        return new_id
 
     async def get_card_id(self, message_id: str) -> str:
         """Convert an im *message_id* to a cardkit *card_id* for streaming updates.
@@ -325,24 +428,39 @@ class FeishuReplier:
         content: str,
         title: str = "思考中...",
     ) -> str:
-        """Return a card JSON string for in-progress status updates.
+        """Return a card JSON string for in-progress status updates (fallback path).
 
-        Includes ``streaming_mode: true`` and explicit element ``id`` fields so
-        that :meth:`stream_append_text` / :meth:`stream_set_status` can target
-        individual elements without replacing the whole card.
+        Used when cardkit streaming is unavailable.  Sent via ``im/v1`` which
+        does **not** support element ``id`` fields or ``streaming_mode``.
         """
         elements: list[dict] = [
-            {"tag": "markdown", "content": content, "id": _CONTENT_ELEMENT_ID},
+            {"tag": "markdown", "content": content},
         ]
         if status:
-            elements.append(
-                {"tag": "markdown", "content": f"_{status}_", "id": _STATUS_ELEMENT_ID}
-            )
-        else:
-            # Always include the status element so it can be targeted later.
-            elements.append(
-                {"tag": "markdown", "content": "", "id": _STATUS_ELEMENT_ID}
-            )
+            elements.append({"tag": "markdown", "content": f"_{status}_"})
+        card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "template": "yellow",
+            },
+            "body": {"elements": elements},
+        }
+        return json.dumps(card, ensure_ascii=False)
+
+    def build_streaming_progress_card(
+        self,
+        content: str = "思考中...",
+        title: str = "思考中...",
+    ) -> str:
+        """Return a card JSON for cardkit creation with element IDs and streaming mode.
+
+        Element IDs allow :meth:`stream_append_text` and :meth:`stream_set_status`
+        to target individual elements without re-rendering the whole card.
+        This card must be created via :meth:`create_card` (cardkit API) — **not**
+        sent directly via ``im/v1``, which rejects the ``id`` field on elements.
+        """
         card = {
             "schema": "2.0",
             "config": {"wide_screen_mode": True, "streaming_mode": True},
@@ -350,7 +468,12 @@ class FeishuReplier:
                 "title": {"tag": "plain_text", "content": title},
                 "template": "yellow",
             },
-            "body": {"elements": elements},
+            "body": {
+                "elements": [
+                    {"tag": "markdown", "content": content, "id": _CONTENT_ELEMENT_ID},
+                    {"tag": "markdown", "content": "", "id": _STATUS_ELEMENT_ID},
+                ]
+            },
         }
         return json.dumps(card, ensure_ascii=False)
 

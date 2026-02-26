@@ -181,48 +181,68 @@ class SessionWorker:
         # group → thread reply; p2p → quote reply; no message_id → top-level.
         in_thread = self._active_in_thread
 
-        # Step 1 — Send initial progress card as a reply so it appears
-        # inline with the user's original message.
+        # Step 1 — Try cardkit-first (true streaming) then fall back to a
+        # regular im/v1 card with debounced full-card updates.
         chat_id = self._session.context_id.split(":")[0]
-        initial_card = self._replier.build_progress_card(
-            status="",
-            content="思考中...",
-            title=f"思考中... {self._proj}",
-        )
         try:
-            if task.message_id:
-                self._progress_message_id = await self._replier.reply_card(
-                    task.message_id, initial_card, in_thread=in_thread
-                )
-            else:
-                self._progress_message_id = await self._replier.send_card(
-                    chat_id, initial_card
-                )
-            logger.debug(
-                "SessionWorker[%s]: sent initial progress card message_id=%s",
-                self._session.context_id,
-                self._progress_message_id,
+            streaming_card = self._replier.build_streaming_progress_card(
+                content="思考中...",
+                title=f"思考中... {self._proj}",
             )
-            # Obtain cardkit card_id for streaming element updates.
+            card_id = await self._replier.create_card(streaming_card)
+        except Exception:
+            card_id = ""
+
+        if card_id:
+            # Cardkit-first: reference the cardkit card_id from im/v1.
+            self._card_id = card_id
             try:
-                self._card_id = await self._replier.get_card_id(self._progress_message_id) or None
-                if self._card_id:
-                    logger.debug(
-                        "SessionWorker[%s]: streaming card_id=%s",
-                        self._session.context_id,
-                        self._card_id,
+                if task.message_id:
+                    self._progress_message_id = await self._replier.reply_card_by_id(
+                        task.message_id, card_id, in_thread=in_thread
                     )
-            except Exception:
+                else:
+                    self._progress_message_id = await self._replier.send_card_by_id(
+                        chat_id, card_id
+                    )
                 logger.debug(
-                    "SessionWorker[%s]: get_card_id failed, using fallback debounce",
+                    "SessionWorker[%s]: streaming card card_id=%s message_id=%s",
+                    self._session.context_id,
+                    card_id,
+                    self._progress_message_id,
+                )
+            except Exception:
+                logger.exception(
+                    "SessionWorker[%s]: failed to send streaming progress card",
                     self._session.context_id,
                 )
-                self._card_id = None
-        except Exception:
-            logger.exception(
-                "SessionWorker[%s]: failed to send initial progress card",
-                self._session.context_id,
+        else:
+            # Fallback: regular im/v1 card with debounced full-card PATCH.
+            self._card_id = None
+            initial_card = self._replier.build_progress_card(
+                status="",
+                content="思考中...",
+                title=f"思考中... {self._proj}",
             )
+            try:
+                if task.message_id:
+                    self._progress_message_id = await self._replier.reply_card(
+                        task.message_id, initial_card, in_thread=in_thread
+                    )
+                else:
+                    self._progress_message_id = await self._replier.send_card(
+                        chat_id, initial_card
+                    )
+                logger.debug(
+                    "SessionWorker[%s]: sent initial progress card message_id=%s",
+                    self._session.context_id,
+                    self._progress_message_id,
+                )
+            except Exception:
+                logger.exception(
+                    "SessionWorker[%s]: failed to send initial progress card",
+                    self._session.context_id,
+                )
 
         # Step 2 — Acquire path lock.
         path_lock = self._path_lock_registry.get(self._session.project_path)

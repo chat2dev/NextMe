@@ -66,6 +66,20 @@ class Replier(Protocol):
         """Reply to an existing message with an interactive card.  Returns the new message_id."""
         ...
 
+    async def create_card(self, card_json: str) -> str:
+        """Create a card via cardkit. Returns card_id, or '' on failure."""
+        ...
+
+    async def send_card_by_id(self, chat_id: str, card_id: str) -> str:
+        """Send a cardkit card referenced by card_id to chat_id. Returns message_id."""
+        ...
+
+    async def reply_card_by_id(
+        self, message_id: str, card_id: str, in_thread: bool = True
+    ) -> str:
+        """Reply to message_id with a cardkit card_id reference. Returns new message_id."""
+        ...
+
     async def get_card_id(self, message_id: str) -> str:
         """Convert an im message_id to a cardkit card_id for streaming updates.
 
@@ -91,7 +105,15 @@ class Replier(Protocol):
         content: str,
         title: str = "思考中...",
     ) -> str:
-        """Return a card JSON string for in-progress status updates."""
+        """Return a card JSON string for in-progress status updates (fallback path)."""
+        ...
+
+    def build_streaming_progress_card(
+        self,
+        content: str = "思考中...",
+        title: str = "思考中...",
+    ) -> str:
+        """Return a card JSON for cardkit creation with element IDs and streaming_mode."""
         ...
 
     def build_result_card(

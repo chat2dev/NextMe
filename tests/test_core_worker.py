@@ -65,15 +65,19 @@ def replier():
     r = MagicMock()
     r.send_text = AsyncMock()
     r.send_card = AsyncMock(return_value="msg_123")
+    r.send_card_by_id = AsyncMock(return_value="msg_by_id_123")
     r.update_card = AsyncMock()
     r.reply_text = AsyncMock(return_value="thread_msg_456")
     r.reply_card = AsyncMock(return_value="thread_card_789")
-    # Streaming methods — return "" so worker falls back to debounce path.
+    r.reply_card_by_id = AsyncMock(return_value="thread_card_by_id_789")
+    # Cardkit streaming — create_card returns "" by default so worker falls back to debounce path.
+    r.create_card = AsyncMock(return_value="")
     r.get_card_id = AsyncMock(return_value="")
     r.stream_append_text = AsyncMock()
     r.stream_set_status = AsyncMock()
     r.build_help_card = MagicMock(return_value='{"card": "help"}')
     r.build_permission_card = MagicMock(return_value='{"card": "perm"}')
+    r.build_streaming_progress_card = MagicMock(return_value='{"card": "streaming_progress"}')
     r.build_progress_card = MagicMock(return_value='{"card": "progress"}')
     r.build_result_card = MagicMock(return_value='{"card": "result"}')
     r.build_error_card = MagicMock(return_value='{"card": "error"}')
@@ -391,10 +395,13 @@ async def test_on_permission_timeout_calls_cancel_permission(worker, session, re
 # ---------------------------------------------------------------------------
 
 async def test_execute_task_sends_initial_progress_card(worker, session, replier, acp_registry):
+    """With create_card returning '' (fixture default), falls back to regular card."""
     _, mock_runtime = acp_registry
     task, replies = make_task("hello")
     await worker._execute_task(task)
-    # Initial progress card is sent at the start
+    # Streaming card was attempted (always tried)
+    replier.build_streaming_progress_card.assert_called()
+    # Cardkit create failed (returns ""); fallback regular card used
     replier.build_progress_card.assert_called()
     replier.send_card.assert_awaited()
 
@@ -469,43 +476,48 @@ async def test_execute_task_syncs_actual_id_from_runtime(
 async def test_execute_task_uses_reply_card_for_group_chat(
     worker, session, replier, acp_registry
 ):
-    """Group chat: initial progress card sent via reply_card with in_thread=True."""
+    """Group chat: with cardkit fallback, falls back to reply_card with in_thread=True."""
     _, mock_runtime = acp_registry
     task, _ = make_task("hello")
     task.message_id = "om_src_123"
     task.chat_type = "group"
+    # create_card returns "" (fixture default) → fallback path
     await worker._execute_task(task)
     replier.reply_card.assert_awaited()
     call_kwargs = replier.reply_card.call_args.kwargs
     assert call_kwargs.get("in_thread") is True
     replier.send_card.assert_not_awaited()
+    replier.reply_card_by_id.assert_not_awaited()
 
 
 async def test_execute_task_uses_reply_card_for_p2p_chat(
     worker, session, replier, acp_registry
 ):
-    """P2P chat: initial progress card sent via reply_card with in_thread=False (quote)."""
+    """P2P chat: with cardkit fallback, falls back to reply_card with in_thread=False."""
     _, mock_runtime = acp_registry
     task, _ = make_task("hello")
     task.message_id = "om_src_123"
     task.chat_type = "p2p"
+    # create_card returns "" (fixture default) → fallback path
     await worker._execute_task(task)
     replier.reply_card.assert_awaited()
     call_kwargs = replier.reply_card.call_args.kwargs
     assert call_kwargs.get("in_thread") is False
     replier.send_card.assert_not_awaited()
+    replier.reply_card_by_id.assert_not_awaited()
 
 
 async def test_execute_task_uses_send_card_when_no_message_id(
     worker, session, replier, acp_registry
 ):
-    """When task has no message_id, initial progress card uses send_card fallback."""
+    """When task has no message_id and cardkit fails, falls back to send_card."""
     _, mock_runtime = acp_registry
     task, _ = make_task("hello")
-    # message_id defaults to ""
+    # message_id defaults to "", create_card returns "" → fallback
     await worker._execute_task(task)
     replier.send_card.assert_awaited()
     replier.reply_card.assert_not_awaited()
+    replier.send_card_by_id.assert_not_awaited()
 
 
 async def test_on_progress_status_includes_elapsed_time(worker, replier):
@@ -615,3 +627,83 @@ async def test_on_progress_no_streaming_when_card_id_none(worker, replier):
     await worker._on_progress("hello", "")
     replier.stream_append_text.assert_not_awaited()
     replier.update_card.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Cardkit-first (streaming) path in _execute_task
+# ---------------------------------------------------------------------------
+
+
+async def test_execute_task_uses_reply_card_by_id_for_group_chat_when_create_card_succeeds(
+    worker, session, replier, acp_registry
+):
+    """Group chat + create_card succeeds → uses reply_card_by_id and sets _card_id."""
+    _, mock_runtime = acp_registry
+    replier.create_card = AsyncMock(return_value="card_xyz")
+    replier.reply_card_by_id = AsyncMock(return_value="om_streaming_123")
+    task, _ = make_task("hello")
+    task.message_id = "om_src_123"
+    task.chat_type = "group"
+    await worker._execute_task(task)
+    replier.reply_card_by_id.assert_awaited_once()
+    call_kwargs = replier.reply_card_by_id.call_args.kwargs
+    assert call_kwargs.get("in_thread") is True
+    replier.reply_card.assert_not_awaited()
+    replier.send_card.assert_not_awaited()
+    assert worker._card_id == "card_xyz"
+
+
+async def test_execute_task_uses_reply_card_by_id_for_p2p_chat_when_create_card_succeeds(
+    worker, session, replier, acp_registry
+):
+    """P2P chat + create_card succeeds → uses reply_card_by_id with in_thread=False."""
+    _, mock_runtime = acp_registry
+    replier.create_card = AsyncMock(return_value="card_xyz")
+    replier.reply_card_by_id = AsyncMock(return_value="om_streaming_p2p")
+    task, _ = make_task("hello")
+    task.message_id = "om_src_123"
+    task.chat_type = "p2p"
+    await worker._execute_task(task)
+    replier.reply_card_by_id.assert_awaited_once()
+    call_kwargs = replier.reply_card_by_id.call_args.kwargs
+    assert call_kwargs.get("in_thread") is False
+    replier.reply_card.assert_not_awaited()
+
+
+async def test_execute_task_uses_send_card_by_id_when_no_message_id_and_create_card_succeeds(
+    worker, session, replier, acp_registry
+):
+    """No message_id + create_card succeeds → uses send_card_by_id."""
+    _, mock_runtime = acp_registry
+    replier.create_card = AsyncMock(return_value="card_xyz")
+    replier.send_card_by_id = AsyncMock(return_value="om_by_id_456")
+    task, _ = make_task("hello")
+    # message_id defaults to ""
+    await worker._execute_task(task)
+    replier.send_card_by_id.assert_awaited_once()
+    replier.send_card.assert_not_awaited()
+    replier.reply_card_by_id.assert_not_awaited()
+    assert worker._card_id == "card_xyz"
+
+
+async def test_execute_task_card_id_is_none_after_cardkit_fallback(
+    worker, session, replier, acp_registry
+):
+    """When create_card returns '', _card_id stays None (fallback debounce)."""
+    _, mock_runtime = acp_registry
+    replier.create_card = AsyncMock(return_value="")
+    task, _ = make_task("hello")
+    await worker._execute_task(task)
+    assert worker._card_id is None
+
+
+async def test_execute_task_card_id_set_when_create_card_succeeds(
+    worker, session, replier, acp_registry
+):
+    """When create_card succeeds, _card_id is set to the returned card_id."""
+    _, mock_runtime = acp_registry
+    replier.create_card = AsyncMock(return_value="card_abc")
+    replier.send_card_by_id = AsyncMock(return_value="om_123")
+    task, _ = make_task("hello")
+    await worker._execute_task(task)
+    assert worker._card_id == "card_abc"

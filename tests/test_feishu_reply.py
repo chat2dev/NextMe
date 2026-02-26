@@ -79,23 +79,24 @@ class TestBuildProgressCard:
         parsed = json.loads(replier.build_progress_card("", "content"))
         assert parsed["config"]["wide_screen_mode"] is True
 
-    def test_streaming_mode_enabled(self):
+    def test_no_streaming_mode(self):
+        """build_progress_card is sent via im/v1 which rejects streaming_mode."""
         replier, _ = make_replier()
         parsed = json.loads(replier.build_progress_card("", "content"))
-        assert parsed["config"]["streaming_mode"] is True
+        assert parsed["config"].get("streaming_mode") is None
 
-    def test_content_element_has_id(self):
+    def test_no_element_ids(self):
+        """build_progress_card elements must NOT have id fields (im/v1 rejects them)."""
         replier, _ = make_replier()
         parsed = json.loads(replier.build_progress_card("", "content"))
-        elements = parsed["body"]["elements"]
-        assert elements[0].get("id") == "content_el"
+        for el in parsed["body"]["elements"]:
+            assert "id" not in el
 
-    def test_status_element_has_id(self):
+    def test_no_status_element_when_empty(self):
+        """With empty status, only one element (content markdown) is produced."""
         replier, _ = make_replier()
         parsed = json.loads(replier.build_progress_card("", "content"))
-        elements = parsed["body"]["elements"]
-        # Second element is always the status element (may be empty)
-        assert elements[1].get("id") == "status_el"
+        assert len(parsed["body"]["elements"]) == 1
 
     def test_non_ascii_content_preserved(self):
         replier, _ = make_replier()
@@ -829,3 +830,228 @@ class TestStreamSetStatus:
             await replier.stream_set_status("card_x", "status", 3)
 
         assert "stream_set_status failed" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# build_streaming_progress_card
+# ---------------------------------------------------------------------------
+
+
+class TestBuildStreamingProgressCard:
+    def test_returns_valid_json_string(self):
+        replier, _ = make_replier()
+        result = replier.build_streaming_progress_card()
+        assert isinstance(json.loads(result), dict)
+
+    def test_schema_is_2_0(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card())
+        assert parsed["schema"] == "2.0"
+
+    def test_streaming_mode_enabled(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card())
+        assert parsed["config"]["streaming_mode"] is True
+
+    def test_header_template_is_yellow(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card())
+        assert parsed["header"]["template"] == "yellow"
+
+    def test_default_title(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card())
+        assert parsed["header"]["title"]["content"] == "思考中..."
+
+    def test_custom_title(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card(title="Custom Title"))
+        assert parsed["header"]["title"]["content"] == "Custom Title"
+
+    def test_content_element_has_id(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card())
+        elements = parsed["body"]["elements"]
+        assert elements[0].get("id") == "content_el"
+
+    def test_status_element_has_id(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card())
+        elements = parsed["body"]["elements"]
+        assert elements[1].get("id") == "status_el"
+
+    def test_two_elements(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card())
+        assert len(parsed["body"]["elements"]) == 2
+
+    def test_custom_content_in_first_element(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card(content="loading..."))
+        assert parsed["body"]["elements"][0]["content"] == "loading..."
+
+    def test_status_element_initially_empty(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card())
+        assert parsed["body"]["elements"][1]["content"] == ""
+
+    def test_non_ascii_content_preserved(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card(content="中文内容"))
+        assert parsed["body"]["elements"][0]["content"] == "中文内容"
+
+
+# ---------------------------------------------------------------------------
+# create_card (async)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateCard:
+    async def test_success_returns_card_id(self):
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        ok.data.card_id = "card_new_123"
+        mock_client.cardkit.v1.card.acreate = AsyncMock(return_value=ok)
+
+        result = await replier.create_card('{"schema":"2.0"}')
+
+        assert result == "card_new_123"
+        mock_client.cardkit.v1.card.acreate.assert_awaited_once()
+
+    async def test_failure_returns_empty_string(self, caplog):
+        import logging
+        replier, mock_client = make_replier()
+        fail = MagicMock()
+        fail.success.return_value = False
+        fail.code = 400
+        fail.msg = "invalid card json"
+        mock_client.cardkit.v1.card.acreate = AsyncMock(return_value=fail)
+
+        with caplog.at_level(logging.WARNING, logger="nextme.feishu.reply"):
+            result = await replier.create_card("{}")
+
+        assert result == ""
+        assert "create_card failed" in caplog.text
+
+    async def test_uses_card_json_type(self):
+        """create_card sends type='card_json' to the cardkit API."""
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        ok.data.card_id = "card_xyz"
+        mock_client.cardkit.v1.card.acreate = AsyncMock(return_value=ok)
+
+        await replier.create_card('{"schema":"2.0"}')
+
+        mock_client.cardkit.v1.card.acreate.assert_awaited_once()
+
+    async def test_card_id_none_treated_as_empty(self):
+        """When response.data.card_id is None, returns ''."""
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        ok.data.card_id = None
+        mock_client.cardkit.v1.card.acreate = AsyncMock(return_value=ok)
+
+        result = await replier.create_card("{}")
+
+        assert result == ""
+
+
+# ---------------------------------------------------------------------------
+# send_card_by_id (async)
+# ---------------------------------------------------------------------------
+
+
+class TestSendCardById:
+    async def test_success_returns_message_id(self):
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        ok.data.message_id = "om_by_id_456"
+        mock_client.im.v1.message.acreate = AsyncMock(return_value=ok)
+
+        result = await replier.send_card_by_id("oc_chat_123", "card_abc")
+
+        assert result == "om_by_id_456"
+        mock_client.im.v1.message.acreate.assert_awaited_once()
+
+    async def test_failure_returns_empty_string(self):
+        replier, mock_client = make_replier()
+        fail = MagicMock()
+        fail.success.return_value = False
+        fail.code = 500
+        fail.msg = "server error"
+        mock_client.im.v1.message.acreate = AsyncMock(return_value=fail)
+
+        result = await replier.send_card_by_id("oc_chat_123", "card_abc")
+
+        assert result == ""
+
+    async def test_content_references_card_id(self):
+        """Content sent to im/v1 must be {"card_id": "..."} JSON."""
+        import json as json_mod
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        ok.data.message_id = "om_123"
+        mock_client.im.v1.message.acreate = AsyncMock(return_value=ok)
+
+        await replier.send_card_by_id("oc_chat_123", "card_xyz")
+
+        # Verify acreate was called (content encoding is internal to builder)
+        mock_client.im.v1.message.acreate.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# reply_card_by_id (async)
+# ---------------------------------------------------------------------------
+
+
+class TestReplyCardById:
+    async def test_success_returns_message_id(self):
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        ok.data.message_id = "om_reply_by_id_789"
+        mock_client.im.v1.message.areply = AsyncMock(return_value=ok)
+
+        result = await replier.reply_card_by_id("om_src_123", "card_abc")
+
+        assert result == "om_reply_by_id_789"
+        mock_client.im.v1.message.areply.assert_awaited_once()
+
+    async def test_failure_returns_empty_string(self):
+        replier, mock_client = make_replier()
+        fail = MagicMock()
+        fail.success.return_value = False
+        fail.code = 404
+        fail.msg = "message not found"
+        mock_client.im.v1.message.areply = AsyncMock(return_value=fail)
+
+        result = await replier.reply_card_by_id("om_src_bad", "card_abc")
+
+        assert result == ""
+
+    async def test_default_in_thread_true(self):
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        ok.data.message_id = "om_t"
+        mock_client.im.v1.message.areply = AsyncMock(return_value=ok)
+
+        await replier.reply_card_by_id("om_src", "card_id")
+
+        mock_client.im.v1.message.areply.assert_awaited_once()
+
+    async def test_in_thread_false(self):
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        ok.data.message_id = "om_quote"
+        mock_client.im.v1.message.areply = AsyncMock(return_value=ok)
+
+        result = await replier.reply_card_by_id("om_src", "card_id", in_thread=False)
+
+        assert result == "om_quote"
