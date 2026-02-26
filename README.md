@@ -2,6 +2,8 @@
 
 **Feishu IM × Claude Code Agent Bot**
 
+[中文文档](README.zh.md)
+
 Turn Feishu group chats and direct messages into an interactive Claude Code terminal. Send a message in Feishu — NextMe routes it to a local `claude` subprocess, streams progress updates, and delivers the final result as an interactive card.
 
 ---
@@ -13,15 +15,15 @@ Turn Feishu group chats and direct messages into an interactive Claude Code term
 | Feishu WebSocket | Persistent long connection, auto-reconnect |
 | DirectClaudeRuntime | Spawns `claude --print --output-format stream-json`; session continuity via `--resume` |
 | ACPRuntime (optional) | JSON-RPC 2.0 over `cc-acp` subprocess |
-| Streaming progress cards | Card updated every 3 s during execution; live tool-call display |
+| Streaming progress cards | Card updated in real time during execution; live tool-call display |
 | Permission flow | Agent pushes a confirmation card for write operations; user replies with a number |
 | Multi-project parallel | Each `(user, project)` pair gets an independent worker; multiple projects run concurrently |
 | Chat binding | Bind a group chat to a specific project (`/project bind <name>`) |
 | Session persistence | Claude session ID survives bot restarts; conversation history seamlessly resumed |
 | Long-term memory | `/remember <text>` saves user-level facts (shared across all chats); injected into new sessions automatically |
 | Context compression | Oversized contexts auto-compressed with zlib / lzma / brotli |
-| Skills system | Markdown prompt templates; tiered discovery (built-in / global / nextme / project); `/review` `/commit` `/test` etc. |
-| Meta-commands | `/new` `/stop` `/help` `/status` `/project` `/task` `/remember` |
+| Skills system | Markdown prompt templates; tiered discovery (Built-in / Global / NextMe Global / Project); `/review` `/commit` `/test` etc. |
+| Meta-commands | `/new` `/stop` `/help` `/status` `/project` `/task` `/remember` `/skill` |
 | Path lock | Only one session may write to a given project directory at a time |
 | Graceful shutdown | SIGTERM/SIGINT → drain in-flight tasks → flush state → exit |
 
@@ -77,16 +79,14 @@ Edit `nextme.json`:
 
 Go to the [Feishu Open Platform](https://open.feishu.cn/) and follow the steps below.
 
-> 飞书开放平台 → 创建企业自建应用，按以下步骤配置。
+**Step 1 — Create the app and enable Bot**
 
-**Step 1 — Create the app and enable Bot / 创建应用并启用 Bot**
+1. Click **Create Custom App**.
+2. In the app dashboard, go to **Features** and enable **Bot**.
 
-1. Click **Create Custom App** (创建企业自建应用).
-2. In the app dashboard, go to **Features** → enable **Bot** (机器人).
+**Step 2 — Get credentials**
 
-**Step 2 — Get credentials / 获取凭证**
-
-Go to **Credentials & Basic Info** (凭证与基础信息) and copy **App ID** and **App Secret** into `nextme.json`:
+Go to **Credentials & Basic Info**, copy **App ID** and **App Secret**, and paste them into `nextme.json`:
 
 ```json
 {
@@ -95,11 +95,41 @@ Go to **Credentials & Basic Info** (凭证与基础信息) and copy **App ID** a
 }
 ```
 
-**Step 3 — Grant permissions / 配置权限**
+**Step 3 — Grant permissions**
 
-Go to **Permissions & Scopes** (权限管理) and add the following scopes:
+Go to **Permissions & Scopes**. You can import all required scopes at once using the JSON below:
 
-*Tenant scopes (应用权限):*
+```json
+{
+  "scopes": {
+    "tenant": [
+      "contact:contact.base:readonly",
+      "docx:document:readonly",
+      "im:chat:read",
+      "im:chat:update",
+      "im:message.group_at_msg:readonly",
+      "im:message.p2p_msg:readonly",
+      "im:message.pins:read",
+      "im:message.pins:write_only",
+      "im:message.reactions:read",
+      "im:message.reactions:write_only",
+      "im:message:readonly",
+      "im:message:recall",
+      "im:message:send_as_bot",
+      "im:message:send_multi_users",
+      "im:message:send_sys_msg",
+      "im:message:update",
+      "im:resource"
+    ],
+    "user": [
+      "contact:user.employee_id:readonly",
+      "docx:document:readonly"
+    ]
+  }
+}
+```
+
+Scope reference:
 
 | Scope | Purpose |
 |-------|---------|
@@ -120,15 +150,9 @@ Go to **Permissions & Scopes** (权限管理) and add the following scopes:
 | `im:resource` | Upload / download message resources |
 | `contact:contact.base:readonly` | Read basic contact info |
 | `docx:document:readonly` | Read Feishu Docs content |
+| `contact:user.employee_id:readonly` | Read user employee ID (user scope) |
 
-*User scopes (用户权限):*
-
-| Scope | Purpose |
-|-------|---------|
-| `contact:user.employee_id:readonly` | Read user employee ID |
-| `docx:document:readonly` | Read Feishu Docs content |
-
-**Step 4 — Start NextMe / 启动服务**
+**Step 4 — Start NextMe**
 
 ```bash
 nextme up
@@ -136,29 +160,25 @@ nextme up
 
 *(See [Start](#start) section below for full options.)*
 
-**Step 5 — Configure events & callbacks / 配置事件和回调**
+**Step 5 — Configure events and callbacks**
 
 > Complete this step **after** NextMe is running so the persistent connection is active.
->
-> 先启动 NextMe，再配置事件和回调（需要服务在线以建立长连接）。
 
-Go to **Event Subscriptions** (事件订阅):
+Go to **Event Subscriptions**:
 
-- Set **Subscription mode** to **Using persistent connection** (使用长连接接收事件).
+- Set **Subscription mode** to **Using persistent connection**.
 - Add event: `im.message.receive_v1`
 
-Go to **Callback** (回调配置 / 卡片回调):
+Go to **Callback**:
 
-- Set **Subscription mode** to **Using persistent connection** (使用长连接).
+- Set **Subscription mode** to **Using persistent connection**.
 - Add callbacks:
   - `card.action.trigger` — interactive card button actions
   - `url.preview.get` — URL preview
 
-**Step 6 — Publish the app / 发布应用**
+**Step 6 — Publish the app**
 
-Click **Publish** (版本管理与发布 → 申请发布) and submit for review. Once approved the bot becomes available in Feishu.
-
-> 企业自建应用发布后，用户可在飞书中直接搜索 Bot 名称进行对话或将其添加到群组。
+Go to **Version Management & Release** and submit for review. Once approved the bot is available in Feishu.
 
 ### Start
 
@@ -201,7 +221,7 @@ Send any message to the bot. The agent executes the task inside the configured p
 | `/project <name>` | Switch the active project |
 | `/project bind <name>` | Permanently bind this chat to a project |
 | `/project unbind` | Remove the chat-to-project binding |
-| `/skill` | List all registered skills grouped by tier (项目级 / NextMe 全局 / 全局 / 内置) |
+| `/skill` | List all registered skills grouped by tier (Project / NextMe Global / Global / Built-in) |
 | `/skill <trigger>` | Invoke a skill by trigger name |
 | `/remember <text>` | Save a fact to long-term memory |
 
@@ -209,11 +229,11 @@ Send any message to the bot. The agent executes the task inside the configured p
 
 | Trigger | Description |
 |---------|-------------|
-| `/review` | Code review: correctness / performance / readability |
-| `/commit` | Generate a Conventional Commits message from `git diff` |
-| `/explain` | Explain how code works |
-| `/test` | Generate unit tests |
-| `/debug` | Systematic debugging workflow |
+| `/skill review` | Code review: correctness / performance / readability |
+| `/skill commit` | Generate a Conventional Commits message from `git diff` |
+| `/skill explain` | Explain how code works |
+| `/skill test` | Generate unit tests |
+| `/skill debug` | Systematic debugging workflow |
 
 ### Permission confirmation (ACPRuntime only)
 
@@ -248,8 +268,8 @@ Reply with the corresponding number to continue.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `app_id` | string | Feishu app App ID |
-| `app_secret` | string | Feishu app App Secret |
+| `app_id` | string | Feishu App ID |
+| `app_secret` | string | Feishu App Secret |
 | `projects` | array | Project list (`name` / `path` / `executor`) |
 | `bindings` | object | Static chat→project bindings (`chat_id: project_name`) |
 
@@ -302,14 +322,14 @@ NEXTME_ACP_IDLE_TIMEOUT_SECONDS=7200
 
 Skills are discovered from four tiers (higher priority overrides lower):
 
-| Priority | Directory | Source label |
-|----------|-----------|--------------|
-| 4 — highest | `{project_path}/.nextme/skills/*.md` | 项目级 |
-| 3 | `~/.nextme/skills/*.md` | NextMe 全局 |
-| 2 | `~/.claude/skills/<name>/SKILL.md` | 全局 (claude executor only) |
-| 1 — lowest | `{package}/skills/*.md` | 内置 |
+| Priority | Directory | Label |
+|----------|-----------|-------|
+| 4 — highest | `{project_path}/.nextme/skills/*.md` | Project |
+| 3 | `~/.nextme/skills/*.md` | NextMe Global |
+| 2 | `~/.claude/skills/<name>/SKILL.md` | Global (claude executor only) |
+| 1 — lowest | `{package}/skills/*.md` | Built-in |
 
-The **全局** tier (`~/.claude/skills/`) is only scanned when at least one configured project uses `executor: "claude"`. Skills installed via Claude Code (`/install-github-app`) appear here automatically.
+The **Global** tier (`~/.claude/skills/`) is only scanned when at least one configured project uses `executor: "claude"`. Skills installed via Claude Code appear here automatically.
 
 **NextMe / project skill format** (with `{user_input}` placeholder):
 
@@ -328,7 +348,7 @@ User request: {user_input}
 Context: {context}
 ```
 
-**Claude global skill format** (no `trigger` or `{user_input}` — trigger = directory name):
+**Claude global skill format** (trigger = directory name, no `{user_input}` placeholder):
 
 ```markdown
 ---
@@ -340,7 +360,7 @@ allowed-tools: [bash, read]
 You are a specialist in ...
 ```
 
-When a global skill template has no `{user_input}` placeholder, NextMe appends `User request: <input>` automatically so the agent knows what to do.
+When a global skill template has no `{user_input}` placeholder, NextMe appends `User request: <input>` automatically.
 
 Invoke with `/skill myskill`.
 
@@ -355,7 +375,7 @@ Invoke with `/skill myskill`.
 ├── state.json           # session state (actual_id, active project)
 ├── nextme.pid           # PID file (used by nextme down)
 ├── memory/
-│   └── {ctx_hash}/      # per-user memory (facts / preferences / personal)
+│   └── {user_hash}/     # per-user memory (facts / preferences)
 ├── threads/
 │   └── {session_id}/    # per-session context files (optionally compressed)
 ├── skills/              # user-defined skills
@@ -441,11 +461,11 @@ NextMe assigns an independent asyncio worker to each `(user, project)` pair, so 
 **Long-term memory** — Use `/remember <text>` to save facts. Facts are stored at the **user level** and shared across all chats for the same user. On new sessions (not resumed ones), the top-10 highest-confidence facts are prepended to the task prompt automatically:
 
 ```
-[用户记忆]
+[Memory]
 - I prefer Python over JavaScript
 - Use pytest for tests
 
-[用户消息]
+[Message]
 <your message here>
 ```
 
