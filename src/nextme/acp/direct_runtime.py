@@ -286,16 +286,28 @@ class DirectClaudeRuntime:
                     )
 
                 elif etype == "stream_event":
-                    # Incremental token events emitted by --include-partial-messages.
-                    # content_block_delta/text_delta carries individual text tokens
-                    # — forward each one to on_progress for real-time streaming.
+                    # Incremental events from --include-partial-messages.
+                    # content_block_delta/text_delta — individual text tokens.
+                    # content_block_start with tool_use — tool is being invoked
+                    # (replaces the top-level tool_use event when partial msgs on).
                     inner = event.get("event") or {}
-                    if inner.get("type") == "content_block_delta":
+                    itype = inner.get("type", "")
+                    if itype == "content_block_delta":
                         delta_block = inner.get("delta") or {}
                         if delta_block.get("type") == "text_delta":
                             text_token: str = delta_block.get("text", "")
                             if text_token:
                                 await _flush_progress(delta=text_token)
+                    elif itype == "content_block_start":
+                        block = inner.get("content_block") or {}
+                        if block.get("type") == "tool_use":
+                            tool_name_str: str = block.get("name") or "tool"
+                            logger.debug(
+                                "DirectClaudeRuntime[%s]: tool_use (via stream_event) %r",
+                                self._session_id,
+                                tool_name_str,
+                            )
+                            await _flush_progress(tool_name=tool_name_str)
 
                 elif etype == "assistant":
                     # Full assembled message — accumulate for final result.

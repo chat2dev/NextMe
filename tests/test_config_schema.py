@@ -149,7 +149,7 @@ class TestSettings:
 
     def test_default_progress_debounce_seconds(self):
         s = Settings()
-        assert s.progress_debounce_seconds == 0.15
+        assert s.progress_debounce_seconds == 0.5
 
     def test_default_permission_timeout_seconds(self):
         s = Settings()
