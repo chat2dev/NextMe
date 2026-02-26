@@ -75,13 +75,90 @@ Edit `nextme.json`:
 
 **2. Feishu app configuration**
 
-Create an enterprise self-built app on the [Feishu Open Platform](https://open.feishu.cn/) and enable the following permissions:
+Go to the [Feishu Open Platform](https://open.feishu.cn/) and follow the steps below.
 
-- `im:message` — read / send messages
-- `im:message.group_at_msg` — receive group @ messages
-- `im:message.p2p_msg` — receive direct messages
+> 飞书开放平台 → 创建企业自建应用，按以下步骤配置。
 
-Subscribe to the event: `im.message.receive_v1`
+**Step 1 — Create the app and enable Bot / 创建应用并启用 Bot**
+
+1. Click **Create Custom App** (创建企业自建应用).
+2. In the app dashboard, go to **Features** → enable **Bot** (机器人).
+
+**Step 2 — Get credentials / 获取凭证**
+
+Go to **Credentials & Basic Info** (凭证与基础信息) and copy **App ID** and **App Secret** into `nextme.json`:
+
+```json
+{
+  "app_id": "cli_xxxxxxxxxxxxxxxx",
+  "app_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+}
+```
+
+**Step 3 — Grant permissions / 配置权限**
+
+Go to **Permissions & Scopes** (权限管理) and add the following scopes:
+
+*Tenant scopes (应用权限):*
+
+| Scope | Purpose |
+|-------|---------|
+| `im:message:send_as_bot` | Send messages as bot |
+| `im:message:send_multi_users` | Send messages to multiple users |
+| `im:message:update` | Update / edit messages |
+| `im:message:send_sys_msg` | Send system messages |
+| `im:message:recall` | Recall messages |
+| `im:message:readonly` | Read messages |
+| `im:message.group_at_msg:readonly` | Receive group @ messages |
+| `im:message.p2p_msg:readonly` | Receive direct messages |
+| `im:message.reactions:read` | Read message reactions |
+| `im:message.reactions:write_only` | Add message reactions |
+| `im:message.pins:read` | Read pinned messages |
+| `im:message.pins:write_only` | Pin / unpin messages |
+| `im:chat:read` | Read chat info |
+| `im:chat:update` | Update chat info |
+| `im:resource` | Upload / download message resources |
+| `contact:contact.base:readonly` | Read basic contact info |
+| `docx:document:readonly` | Read Feishu Docs content |
+
+*User scopes (用户权限):*
+
+| Scope | Purpose |
+|-------|---------|
+| `contact:user.employee_id:readonly` | Read user employee ID |
+| `docx:document:readonly` | Read Feishu Docs content |
+
+**Step 4 — Start NextMe / 启动服务**
+
+```bash
+nextme up
+```
+
+*(See [Start](#start) section below for full options.)*
+
+**Step 5 — Configure events & callbacks / 配置事件和回调**
+
+> Complete this step **after** NextMe is running so the persistent connection is active.
+>
+> 先启动 NextMe，再配置事件和回调（需要服务在线以建立长连接）。
+
+Go to **Event Subscriptions** (事件订阅):
+
+- Set **Subscription mode** to **Using persistent connection** (使用长连接接收事件).
+- Add event: `im.message.receive_v1`
+
+Go to **Callback** (回调配置 / 卡片回调):
+
+- Set **Subscription mode** to **Using persistent connection** (使用长连接).
+- Add callbacks:
+  - `card.action.trigger` — interactive card button actions
+  - `url.preview.get` — URL preview
+
+**Step 6 — Publish the app / 发布应用**
+
+Click **Publish** (版本管理与发布 → 申请发布) and submit for review. Once approved the bot becomes available in Feishu.
+
+> 企业自建应用发布后，用户可在飞书中直接搜索 Bot 名称进行对话或将其添加到群组。
 
 ### Start
 
