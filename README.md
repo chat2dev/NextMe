@@ -276,6 +276,7 @@ Reply with the corresponding number to continue.
 `executor` values:
 - `"claude"` (default) — DirectClaudeRuntime, uses local `claude` CLI
 - `"cc-acp"` — ACPRuntime, uses `cc-acp` subprocess (JSON-RPC 2.0)
+- `"coco"` — ACPRuntime, uses `coco` subprocess (JSON-RPC 2.0 / ACP protocol)
 
 **Multi-project example:**
 

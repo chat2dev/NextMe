@@ -276,6 +276,7 @@ Agent 即将执行：...
 `executor` 可选值：
 - `"claude"`（默认）— DirectClaudeRuntime，使用本地 `claude` CLI
 - `"cc-acp"` — ACPRuntime，通过 `cc-acp` 子进程（JSON-RPC 2.0）
+- `"coco"` — ACPRuntime，通过 `coco` 子进程（JSON-RPC 2.0 / ACP 协议）
 
 **多项目示例：**
 

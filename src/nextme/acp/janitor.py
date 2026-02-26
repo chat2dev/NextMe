@@ -25,9 +25,9 @@ logger = logging.getLogger(__name__)
 
 _JANITOR_INTERVAL_SECONDS = 60
 
-# Executor names that use the cc-acp JSON-RPC protocol.  Any other name is
-# treated as a direct ``claude`` CLI executor (→ DirectClaudeRuntime).
-_ACP_EXECUTOR_NAMES: frozenset[str] = frozenset({"claude-code-acp", "cc-acp"})
+# Executor names that use the ACP JSON-RPC 2.0 protocol (→ ACPRuntime).
+# Any other name is treated as a direct ``claude`` CLI executor (→ DirectClaudeRuntime).
+_ACP_EXECUTOR_NAMES: frozenset[str] = frozenset({"claude-code-acp", "cc-acp", "coco"})
 
 _AnyRuntime = ACPRuntime | DirectClaudeRuntime
 
@@ -62,8 +62,8 @@ class ACPRuntimeRegistry:
 
         Selects the runtime implementation based on *executor*:
 
-        * ``"claude-code-acp"`` / ``"cc-acp"`` → :class:`ACPRuntime`
-          (JSON-RPC 2.0 over cc-acp subprocess).
+        * ``"claude-code-acp"`` / ``"cc-acp"`` / ``"coco"`` → :class:`ACPRuntime`
+          (JSON-RPC 2.0 over ACP-compatible subprocess).
         * Any other value → :class:`DirectClaudeRuntime`
           (direct ``claude --print --output-format stream-json`` invocation).
 
@@ -224,7 +224,7 @@ class ACPJanitor:
         idle_session_ids: list[str] = []
         for session_id, runtime in list(self._registry._runtimes.items()):
             if not runtime.is_running and isinstance(runtime, ACPRuntime):
-                # Persistent cc-acp process died unexpectedly — remove stale entry.
+                # Persistent ACP process (cc-acp / coco) died unexpectedly — remove stale entry.
                 idle_session_ids.append(session_id)
                 continue
             # For DirectClaudeRuntime, is_running=False between tasks is normal

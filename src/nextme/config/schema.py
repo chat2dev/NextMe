@@ -12,6 +12,8 @@ class Project(BaseModel):
     name: str
     path: str
     executor: str = "claude"
+    """Agent executor command.  Built-in values:
+    ``"claude"`` (DirectClaudeRuntime), ``"cc-acp"`` / ``"coco"`` (ACPRuntime)."""
 
     @field_validator("path")
     @classmethod
