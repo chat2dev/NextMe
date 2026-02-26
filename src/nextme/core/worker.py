@@ -78,6 +78,11 @@ class SessionWorker:
         self._active_message_id: str = ""   # original Feishu message_id
         self._active_in_thread: bool = False  # thread vs quote-reply mode
 
+    @property
+    def _proj(self) -> str:
+        """Return a bracketed project name tag for card titles, e.g. '【myproject】'."""
+        return f"【{self._session.project_name}】"
+
     # ------------------------------------------------------------------
     # Main loop
     # ------------------------------------------------------------------
@@ -176,7 +181,7 @@ class SessionWorker:
         initial_card = self._replier.build_progress_card(
             status="",
             content="思考中...",
-            title="思考中...",
+            title=f"思考中... {self._proj}",
         )
         try:
             if task.message_id:
@@ -308,7 +313,7 @@ class SessionWorker:
         card = self._replier.build_progress_card(
             status=status_text,
             content=accumulated or "思考中...",
-            title="思考中...",
+            title=f"思考中... {self._proj}",
         )
 
         if self._progress_message_id:
@@ -442,7 +447,7 @@ class SessionWorker:
         elapsed_s = int(time.monotonic() - self._task_start)
         result_card = self._replier.build_result_card(
             content=content or "(无输出)",
-            title="完成",
+            title=f"完成 {self._proj}",
             template="blue",
             session_id=self._session.actual_id or "",
             elapsed=_format_elapsed(elapsed_s),
@@ -451,14 +456,14 @@ class SessionWorker:
 
     async def _send_error(self, task: Task, error: str) -> None:
         """Update the progress card to show an error."""
-        error_card = self._replier.build_error_card(error)
+        error_card = self._replier.build_error_card(error, title=f"出错了 {self._proj}")
         await self._update_or_reply(task, error_card)
 
     async def _send_cancelled(self, task: Task) -> None:
         """Update the progress card to show a cancellation notice."""
         cancel_card = self._replier.build_result_card(
             content="操作已取消",
-            title="已取消",
+            title=f"已取消 {self._proj}",
             template="grey",
         )
         try:

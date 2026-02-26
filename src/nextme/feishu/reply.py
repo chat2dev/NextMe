@@ -344,13 +344,13 @@ class FeishuReplier:
         }
         return json.dumps(card, ensure_ascii=False)
 
-    def build_error_card(self, error: str) -> str:
+    def build_error_card(self, error: str, title: str = "出错了") -> str:
         """Return a card JSON string for an error message."""
         card = {
             "schema": "2.0",
             "config": {"wide_screen_mode": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "出错了"},
+                "title": {"tag": "plain_text", "content": title},
                 "template": "red",
             },
             "body": {

@@ -221,7 +221,7 @@ async def test_send_error_uses_build_error_card(worker, replier):
     worker._progress_message_id = "prog_msg_id"
     task, _ = make_task("hello")
     await worker._send_error(task, "Error message")
-    replier.build_error_card.assert_called_once_with("Error message")
+    replier.build_error_card.assert_called_once_with("Error message", title=f"出错了 【{worker._session.project_name}】")
 
 
 # ---------------------------------------------------------------------------
