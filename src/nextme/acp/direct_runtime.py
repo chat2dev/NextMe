@@ -285,14 +285,26 @@ class DirectClaudeRuntime:
                     )
 
                 elif etype == "assistant":
-                    # Text/content blocks from the model (may be chunked).
+                    # Text/content blocks from the model.
+                    # stream-json delivers the full text in one shot (not token-by-
+                    # token).  Split into ≤ 8 equal chunks emitted 200 ms apart so
+                    # the progress card updates gradually (typewriter effect).
                     msg = event.get("message") or {}
                     for block in msg.get("content") or []:
                         if block.get("type") == "text":
                             delta: str = block.get("text", "")
                             if delta:
                                 accumulated.append(delta)
-                                await _flush_progress(delta=delta)
+                                n_chunks = min(8, max(1, len(delta) // 30))
+                                chunk_size = max(1, -(-len(delta) // n_chunks))
+                                chunks = [
+                                    delta[i:i + chunk_size]
+                                    for i in range(0, len(delta), chunk_size)
+                                ]
+                                for j, chunk in enumerate(chunks):
+                                    await _flush_progress(delta=chunk)
+                                    if j < len(chunks) - 1:
+                                        await asyncio.sleep(0.2)
 
                 elif etype == "tool_use":
                     tool_name: str = event.get("name") or "tool"
