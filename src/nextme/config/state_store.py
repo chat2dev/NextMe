@@ -94,6 +94,28 @@ class StateStore:
         state.contexts[context_id] = user_state
         self._dirty = True
 
+    def set_binding(self, chat_id: str, project_name: str) -> None:
+        """Persist a dynamic chat→project binding (set via ``/project bind``).
+
+        Args:
+            chat_id: Feishu chat identifier.
+            project_name: Name of the project to bind this chat to.
+        """
+        state = self._require_loaded()
+        state.bindings[chat_id] = project_name
+        self._dirty = True
+
+    def remove_binding(self, chat_id: str) -> None:
+        """Remove a dynamic binding for *chat_id*, if present."""
+        state = self._require_loaded()
+        if chat_id in state.bindings:
+            state.bindings.pop(chat_id)
+            self._dirty = True
+
+    def get_all_bindings(self) -> dict[str, str]:
+        """Return a copy of all dynamic chat→project bindings."""
+        return dict(self._require_loaded().bindings)
+
     async def flush(self) -> None:
         """Force-write the current in-memory state to disk atomically.
 

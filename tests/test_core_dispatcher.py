@@ -141,14 +141,15 @@ async def test_dispatch_new_command(dispatcher, mock_replier):
 
 
 async def test_dispatch_new_command_passes_runtime(dispatcher, acp_registry, mock_replier):
-    """/new looks up the runtime from acp_registry."""
+    """/new looks up the runtime from acp_registry using context_id:project_name key."""
     mock_runtime = MagicMock()
     acp_registry.get.return_value = mock_runtime
     task = make_task("/new")
     with patch("nextme.core.dispatcher.handle_new", new_callable=AsyncMock) as mock_new:
         await dispatcher.dispatch(task)
-    # acp_registry.get was called with the context_id
-    acp_registry.get.assert_called_once_with(task.session_id)
+    # acp_registry.get was called with the scoped key (context_id:project_name)
+    call_arg = acp_registry.get.call_args[0][0]
+    assert call_arg.startswith(task.session_id + ":")
     # The runtime was passed to handle_new
     call_args = mock_new.call_args
     assert call_args.args[1] is mock_runtime or call_args.kwargs.get("runtime") is mock_runtime
@@ -267,9 +268,8 @@ async def test_dispatch_normal_message_starts_worker(dispatcher):
         await dispatcher.dispatch(task)
 
     MockWorker.assert_called_once()
-    # Worker task should be registered
-    context_id = task.session_id
-    assert context_id in dispatcher._worker_tasks
+    # Worker task should be registered under context_id:project_name key
+    assert any(k.startswith(task.session_id + ":") for k in dispatcher._worker_tasks)
 
 
 async def test_dispatch_does_not_restart_running_worker(dispatcher):
@@ -550,8 +550,10 @@ async def test_dispatch_restarts_finished_worker(dispatcher):
         await dispatcher.dispatch(task1)
 
         # Allow the worker task to complete
-        context_id = task1.session_id
-        worker_asyncio_task = dispatcher._worker_tasks.get(context_id)
+        worker_asyncio_task = next(
+            (t for k, t in dispatcher._worker_tasks.items() if k.startswith(task1.session_id + ":")),
+            None,
+        )
         if worker_asyncio_task:
             await asyncio.sleep(0)  # yield control so task can complete
             await asyncio.sleep(0)

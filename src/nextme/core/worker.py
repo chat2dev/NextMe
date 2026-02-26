@@ -257,7 +257,7 @@ class SessionWorker:
 
             # Step 3 — Obtain and ready the ACP runtime.
             runtime = self._acp_registry.get_or_create(
-                session_id=self._session.context_id,
+                session_id=f"{self._session.context_id}:{self._session.project_name}",
                 cwd=str(self._session.project_path),
                 settings=self._settings,
                 executor=self._session.executor,
