@@ -412,7 +412,7 @@ def memory_manager():
 
 
 async def test_handle_remember_sends_confirmation(memory_manager, replier):
-    await handle_remember("oc_chat:ou_user", "I like Python", memory_manager, replier, "oc_chat")
+    await handle_remember("ou_user", "I like Python", memory_manager, replier, "oc_chat")
     replier.send_text.assert_awaited_once()
     call_args = replier.send_text.call_args[0]
     assert call_args[0] == "oc_chat"
@@ -420,7 +420,7 @@ async def test_handle_remember_sends_confirmation(memory_manager, replier):
 
 
 async def test_handle_remember_calls_add_fact(memory_manager, replier):
-    await handle_remember("oc_chat:ou_user", "remember this", memory_manager, replier, "oc_chat")
+    await handle_remember("ou_user", "remember this", memory_manager, replier, "oc_chat")
     memory_manager.add_fact.assert_called_once()
     fact = memory_manager.add_fact.call_args[0][1]
     assert fact.text == "remember this"
@@ -428,12 +428,13 @@ async def test_handle_remember_calls_add_fact(memory_manager, replier):
 
 
 async def test_handle_remember_loads_memory_before_add(memory_manager, replier):
-    await handle_remember("oc_chat:ou_user", "some fact", memory_manager, replier, "oc_chat")
-    memory_manager.load.assert_awaited_once_with("oc_chat:ou_user")
+    # user_id (not context_id) is passed as the memory key
+    await handle_remember("ou_user", "some fact", memory_manager, replier, "oc_chat")
+    memory_manager.load.assert_awaited_once_with("ou_user")
 
 
 async def test_handle_remember_sends_to_correct_chat(memory_manager, replier):
-    await handle_remember("ctx", "fact", memory_manager, replier, "target_chat")
+    await handle_remember("ou_user", "fact", memory_manager, replier, "target_chat")
     call_args = replier.send_text.call_args[0]
     assert call_args[0] == "target_chat"
 
@@ -442,7 +443,7 @@ async def test_handle_remember_handles_send_text_exception_gracefully(memory_man
     bad_replier = MagicMock()
     bad_replier.send_text = AsyncMock(side_effect=RuntimeError("send failed"))
     # Should not raise
-    await handle_remember("ctx", "fact", memory_manager, bad_replier, "oc_chat")
+    await handle_remember("ou_user", "fact", memory_manager, bad_replier, "oc_chat")
 
 
 async def test_handle_remember_handles_memory_manager_exception_gracefully(replier):
@@ -450,4 +451,4 @@ async def test_handle_remember_handles_memory_manager_exception_gracefully(repli
     bad_mgr.load = AsyncMock(side_effect=RuntimeError("load failed"))
     bad_mgr.add_fact = MagicMock()
     # Should not raise; still tries to send confirmation
-    await handle_remember("ctx", "fact", bad_mgr, replier, "oc_chat")
+    await handle_remember("ou_user", "fact", bad_mgr, replier, "oc_chat")

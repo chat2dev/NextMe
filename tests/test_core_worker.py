@@ -825,6 +825,8 @@ async def test_worker_injects_memory_for_new_session(
     assert "[用户记忆]" in injected_content
     assert "User prefers Python" in injected_content
     assert "what language should I use?" in injected_content
+    # Memory is loaded with user_id (ou_user), not full context_id (oc_chat:ou_user)
+    memory_manager_mock.load.assert_awaited_once_with("ou_user")
 
 
 async def test_worker_skips_memory_injection_for_resumed_session(

@@ -266,6 +266,10 @@ class TaskDispatcher:
         """Extract ``chat_id`` from ``"chatID:userID"``."""
         return session_id.split(":")[0]
 
+    def _get_user_id(self, session_id: str) -> str:
+        """Extract ``user_id`` from ``"chatID:userID"``."""
+        return session_id.rsplit(":", 1)[-1]
+
     def _resolve_bound_project(self, chat_id: str):
         """Return the :class:`~nextme.config.schema.Project` bound to *chat_id*, or ``None``.
 
@@ -475,7 +479,8 @@ class TaskDispatcher:
             if self._memory_manager is None:
                 await replier.send_text(chat_id, "记忆功能未启用。")
                 return
-            await handle_remember(context_id, arg, self._memory_manager, replier, chat_id)
+            user_id = self._get_user_id(context_id)
+            await handle_remember(user_id, arg, self._memory_manager, replier, chat_id)
 
         else:
             logger.debug(

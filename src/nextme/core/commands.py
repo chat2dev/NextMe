@@ -299,37 +299,36 @@ async def handle_unbind(chat_id: str, replier: Replier) -> bool:
 
 
 async def handle_remember(
-    context_id: str,
+    user_id: str,
     text: str,
     memory_manager: "MemoryManager",
     replier: Replier,
     chat_id: str,
 ) -> None:
-    """Save a user-supplied fact to long-term memory.
+    """Save a user-supplied fact to long-term memory (global across all chats).
 
-    Loads the user's memory context if not already cached, appends the fact,
-    and sends a confirmation message.
+    Facts are keyed by *user_id* so the same memory is shared regardless of
+    which chat the user interacts from.
 
     Args:
-        context_id: The user context id (``chatID:userID``).
+        user_id: Feishu user identifier (``ou_xxx``).
         text: The fact text to remember.
         memory_manager: The :class:`~nextme.memory.manager.MemoryManager` instance.
         replier: Feishu message sender.
         chat_id: Target chat.
     """
-    from ..memory.manager import MemoryManager as _MemoryManager  # local import avoids cycle
     from ..memory.schema import Fact
 
     logger.info(
-        "handle_remember: saving fact for context_id=%r: %r", context_id, text
+        "handle_remember: saving fact for user_id=%r: %r", user_id, text
     )
     try:
-        await memory_manager.load(context_id)
+        await memory_manager.load(user_id)
         fact = Fact(text=text, source="user_command")
-        memory_manager.add_fact(context_id, fact)
+        memory_manager.add_fact(user_id, fact)
     except Exception:
         logger.exception(
-            "handle_remember: error saving fact for context_id=%r", context_id
+            "handle_remember: error saving fact for user_id=%r", user_id
         )
     try:
         await replier.send_text(chat_id, f"已记住：{text}")

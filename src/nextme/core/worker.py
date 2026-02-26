@@ -302,14 +302,16 @@ class SessionWorker:
                     )
 
             # Inject user memory facts into the task prompt for new sessions only.
+            # Facts are keyed by user_id (global across all chats) not context_id.
             if not runtime.actual_id and self._memory_manager is not None:
+                user_id = self._session.context_id.rsplit(":", 1)[-1]
                 try:
-                    await self._memory_manager.load(self._session.context_id)
+                    await self._memory_manager.load(user_id)
                 except Exception:
                     logger.exception(
                         "SessionWorker[%s]: failed to load memory", self._session.context_id
                     )
-                facts = self._memory_manager.get_top_facts(self._session.context_id, n=10)
+                facts = self._memory_manager.get_top_facts(user_id, n=10)
                 if facts:
                     fact_lines = "\n".join(f"- {f.text}" for f in facts)
                     task = dataclasses.replace(
