@@ -47,7 +47,7 @@ class Settings(BaseModel):
     context_max_bytes: int = 1_000_000
     context_compression: Literal["zlib", "lzma", "brotli"] = "zlib"
     log_level: str = "INFO"
-    progress_debounce_seconds: float = 3.0
+    progress_debounce_seconds: float = 1.0
     permission_timeout_seconds: float = 300.0
 
 

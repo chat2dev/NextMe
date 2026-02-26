@@ -226,14 +226,10 @@ class DirectClaudeRuntime:
         )
 
         accumulated: list[str] = []
-        last_progress_time: float = 0.0
-        debounce: float = self._settings.progress_debounce_seconds
         timeout_secs = task.timeout.total_seconds()
 
         async def _flush_progress(delta: str = "", tool_name: str = "") -> None:
-            nonlocal last_progress_time
             if delta or tool_name:
-                last_progress_time = time.monotonic()
                 try:
                     await on_progress(delta, tool_name)
                 except Exception as exc:
@@ -296,9 +292,7 @@ class DirectClaudeRuntime:
                             delta: str = block.get("text", "")
                             if delta:
                                 accumulated.append(delta)
-                                now = time.monotonic()
-                                if (now - last_progress_time) >= debounce:
-                                    await _flush_progress(delta=delta)
+                                await _flush_progress(delta=delta)
 
                 elif etype == "tool_use":
                     tool_name: str = event.get("name") or "tool"

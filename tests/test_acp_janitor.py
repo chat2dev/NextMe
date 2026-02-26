@@ -212,10 +212,14 @@ class TestACPRuntimeRegistry:
 
 
 class TestACPJanitorReapIdle:
-    async def test_reap_idle_removes_runtimes_not_running(self):
+    async def test_reap_idle_removes_acp_runtime_not_running(self):
+        """Non-running ACPRuntime is reaped immediately (dead cc-acp process)."""
         registry = ACPRuntimeRegistry()
         settings = make_settings(acp_idle_timeout_seconds=3600)
-        mock_runtime = make_mock_runtime(is_running=False)
+        mock_runtime = MagicMock(spec=ACPRuntime)
+        mock_runtime.is_running = False
+        mock_runtime.last_access = datetime.now()
+        mock_runtime.stop = AsyncMock()
         registry._runtimes["s1"] = mock_runtime
         registry.remove = AsyncMock()
 
@@ -290,13 +294,17 @@ class TestACPJanitorReapIdle:
         assert "stale" in removed_sessions
         assert "fresh" not in removed_sessions
 
-    async def test_reap_idle_removes_not_running_regardless_of_last_access(self):
+    async def test_reap_idle_removes_acp_runtime_not_running_regardless_of_last_access(self):
+        """Stopped ACPRuntime is reaped even if last_access is very recent."""
         registry = ACPRuntimeRegistry()
         settings = make_settings(acp_idle_timeout_seconds=3600)
 
-        # Even if last_access is very recent, a stopped runtime should be reaped
+        # Even if last_access is very recent, a stopped ACPRuntime should be reaped
         recent_access = datetime.now() - timedelta(seconds=1)
-        stopped_runtime = make_mock_runtime(is_running=False, last_access=recent_access)
+        stopped_runtime = MagicMock(spec=ACPRuntime)
+        stopped_runtime.is_running = False
+        stopped_runtime.last_access = recent_access
+        stopped_runtime.stop = AsyncMock()
         registry._runtimes["stopped"] = stopped_runtime
         registry.remove = AsyncMock()
 

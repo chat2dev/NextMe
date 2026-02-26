@@ -746,8 +746,6 @@ def _build_child_env(parent_env: dict) -> dict:
     }
     child_env["CI"] = "true"
     child_env.setdefault("TERM", "xterm")
-    if "ANTHROPIC_API_KEY" not in child_env and "ANTHROPIC_AUTH_TOKEN" in parent_env:
-        child_env["ANTHROPIC_API_KEY"] = parent_env["ANTHROPIC_AUTH_TOKEN"]
     return child_env
 
 
@@ -784,26 +782,31 @@ def test_strip_all_claude_code_prefix_vars():
     assert env["PATH"] == "/usr/bin"
 
 
-def test_strip_anthropic_auth_token():
+def test_preserve_anthropic_auth_token():
+    """ANTHROPIC_AUTH_TOKEN is kept for proxy auth (not stripped)."""
     env = _build_child_env({"ANTHROPIC_AUTH_TOKEN": "cr_abc123"})
-    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "cr_abc123"
 
 
-def test_promote_auth_token_to_api_key():
-    """ANTHROPIC_AUTH_TOKEN is promoted to ANTHROPIC_API_KEY when API key absent."""
-    env = _build_child_env({"ANTHROPIC_AUTH_TOKEN": "cr_abc123", "PATH": "/bin"})
-    assert env.get("ANTHROPIC_API_KEY") == "cr_abc123"
-    assert "ANTHROPIC_AUTH_TOKEN" not in env
+def test_anthropic_auth_token_and_base_url_both_preserved():
+    """Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL pass through unchanged."""
+    env = _build_child_env({
+        "ANTHROPIC_AUTH_TOKEN": "cr_abc123",
+        "ANTHROPIC_BASE_URL": "https://proxy.example.com/api",
+        "PATH": "/bin",
+    })
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "cr_abc123"
+    assert env["ANTHROPIC_BASE_URL"] == "https://proxy.example.com/api"
 
 
-def test_no_promotion_when_api_key_already_present():
-    """Existing ANTHROPIC_API_KEY is preserved; auth token is still stripped."""
+def test_anthropic_api_key_preserved_alongside_auth_token():
+    """When both ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN are present, both survive."""
     env = _build_child_env({
         "ANTHROPIC_API_KEY": "sk-ant-real",
         "ANTHROPIC_AUTH_TOKEN": "cr_override",
     })
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-real"
-    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "cr_override"
 
 
 def test_ci_always_set():

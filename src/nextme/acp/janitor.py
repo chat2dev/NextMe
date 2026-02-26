@@ -223,10 +223,12 @@ class ACPJanitor:
         # Collect session ids whose runtimes are idle.
         idle_session_ids: list[str] = []
         for session_id, runtime in list(self._registry._runtimes.items()):
-            if not runtime.is_running:
-                # Already stopped; remove stale entry.
+            if not runtime.is_running and isinstance(runtime, ACPRuntime):
+                # Persistent cc-acp process died unexpectedly — remove stale entry.
                 idle_session_ids.append(session_id)
                 continue
+            # For DirectClaudeRuntime, is_running=False between tasks is normal
+            # (process exits after each response). Only evict on idle timeout.
             if now - runtime.last_access >= idle_threshold:
                 idle_session_ids.append(session_id)
 

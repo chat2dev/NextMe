@@ -62,12 +62,11 @@ _STOP_GRACEFUL_TIMEOUT_SECONDS = 5
 #   CLAUDE_CODE_*           — prefix match; covers ENTRYPOINT, EXPERIMENTAL_*,
 #                             API_USAGE_TELEMETRY, VERSION, etc. — all mark the
 #                             current process as a running Claude Code session
-#   ANTHROPIC_AUTH_TOKEN    — cr_* OAuth token; inner claude rejects it (exit 1)
-#                             when passed as an env var; promoted to API key instead
 #
-# Inspired by open-jieli (inherit full env + CI=true/TERM=xterm) but additionally
-# strips the vars that only exist when running *inside* a Claude Code host session.
-_STRIP_ENV_EXACT: frozenset[str] = frozenset({"CLAUDECODE", "ANTHROPIC_AUTH_TOKEN"})
+# We intentionally KEEP ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL so that
+# cc-acp's inner claude authenticates the same way as the outer process.
+# (open-jieli: inherit full env + CI=true/TERM=xterm, no auth stripping)
+_STRIP_ENV_EXACT: frozenset[str] = frozenset({"CLAUDECODE"})
 _STRIP_ENV_PREFIX = "CLAUDE_CODE_"
 
 
@@ -152,16 +151,14 @@ class ACPRuntime:
             self._cwd,
         )
 
-        # Build the child environment: inherit full env, strip vars that cause
-        # nested-session errors, then add CI=true + TERM=xterm.
+        # Build the child environment: inherit full env, strip CLAUDECODE and
+        # CLAUDE_CODE_* (nested-session markers), add CI=true + TERM=xterm.
+        # ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL are intentionally kept so
+        # cc-acp's inner claude authenticates the same way as the outer process.
         child_env = {
             k: v for k, v in os.environ.items()
             if k not in _STRIP_ENV_EXACT and not k.startswith(_STRIP_ENV_PREFIX)
         }
-        # Map ANTHROPIC_AUTH_TOKEN (OAuth) → ANTHROPIC_API_KEY for cc-acp SDK.
-        auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        if auth_token and "ANTHROPIC_API_KEY" not in child_env:
-            child_env["ANTHROPIC_API_KEY"] = auth_token
         child_env["CI"] = "true"
         child_env.setdefault("TERM", "xterm")
 
