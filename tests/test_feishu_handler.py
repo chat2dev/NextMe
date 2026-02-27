@@ -489,6 +489,7 @@ def make_card_action_data(
     project_name: str = "",
     label: str = "1. Allow",
     executor: str = "claude",
+    display_id: str = "uuid-abc",
 ):
     """Build a mock P2CardActionTrigger-shaped object."""
     data = MagicMock()
@@ -502,6 +503,7 @@ def make_card_action_data(
         "project_name": project_name,
         "label": label,
         "executor": executor,
+        "display_id": display_id,
     }
     return data
 
@@ -636,8 +638,8 @@ class TestOnCardAction:
         content_elements = [e for e in elements if e.get("tag") == "markdown"]
         assert any("2. Deny — Reject all" in e.get("content", "") for e in content_elements)
 
-    def test_confirmed_card_footer_contains_session_id_and_executor(self):
-        """The confirmed card footer should show session_id and executor."""
+    def test_confirmed_card_footer_uses_display_id(self):
+        """The confirmed card footer should show display_id (not raw session_id)."""
         handler, _, dispatcher = make_handler()
         dispatcher.handle_card_action = MagicMock()
 
@@ -646,7 +648,10 @@ class TestOnCardAction:
         handler.attach_loop(loop)
 
         data = make_card_action_data(
-            session_id="sess-123", executor="coco", label="1. Allow"
+            session_id="oc_chat:ou_user",
+            display_id="nice-uuid-123",
+            executor="coco",
+            label="1. Allow",
         )
         resp = handler._on_card_action(data)
 
@@ -654,9 +659,11 @@ class TestOnCardAction:
         elements = card_data["body"]["elements"]
         footer_elements = [
             e for e in elements
-            if e.get("tag") == "markdown" and "sess-123" in e.get("content", "")
+            if e.get("tag") == "markdown" and "🆔" in e.get("content", "")
         ]
         assert len(footer_elements) == 1
+        assert "nice-uuid-123" in footer_elements[0]["content"]
+        assert "oc_chat:ou_user" not in footer_elements[0]["content"]
         assert "coco" in footer_elements[0]["content"]
 
     def test_non_permission_action_returns_no_card(self):

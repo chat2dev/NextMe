@@ -503,12 +503,15 @@ class SessionWorker:
         )
 
         # Build and send the permission card.
+        # session_id = context_id so handle_card_action can look up the
+        # UserContext in the registry; display_id = actual_id for the footer.
         card = self._replier.build_permission_card(
             description=req.description,
             options=req.options,
-            session_id=self._session.actual_id or "",
+            session_id=self._session.context_id,
             project_name=self._session.project_name,
             executor=self._session.executor,
+            display_id=self._session.actual_id or "",
         )
         try:
             await self._replier.send_card(chat_id, card)

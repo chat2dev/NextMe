@@ -471,7 +471,7 @@ class FeishuReplier:
             "body": {
                 "elements": [
                     {"tag": "markdown", "content": content, "id": _CONTENT_ELEMENT_ID},
-                    {"tag": "markdown", "content": "", "id": _STATUS_ELEMENT_ID},
+                    {"tag": "markdown", "content": " ", "id": _STATUS_ELEMENT_ID},
                 ]
             },
         }
@@ -536,8 +536,18 @@ class FeishuReplier:
         session_id: str = "",
         project_name: str = "",
         executor: str = "",
+        display_id: str = "",
     ) -> str:
-        """Return a card JSON string for a permission request with numbered buttons."""
+        """Return a card JSON string for a permission request with numbered buttons.
+
+        Args:
+            session_id: The context_id (``oc_xxx:ou_xxx``) stored in the button
+                value so the card action callback can look up the correct
+                UserContext in the session registry.
+            display_id: The human-readable session ID shown in the card footer
+                (usually ``actual_id``, the Claude/ACP session UUID).  Falls
+                back to *session_id* when empty.
+        """
         elements: list[dict] = [
             {"tag": "markdown", "content": description},
             {"tag": "hr"},
@@ -562,13 +572,15 @@ class FeishuReplier:
                         "project_name": project_name,
                         "label": label,
                         "executor": executor,
+                        "display_id": display_id,
                     },
                 }
             )
 
+        footer_id = display_id or session_id
         footer_parts: list[str] = []
-        if session_id:
-            footer_parts.append(f"🆔 {session_id}")
+        if footer_id:
+            footer_parts.append(f"🆔 {footer_id}")
         if executor:
             footer_parts.append(executor)
         if footer_parts:

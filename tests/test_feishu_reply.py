@@ -417,6 +417,54 @@ class TestBuildPermissionCard:
         ]
         assert len(footer_md) == 0
 
+    def test_display_id_stored_in_button_value(self):
+        replier, _ = make_replier()
+        opts = [PermOption(index=1, label="Allow")]
+        parsed = json.loads(
+            replier.build_permission_card(
+                "desc", opts,
+                session_id="oc_x:ou_y",
+                display_id="uuid-actual-123",
+            )
+        )
+        elements = parsed["body"]["elements"]
+        btn_elements = [e for e in elements if e.get("tag") == "button"]
+        assert btn_elements[0]["value"]["display_id"] == "uuid-actual-123"
+        assert btn_elements[0]["value"]["session_id"] == "oc_x:ou_y"
+
+    def test_display_id_shown_in_footer_instead_of_session_id(self):
+        replier, _ = make_replier()
+        opts = self._make_options(1)
+        parsed = json.loads(
+            replier.build_permission_card(
+                "desc", opts,
+                session_id="oc_x:ou_y",
+                display_id="nice-uuid",
+            )
+        )
+        elements = parsed["body"]["elements"]
+        footer_elements = [
+            e for e in elements
+            if e.get("tag") == "markdown" and "🆔" in e.get("content", "")
+        ]
+        assert len(footer_elements) == 1
+        assert "nice-uuid" in footer_elements[0]["content"]
+        assert "oc_x:ou_y" not in footer_elements[0]["content"]
+
+    def test_session_id_shown_in_footer_when_display_id_empty(self):
+        replier, _ = make_replier()
+        opts = self._make_options(1)
+        parsed = json.loads(
+            replier.build_permission_card("desc", opts, session_id="oc_x:ou_y")
+        )
+        elements = parsed["body"]["elements"]
+        footer_elements = [
+            e for e in elements
+            if e.get("tag") == "markdown" and "🆔" in e.get("content", "")
+        ]
+        assert len(footer_elements) == 1
+        assert "oc_x:ou_y" in footer_elements[0]["content"]
+
 
 # ---------------------------------------------------------------------------
 # build_error_card
@@ -1015,10 +1063,12 @@ class TestBuildStreamingProgressCard:
         parsed = json.loads(replier.build_streaming_progress_card(content="loading..."))
         assert parsed["body"]["elements"][0]["content"] == "loading..."
 
-    def test_status_element_initially_empty(self):
+    def test_status_element_initially_whitespace(self):
+        """status_el uses a space as placeholder so Feishu registers the element."""
         replier, _ = make_replier()
         parsed = json.loads(replier.build_streaming_progress_card())
-        assert parsed["body"]["elements"][1]["content"] == ""
+        # Content is a single space (not empty) so cardkit recognises the element ID.
+        assert parsed["body"]["elements"][1]["content"] == " "
 
     def test_non_ascii_content_preserved(self):
         replier, _ = make_replier()

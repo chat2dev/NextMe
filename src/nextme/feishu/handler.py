@@ -106,6 +106,7 @@ class MessageHandler:
             project_name: str = value.get("project_name", "")
             label: str = value.get("label", index_str)
             executor: str = value.get("executor", "")
+            display_id: str = value.get("display_id", "")
             if not session_id or not index_str:
                 return resp
 
@@ -132,9 +133,10 @@ class MessageHandler:
             confirmed_elements: list[dict] = [
                 {"tag": "markdown", "content": f"✅ 已选择: {label}"},
             ]
+            footer_id = display_id or session_id
             footer_parts: list[str] = []
-            if session_id:
-                footer_parts.append(f"🆔 {session_id}")
+            if footer_id:
+                footer_parts.append(f"🆔 {footer_id}")
             if executor:
                 footer_parts.append(executor)
             if footer_parts:

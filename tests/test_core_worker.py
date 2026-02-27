@@ -390,6 +390,56 @@ async def test_on_permission_timeout_calls_cancel_permission(worker, session, re
         mock_cancel.assert_called()
 
 
+async def test_on_permission_passes_context_id_as_session_id(worker, session, replier):
+    """build_permission_card must receive context_id (not actual_id) as session_id.
+
+    This is the regression test for the bug where actual_id was passed as
+    session_id, causing handle_card_action to fail with "no context".
+    """
+    session.actual_id = "acp-session-uuid-123"
+    req = PermissionRequest(
+        session_id="oc_chat:ou_user",
+        request_id="req-ctx",
+        description="Write file?",
+        options=[PermOption(index=1, label="Allow")],
+    )
+
+    async def resolve_later():
+        await asyncio.sleep(0.05)
+        session.resolve_permission(PermissionChoice(request_id="req-ctx", option_index=1))
+
+    asyncio.create_task(resolve_later())
+    await worker._on_permission(req)
+
+    call_kwargs = replier.build_permission_card.call_args.kwargs
+    # session_id must be context_id (oc_chat:ou_user) so the registry lookup works
+    assert call_kwargs["session_id"] == "oc_chat:ou_user"
+    # display_id must be actual_id for the footer
+    assert call_kwargs["display_id"] == "acp-session-uuid-123"
+
+
+async def test_on_permission_display_id_empty_when_no_actual_id(worker, session, replier):
+    """display_id is empty string when session has no actual_id yet."""
+    session.actual_id = None
+    req = PermissionRequest(
+        session_id="oc_chat:ou_user",
+        request_id="req-no-actual",
+        description="Write file?",
+        options=[PermOption(index=1, label="Allow")],
+    )
+
+    async def resolve_later():
+        await asyncio.sleep(0.05)
+        session.resolve_permission(PermissionChoice(request_id="req-no-actual", option_index=1))
+
+    asyncio.create_task(resolve_later())
+    await worker._on_permission(req)
+
+    call_kwargs = replier.build_permission_card.call_args.kwargs
+    assert call_kwargs["session_id"] == "oc_chat:ou_user"
+    assert call_kwargs["display_id"] == ""
+
+
 # ---------------------------------------------------------------------------
 # _execute_task integration-style tests
 # ---------------------------------------------------------------------------
