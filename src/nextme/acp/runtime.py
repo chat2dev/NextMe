@@ -264,28 +264,59 @@ class ACPRuntime:
 
         # --- Step 1: create or resume session ----------------------------
         if self._actual_id:
-            load_id = await self._client.send_request(
-                "session/load",
-                load_session_params(self._actual_id, self._cwd),
-            )
-            await self._wait_response(load_id, timeout=_SESSION_TIMEOUT_SECONDS)
-            logger.debug(
-                "ACPRuntime[%s]: loaded ACP session %r",
-                self._session_id,
-                self._actual_id,
-            )
-        else:
+            try:
+                load_id = await self._client.send_request(
+                    "session/load",
+                    load_session_params(self._actual_id, self._cwd),
+                )
+                await self._wait_response(load_id, timeout=_SESSION_TIMEOUT_SECONDS)
+                logger.debug(
+                    "ACPRuntime[%s]: loaded ACP session %r",
+                    self._session_id,
+                    self._actual_id,
+                )
+            except Exception as exc:
+                # session/load may fail if the executor doesn't persist sessions
+                # across restarts (e.g. coco stores sessions in memory only).
+                # Fall through to session/new so the task still runs, albeit
+                # without prior conversation context.
+                logger.warning(
+                    "ACPRuntime[%s]: session/load failed (%s); "
+                    "starting fresh session — prior context will be lost",
+                    self._session_id,
+                    exc,
+                )
+                self._actual_id = None
+
+        if not self._actual_id:
             new_id = await self._client.send_request(
                 "session/new",
                 new_session_params(self._cwd),
             )
             resp = await self._wait_response(new_id, timeout=_SESSION_TIMEOUT_SECONDS)
-            self._actual_id = resp.get("sessionId") or resp.get("session_id") or ""
-            logger.debug(
-                "ACPRuntime[%s]: created ACP session %r",
-                self._session_id,
-                self._actual_id,
+            # Different ACP implementations use different key names for the session
+            # id in the session/new response.  Try all known variants.
+            self._actual_id = (
+                resp.get("sessionId")
+                or resp.get("session_id")
+                or resp.get("id")
+                or resp.get("session")
+                or ""
             )
+            if self._actual_id:
+                logger.debug(
+                    "ACPRuntime[%s]: created ACP session %r",
+                    self._session_id,
+                    self._actual_id,
+                )
+            else:
+                logger.warning(
+                    "ACPRuntime[%s]: session/new response contains no session id; "
+                    "conversation history will not persist across prompts. "
+                    "Response keys: %s",
+                    self._session_id,
+                    list(resp.keys()),
+                )
 
         # --- Step 2: send prompt -----------------------------------------
         prompt_req_id = await self._client.send_request(
@@ -438,19 +469,20 @@ class ACPRuntime:
         msg: dict,
         on_permission: Callable[[PermissionRequest], Awaitable[PermissionChoice]],
     ) -> None:
-        """Parse an inbound ``session/request_permission`` request, respond to
-        the ACP subprocess immediately, and notify the user asynchronously.
+        """Parse an inbound ``session/request_permission`` request, call
+        ``on_permission``, and send the chosen response back to the subprocess.
 
-        The ACP subprocess (e.g. coco) has a short internal timeout (~10 s) for
-        permission responses.  Blocking on user input before sending the response
-        causes a race: the subprocess fires "Tool call rejected by user" before
-        the user can even read the Feishu card.
+        Note on ACP subprocess timeouts
+        --------------------------------
+        Some ACP executors (e.g. coco) impose a short internal timeout on
+        permission responses (~10 s).  If the user takes longer than that
+        timeout to click the permission card, the subprocess will reject the
+        tool call before our response arrives.
 
-        Fix: select the first "allow" option as a default and send the JSON-RPC
-        response to the subprocess immediately.  Then spawn a background task
-        that shows the permission card to the user via ``on_permission``.  If
-        the user chooses a deny/reject option, the active task is cancelled so
-        the agent stops after the current tool call completes.
+        The ``permission_timeout_seconds`` setting controls how long we wait
+        for the user.  Set it to a value less than the executor's internal
+        timeout (e.g. 8 s for coco) via ``~/.nextme/nextme.json`` so that our
+        bot responds before the executor rejects the request.
         """
         if msg.get("method") != "session/request_permission":
             logger.debug(
@@ -494,46 +526,41 @@ class ACPRuntime:
             options=perm_options,
         )
 
-        # Select the default allow option — prefer the first option whose kind
-        # starts with "allow"; fall back to the very first option.
-        default_allow_idx = next(
-            (i for i, opt in enumerate(perm_req.options) if opt.kind.startswith("allow")),
-            0,
-        )
-        if perm_req.options:
-            default_option_id = perm_req.options[default_allow_idx].option_id
-        else:
-            default_option_id = "allow_once"
+        try:
+            choice: PermissionChoice = await asyncio.wait_for(
+                on_permission(internal_req),
+                timeout=self._settings.permission_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "ACPRuntime[%s]: permission timed out after %.0fs, using first option",
+                self._session_id,
+                self._settings.permission_timeout_seconds,
+            )
+            choice = PermissionChoice(request_id="", option_index=1)
+        except Exception as exc:
+            logger.warning(
+                "ACPRuntime[%s]: on_permission raised: %s", self._session_id, exc
+            )
+            choice = PermissionChoice(request_id="", option_index=1)
 
-        # Respond to the ACP subprocess immediately so its internal timeout does
-        # not fire before the user interacts with the Feishu card.
-        result = permission_response_result(default_option_id)
+        # Map the 1-based index back to the option_id string.
+        chosen_index = max(1, choice.option_index) - 1
+        if perm_req.options and chosen_index < len(perm_req.options):
+            option_id = perm_req.options[chosen_index].option_id
+        elif perm_req.options:
+            option_id = perm_req.options[0].option_id
+        else:
+            option_id = "allow_once"
+
+        result = permission_response_result(option_id)
         await self._client.send_response(perm_req.jsonrpc_id, result)
         logger.info(
-            "ACPRuntime[%s]: auto-allowed permission (option=%r, description=%r); "
-            "notifying user async",
+            "ACPRuntime[%s]: permission response sent (option=%r, description=%r)",
             self._session_id,
-            default_option_id,
+            option_id,
             description,
         )
-
-        # Notify the user asynchronously.  The return value of on_permission is
-        # used only to detect a deny/reject choice so the caller can cancel the task.
-        session_id = self._session_id
-
-        async def _notify_user() -> None:
-            try:
-                await on_permission(internal_req)
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                logger.debug(
-                    "ACPRuntime[%s]: permission notification raised: %s",
-                    session_id,
-                    exc,
-                )
-
-        asyncio.create_task(_notify_user(), name=f"perm-notify-{session_id}")
 
     # ------------------------------------------------------------------
     # Control

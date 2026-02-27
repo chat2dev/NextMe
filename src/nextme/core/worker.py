@@ -501,23 +501,24 @@ class SessionWorker:
     # ------------------------------------------------------------------
 
     async def _on_permission(self, req: PermissionRequest) -> PermissionChoice:
-        """Notify the user of a permission event and optionally cancel the task.
+        """Block until the user replies to the permission request.
 
-        For ACP executors (e.g. coco) the permission response is sent to the
-        subprocess BEFORE this method is called (auto-allow to beat the
-        subprocess's internal timeout).  This method:
+        Sends a permission card to the chat, then waits on the session's
+        permission future (resolved when the user clicks a button).
 
-        1. Sends an informational permission card to the chat.
-        2. Waits for the user to click a button.
-        3. If the user chooses a deny/reject option, marks the active task
-           as cancelled so the agent stops after the current tool call.
+        If the user chooses a deny/reject option (label contains "deny" or
+        "reject"), the active task is marked as cancelled so the agent stops
+        processing after the current tool call completes.
+
+        Note: For ACP executors with a short internal permission timeout (e.g.
+        coco ~10 s), ``permission_timeout_seconds`` should be set below that
+        threshold so our response arrives before the executor rejects the call.
 
         Args:
-            req: The permission request forwarded from ACPRuntime.
+            req: The permission request from ACPRuntime.
 
         Returns:
-            The user's :class:`~nextme.protocol.types.PermissionChoice`
-            (returned for callers that still need it, e.g. tests).
+            The user's :class:`~nextme.protocol.types.PermissionChoice`.
         """
         chat_id = self._session.context_id.split(":")[0]
         logger.info(
