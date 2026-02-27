@@ -501,20 +501,27 @@ class SessionWorker:
     # ------------------------------------------------------------------
 
     async def _on_permission(self, req: PermissionRequest) -> PermissionChoice:
-        """Block until the user replies to the permission request.
+        """Notify the user of a permission event and optionally cancel the task.
 
-        Sends a permission card to the chat, then waits on the session's
-        permission future (set when the user sends a numbered reply).
+        For ACP executors (e.g. coco) the permission response is sent to the
+        subprocess BEFORE this method is called (auto-allow to beat the
+        subprocess's internal timeout).  This method:
+
+        1. Sends an informational permission card to the chat.
+        2. Waits for the user to click a button.
+        3. If the user chooses a deny/reject option, marks the active task
+           as cancelled so the agent stops after the current tool call.
 
         Args:
-            req: The permission request from ACPRuntime.
+            req: The permission request forwarded from ACPRuntime.
 
         Returns:
-            The user's :class:`~nextme.protocol.types.PermissionChoice`.
+            The user's :class:`~nextme.protocol.types.PermissionChoice`
+            (returned for callers that still need it, e.g. tests).
         """
         chat_id = self._session.context_id.split(":")[0]
         logger.info(
-            "SessionWorker[%s]: permission request id=%r description=%r",
+            "SessionWorker[%s]: permission notification id=%r description=%r",
             self._session.context_id,
             req.request_id,
             req.description,
@@ -548,14 +555,27 @@ class SessionWorker:
                 timeout=self._settings.permission_timeout_seconds,
             )
             logger.info(
-                "SessionWorker[%s]: permission resolved index=%d",
+                "SessionWorker[%s]: permission choice index=%d label=%r",
                 self._session.context_id,
                 choice.option_index,
+                choice.option_label,
             )
+            # If user chose a deny/reject option, cancel the active task so the
+            # agent stops after the current tool call completes.
+            if 0 < choice.option_index <= len(req.options):
+                chosen_label = req.options[choice.option_index - 1].label
+                if "deny" in chosen_label.lower() or "reject" in chosen_label.lower():
+                    active_task = self._session.active_task
+                    if active_task is not None and not active_task.canceled:
+                        active_task.canceled = True
+                        logger.info(
+                            "SessionWorker[%s]: user denied permission — task marked canceled",
+                            self._session.context_id,
+                        )
             return choice
         except asyncio.TimeoutError:
             logger.warning(
-                "SessionWorker[%s]: permission timed out after %.0fs, defaulting to 1",
+                "SessionWorker[%s]: permission timed out after %.0fs",
                 self._session.context_id,
                 self._settings.permission_timeout_seconds,
             )

@@ -438,8 +438,20 @@ class ACPRuntime:
         msg: dict,
         on_permission: Callable[[PermissionRequest], Awaitable[PermissionChoice]],
     ) -> None:
-        """Parse an inbound ``session/request_permission`` request, call
-        ``on_permission``, and send the chosen response back to cc-acp."""
+        """Parse an inbound ``session/request_permission`` request, respond to
+        the ACP subprocess immediately, and notify the user asynchronously.
+
+        The ACP subprocess (e.g. coco) has a short internal timeout (~10 s) for
+        permission responses.  Blocking on user input before sending the response
+        causes a race: the subprocess fires "Tool call rejected by user" before
+        the user can even read the Feishu card.
+
+        Fix: select the first "allow" option as a default and send the JSON-RPC
+        response to the subprocess immediately.  Then spawn a background task
+        that shows the permission card to the user via ``on_permission``.  If
+        the user chooses a deny/reject option, the active task is cancelled so
+        the agent stops after the current tool call completes.
+        """
         if msg.get("method") != "session/request_permission":
             logger.debug(
                 "ACPRuntime[%s]: ignoring unknown server request %r",
@@ -482,34 +494,46 @@ class ACPRuntime:
             options=perm_options,
         )
 
-        try:
-            choice: PermissionChoice = await asyncio.wait_for(
-                on_permission(internal_req),
-                timeout=self._settings.permission_timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "ACPRuntime[%s]: permission timed out, using first option",
-                self._session_id,
-            )
-            choice = PermissionChoice(request_id="", option_index=1)
-        except Exception as exc:
-            logger.warning(
-                "ACPRuntime[%s]: on_permission raised: %s", self._session_id, exc
-            )
-            choice = PermissionChoice(request_id="", option_index=1)
-
-        # Map the 1-based index back to the option_id string.
-        chosen_index = max(1, choice.option_index) - 1
-        if perm_req.options and chosen_index < len(perm_req.options):
-            option_id = perm_req.options[chosen_index].option_id
-        elif perm_req.options:
-            option_id = perm_req.options[0].option_id
+        # Select the default allow option — prefer the first option whose kind
+        # starts with "allow"; fall back to the very first option.
+        default_allow_idx = next(
+            (i for i, opt in enumerate(perm_req.options) if opt.kind.startswith("allow")),
+            0,
+        )
+        if perm_req.options:
+            default_option_id = perm_req.options[default_allow_idx].option_id
         else:
-            option_id = "allow_once"
+            default_option_id = "allow_once"
 
-        result = permission_response_result(option_id)
+        # Respond to the ACP subprocess immediately so its internal timeout does
+        # not fire before the user interacts with the Feishu card.
+        result = permission_response_result(default_option_id)
         await self._client.send_response(perm_req.jsonrpc_id, result)
+        logger.info(
+            "ACPRuntime[%s]: auto-allowed permission (option=%r, description=%r); "
+            "notifying user async",
+            self._session_id,
+            default_option_id,
+            description,
+        )
+
+        # Notify the user asynchronously.  The return value of on_permission is
+        # used only to detect a deny/reject choice so the caller can cancel the task.
+        session_id = self._session_id
+
+        async def _notify_user() -> None:
+            try:
+                await on_permission(internal_req)
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.debug(
+                    "ACPRuntime[%s]: permission notification raised: %s",
+                    session_id,
+                    exc,
+                )
+
+        asyncio.create_task(_notify_user(), name=f"perm-notify-{session_id}")
 
     # ------------------------------------------------------------------
     # Control

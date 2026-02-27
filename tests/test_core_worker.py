@@ -462,6 +462,58 @@ async def test_on_permission_display_id_empty_when_no_actual_id(worker, session,
     assert call_kwargs["display_id"] == ""
 
 
+async def test_on_permission_deny_cancels_active_task(worker, session, replier):
+    """If the user chooses a deny/reject option, the session's active task is marked canceled."""
+    active_task_obj, _ = make_task("running task")
+    session.active_task = active_task_obj
+
+    req = PermissionRequest(
+        session_id="oc_chat:ou_user",
+        request_id="req-deny",
+        description="Allow dangerous operation?",
+        options=[
+            PermOption(index=1, label="allow_once"),
+            PermOption(index=2, label="deny"),
+        ],
+    )
+
+    async def resolve_later():
+        await asyncio.sleep(0.05)
+        session.resolve_permission(PermissionChoice(request_id="req-deny", option_index=2))
+
+    asyncio.create_task(resolve_later())
+    result = await worker._on_permission(req)
+
+    assert result.option_index == 2
+    assert active_task_obj.canceled is True
+
+
+async def test_on_permission_allow_does_not_cancel_active_task(worker, session, replier):
+    """Allow choices do not mark the active task as canceled."""
+    active_task_obj, _ = make_task("running task")
+    session.active_task = active_task_obj
+
+    req = PermissionRequest(
+        session_id="oc_chat:ou_user",
+        request_id="req-allow",
+        description="Allow safe operation?",
+        options=[
+            PermOption(index=1, label="allow_once"),
+            PermOption(index=2, label="session_level_allow"),
+        ],
+    )
+
+    async def resolve_later():
+        await asyncio.sleep(0.05)
+        session.resolve_permission(PermissionChoice(request_id="req-allow", option_index=1))
+
+    asyncio.create_task(resolve_later())
+    result = await worker._on_permission(req)
+
+    assert result.option_index == 1
+    assert active_task_obj.canceled is False
+
+
 # ---------------------------------------------------------------------------
 # _execute_task integration-style tests
 # ---------------------------------------------------------------------------

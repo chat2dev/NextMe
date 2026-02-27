@@ -502,7 +502,7 @@ async def test_execute_tool_call_calls_on_progress(runtime):
 
 
 async def test_execute_handles_permission_request(runtime):
-    """session/request_permission inbound request triggers on_permission callback."""
+    """session/request_permission triggers immediate allow response + async on_permission notification."""
     mock_client, queue, _ = _setup_runtime_ready(runtime)
     task, _ = make_task("risky")
     perm_calls = []
@@ -532,24 +532,28 @@ async def test_execute_handles_permission_request(runtime):
     await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
 
     await runtime.execute(task, on_progress, on_permission)
+    # Let the background notification task run.
+    await asyncio.sleep(0.05)
 
+    # on_permission is called asynchronously via background task.
     assert len(perm_calls) == 1
     assert perm_calls[0].description == "Run bash command"
-    mock_client.send_response.assert_awaited_once_with(99, {"outcome": {"selected": {"optionId": "allow_once"}}})
-
-
-async def test_execute_permission_timeout_uses_first_option(runtime):
-    mock_client, queue, _ = _setup_runtime_ready(runtime)
-    runtime._settings = Settings(
-        progress_debounce_seconds=0.0,
-        permission_timeout_seconds=0.05,
+    # Response sent immediately with the first "allow" option (before user interaction).
+    mock_client.send_response.assert_awaited_once_with(
+        99, {"outcome": {"selected": {"optionId": "allow_once"}}}
     )
+
+
+async def test_execute_permission_response_sent_immediately_before_user_input(runtime):
+    """Response is sent immediately with the default allow option — user input does not block it."""
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
     task, _ = make_task("risky")
 
     async def on_progress(delta, tool):
         pass
 
     async def on_permission(req):
+        # Simulates a slow user — runs in a background task and does not block execute().
         await asyncio.sleep(9999)
         return PermissionChoice(request_id="", option_index=2)
 
@@ -566,9 +570,10 @@ async def test_execute_permission_timeout_uses_first_option(runtime):
     })
     await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
 
+    # execute() must complete without waiting for the slow on_permission.
     await runtime.execute(task, on_progress, on_permission)
 
-    # Should respond with the first option
+    # Response sent immediately with the first option (no timeout needed).
     mock_client.send_response.assert_awaited_once()
     args = mock_client.send_response.call_args.args
     assert args[1]["outcome"]["selected"]["optionId"] == "allow_once"
