@@ -200,30 +200,45 @@ class SessionWorker:
         except Exception:
             card_id = ""
 
+        streaming_ok = False
         if card_id:
             # Cardkit-first: reference the cardkit card_id from im/v1.
             self._card_id = card_id
             try:
                 if task.message_id:
-                    self._progress_message_id = await self._replier.reply_card_by_id(
+                    sent_id = await self._replier.reply_card_by_id(
                         task.message_id, card_id, in_thread=in_thread
                     )
                 else:
-                    self._progress_message_id = await self._replier.send_card_by_id(
-                        chat_id, card_id
-                    )
-                logger.debug(
-                    "SessionWorker[%s]: streaming card card_id=%s message_id=%s",
-                    self._session.context_id,
-                    card_id,
-                    self._progress_message_id,
-                )
+                    sent_id = await self._replier.send_card_by_id(chat_id, card_id)
             except Exception:
                 logger.exception(
                     "SessionWorker[%s]: failed to send streaming progress card",
                     self._session.context_id,
                 )
-        else:
+                sent_id = ""
+
+            if sent_id:
+                self._progress_message_id = sent_id
+                streaming_ok = True
+                logger.debug(
+                    "SessionWorker[%s]: streaming card card_id=%s message_id=%s",
+                    self._session.context_id,
+                    card_id,
+                    sent_id,
+                )
+            else:
+                # Feishu rejected the card_id reference (e.g. 230099) —
+                # clear streaming mode and fall through to the regular card path.
+                logger.warning(
+                    "SessionWorker[%s]: streaming card send returned empty "
+                    "(card_id=%s), falling back to regular card",
+                    self._session.context_id,
+                    card_id,
+                )
+                self._card_id = None
+
+        if not streaming_ok:
             # Fallback: regular im/v1 card with debounced full-card PATCH.
             self._card_id = None
             initial_card = self._replier.build_progress_card(
@@ -406,15 +421,18 @@ class SessionWorker:
                         exc,
                     )
             if tool_name:
+                # Append a formatted tool-status line inline (avoids the PUT/content
+                # endpoint which returns Feishu 300313 for empty/new elements).
                 self._sequence += 1
-                status = f"_{tool_name} · {elapsed_str}_"
+                status_line = f"\n\n_{tool_name} · {elapsed_str}_"
                 try:
-                    await self._replier.stream_set_status(
-                        self._card_id, status, self._sequence
+                    await self._replier.stream_append_text(
+                        self._card_id, status_line, self._sequence
                     )
                 except Exception as exc:
                     logger.debug(
-                        "SessionWorker[%s]: stream_set_status failed (seq=%d): %s",
+                        "SessionWorker[%s]: stream_append_text (status) failed "
+                        "(seq=%d): %s",
                         self._session.context_id,
                         self._sequence,
                         exc,

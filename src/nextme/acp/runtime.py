@@ -349,6 +349,28 @@ class ACPRuntime:
                             f"ACPRuntime[{self._session_id}]: prompt error: {err_msg}"
                         )
                     final = "".join(accumulated)
+                    if not final:
+                        # Fallback: some ACP implementations embed the output
+                        # directly in the result dict instead of streaming it
+                        # as agent_message_chunk notifications.
+                        result_data = msg.get("result") or {}
+                        for key in ("output", "text", "content"):
+                            val = result_data.get(key, "")
+                            if isinstance(val, str) and val:
+                                final = val
+                                logger.debug(
+                                    "ACPRuntime[%s]: extracted text from result.%s",
+                                    self._session_id,
+                                    key,
+                                )
+                                break
+                        if not final:
+                            logger.debug(
+                                "ACPRuntime[%s]: prompt response has empty accumulated; "
+                                "result=%s",
+                                self._session_id,
+                                str(msg.get("result", {}))[:300],
+                            )
                     logger.debug(
                         "ACPRuntime[%s]: prompt done (len=%d)", self._session_id, len(final)
                     )
@@ -390,9 +412,10 @@ class ACPRuntime:
 
                 else:
                     logger.debug(
-                        "ACPRuntime[%s]: unhandled update type %r",
+                        "ACPRuntime[%s]: unhandled update type %r: %s",
                         self._session_id,
                         update_type,
+                        str(update)[:300],
                     )
 
             # --- session/request_permission (server → client request) ----

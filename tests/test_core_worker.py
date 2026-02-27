@@ -634,14 +634,18 @@ async def test_on_progress_streaming_path_calls_stream_append_text(worker, repli
     replier.update_card.assert_not_awaited()
 
 
-async def test_on_progress_streaming_path_calls_stream_set_status(worker, replier):
-    """When card_id is set, tool_name triggers stream_set_status."""
+async def test_on_progress_streaming_path_appends_tool_status_inline(worker, replier):
+    """When card_id is set, tool_name appends a formatted status line via stream_append_text.
+
+    Previously used stream_set_status (PUT/content) which returned Feishu 300313
+    for empty elements.  Now appends inline to content_el.
+    """
     worker._card_id = "card_abc"
     worker._sequence = 0
-    replier.stream_set_status = AsyncMock()
+    replier.stream_append_text = AsyncMock()
     await worker._on_progress("", "Bash(ls)")
-    replier.stream_set_status.assert_awaited_once()
-    call_args = replier.stream_set_status.call_args
+    replier.stream_append_text.assert_awaited_once()
+    call_args = replier.stream_append_text.call_args
     assert call_args.args[0] == "card_abc"
     assert "Bash(ls)" in call_args.args[1]
     replier.update_card.assert_not_awaited()
@@ -745,6 +749,26 @@ async def test_execute_task_card_id_is_none_after_cardkit_fallback(
     task, _ = make_task("hello")
     await worker._execute_task(task)
     assert worker._card_id is None
+
+
+async def test_execute_task_falls_back_to_regular_card_when_reply_card_by_id_returns_empty(
+    worker, session, replier, acp_registry
+):
+    """When reply_card_by_id returns '' (e.g. Feishu 230099), clears _card_id and uses reply_card.
+
+    This reproduces the scenario where create_card succeeds but the Feishu IM
+    reply endpoint rejects the card_id reference format.
+    """
+    _, mock_runtime = acp_registry
+    replier.create_card = AsyncMock(return_value="card_xyz")
+    replier.reply_card_by_id = AsyncMock(return_value="")  # simulate 230099
+    task, _ = make_task("hello")
+    task.message_id = "om_src_123"
+    task.chat_type = "group"
+    await worker._execute_task(task)
+    # Streaming path failed → _card_id cleared → regular card was used
+    assert worker._card_id is None
+    replier.reply_card.assert_awaited()
 
 
 async def test_execute_task_card_id_set_when_create_card_succeeds(

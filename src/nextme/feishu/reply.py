@@ -456,8 +456,12 @@ class FeishuReplier:
     ) -> str:
         """Return a card JSON for cardkit creation with element IDs and streaming mode.
 
-        Element IDs allow :meth:`stream_append_text` and :meth:`stream_set_status`
-        to target individual elements without re-rendering the whole card.
+        Element IDs allow :meth:`stream_append_text` to target individual elements
+        without re-rendering the whole card.  Tool-call status lines are appended
+        inline to ``content_el`` via :meth:`stream_append_text` (the separate
+        ``status_el`` + PUT/content approach was removed because the Feishu cardkit
+        PUT endpoint returns 300313 for elements with no initial content).
+
         This card must be created via :meth:`create_card` (cardkit API) — **not**
         sent directly via ``im/v1``, which rejects the ``id`` field on elements.
         """
@@ -471,7 +475,6 @@ class FeishuReplier:
             "body": {
                 "elements": [
                     {"tag": "markdown", "content": content, "id": _CONTENT_ELEMENT_ID},
-                    {"tag": "markdown", "content": " ", "id": _STATUS_ELEMENT_ID},
                 ]
             },
         }

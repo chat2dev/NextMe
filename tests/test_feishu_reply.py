@@ -1047,28 +1047,21 @@ class TestBuildStreamingProgressCard:
         elements = parsed["body"]["elements"]
         assert elements[0].get("id") == "content_el"
 
-    def test_status_element_has_id(self):
-        replier, _ = make_replier()
-        parsed = json.loads(replier.build_streaming_progress_card())
-        elements = parsed["body"]["elements"]
-        assert elements[1].get("id") == "status_el"
+    def test_one_element(self):
+        """Streaming card has exactly one body element (content_el only).
 
-    def test_two_elements(self):
+        The separate status_el was removed because the Feishu cardkit PUT/content
+        endpoint returns 300313 for elements with empty/whitespace-only initial
+        content.  Tool-call status is now appended inline to content_el.
+        """
         replier, _ = make_replier()
         parsed = json.loads(replier.build_streaming_progress_card())
-        assert len(parsed["body"]["elements"]) == 2
+        assert len(parsed["body"]["elements"]) == 1
 
     def test_custom_content_in_first_element(self):
         replier, _ = make_replier()
         parsed = json.loads(replier.build_streaming_progress_card(content="loading..."))
         assert parsed["body"]["elements"][0]["content"] == "loading..."
-
-    def test_status_element_initially_whitespace(self):
-        """status_el uses a space as placeholder so Feishu registers the element."""
-        replier, _ = make_replier()
-        parsed = json.loads(replier.build_streaming_progress_card())
-        # Content is a single space (not empty) so cardkit recognises the element ID.
-        assert parsed["body"]["elements"][1]["content"] == " "
 
     def test_non_ascii_content_preserved(self):
         replier, _ = make_replier()
