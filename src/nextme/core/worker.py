@@ -637,14 +637,49 @@ class SessionWorker:
             )
 
     async def _send_result(self, task: Task, content: str) -> None:
-        """Update the progress card to show the final result."""
+        """Update the progress card to show the final result.
+
+        In streaming mode the streaming card already contains all agent output,
+        so we append a compact completion footer instead of sending a second
+        card (which would duplicate the answer).  Non-streaming mode PATCHes
+        the progress card in-place as before.
+        """
         elapsed_s = int(time.monotonic() - self._task_start)
+        elapsed_str = _format_elapsed(elapsed_s)
+
+        if self._card_id:
+            # Streaming mode — finalize in place: append "---\nfooter" to the
+            # existing streaming card so the user sees one card, not two.
+            footer_parts: list[str] = []
+            if self._session.actual_id:
+                footer_parts.append(f"🆔 {self._session.actual_id}")
+            if self._session.executor:
+                footer_parts.append(self._session.executor)
+            footer_parts.append(f"耗时: {elapsed_str}")
+            footer = " | ".join(footer_parts)
+            self._sequence += 1
+            try:
+                await self._replier.stream_append_text(
+                    self._card_id,
+                    f"\n\n---\n{footer}",
+                    self._sequence,
+                )
+                return
+            except Exception as exc:
+                logger.warning(
+                    "SessionWorker[%s]: failed to append result footer to "
+                    "streaming card (%s); falling back to new reply",
+                    self._session.context_id,
+                    exc,
+                )
+                # Fall through to send a new reply card.
+
         result_card = self._replier.build_result_card(
             content=content or "(无输出)",
             title=f"完成 {self._proj}",
             template="blue",
             session_id=self._session.actual_id or "",
-            elapsed=_format_elapsed(elapsed_s),
+            elapsed=elapsed_str,
             executor=self._session.executor,
         )
         await self._update_or_reply(task, result_card)
