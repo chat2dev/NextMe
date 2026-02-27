@@ -507,6 +507,7 @@ class SessionWorker:
             description=req.description,
             options=req.options,
             session_id=self._session.context_id,
+            project_name=self._session.project_name,
         )
         try:
             await self._replier.send_card(chat_id, card)

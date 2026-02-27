@@ -508,7 +508,9 @@ class TaskDispatcher:
     # Public: card action handling
     # ------------------------------------------------------------------
 
-    def handle_card_action(self, session_id: str, index: int) -> None:
+    def handle_card_action(
+        self, session_id: str, index: int, project_name: str = ""
+    ) -> None:
         """Resolve a pending permission via a card button click.
 
         Must be called from the asyncio event loop thread (use
@@ -517,6 +519,9 @@ class TaskDispatcher:
         Args:
             session_id: The ``context_id`` stored in the button ``value``.
             index: The option index the user clicked.
+            project_name: Project name stored in the button ``value``; used to
+                locate the exact session in multi-project setups.  Falls back to
+                searching all sessions for one with a pending permission.
         """
         user_ctx = self._session_registry.get(session_id)
         if user_ctx is None:
@@ -525,21 +530,24 @@ class TaskDispatcher:
             )
             return
 
-        session = user_ctx.get_active_session()
-        if session is None:
-            logger.warning(
-                "handle_card_action: no active session for session_id=%r", session_id
-            )
-            return
+        # Prefer the exact project session; fall back to scanning all sessions
+        # so that cards sent before this fix (without project_name) still work.
+        if project_name and project_name in user_ctx.sessions:
+            candidate = user_ctx.sessions[project_name]
+            sessions_to_check = [candidate]
+        else:
+            sessions_to_check = list(user_ctx.sessions.values())
 
-        if not self._is_permission_reply(session, str(index)):
-            logger.debug(
-                "handle_card_action: no pending permission for session_id=%r",
-                session_id,
-            )
-            return
+        for session in sessions_to_check:
+            if self._is_permission_reply(session, str(index)):
+                self._apply_permission_reply(session, str(index))
+                return
 
-        self._apply_permission_reply(session, str(index))
+        logger.debug(
+            "handle_card_action: no pending permission for session_id=%r project=%r",
+            session_id,
+            project_name,
+        )
 
     # ------------------------------------------------------------------
     # Private: permission reply handling

@@ -100,6 +100,7 @@ class MessageHandler:
 
             session_id: str = value.get("session_id", "")
             index_str: str = value.get("index", "")
+            project_name: str = value.get("project_name", "")
             if not session_id or not index_str:
                 return resp
 
@@ -112,7 +113,7 @@ class MessageHandler:
             loop = self._loop
             if loop is not None and loop.is_running():
                 loop.call_soon_threadsafe(
-                    self._dispatcher.handle_card_action, session_id, index
+                    self._dispatcher.handle_card_action, session_id, index, project_name
                 )
             else:
                 logger.warning("_on_card_action: no running event loop, dropping action")

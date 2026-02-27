@@ -338,6 +338,20 @@ class TestBuildPermissionCard:
         assert btn_value["action"] == "permission_choice"
         assert btn_value["index"] == "2"
 
+    def test_project_name_stored_in_button_value(self):
+        replier, _ = make_replier()
+        opts = [PermOption(index=1, label="Allow")]
+        parsed = json.loads(
+            replier.build_permission_card(
+                "desc", opts, session_id="oc_x:ou_y", project_name="my-proj"
+            )
+        )
+        elements = parsed["body"]["elements"]
+        btn_elements = [e for e in elements if e.get("tag") == "button"]
+        btn_value = btn_elements[0]["value"]
+        assert btn_value["project_name"] == "my-proj"
+        assert btn_value["session_id"] == "oc_x:ou_y"
+
 
 # ---------------------------------------------------------------------------
 # build_error_card

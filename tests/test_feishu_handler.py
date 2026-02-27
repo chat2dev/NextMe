@@ -486,6 +486,7 @@ def make_card_action_data(
     session_id: str = "oc_chat:ou_user",
     index: str = "1",
     tag: str = "button",
+    project_name: str = "",
 ):
     """Build a mock P2CardActionTrigger-shaped object."""
     data = MagicMock()
@@ -496,6 +497,7 @@ def make_card_action_data(
         "action": action_type,
         "session_id": session_id,
         "index": index,
+        "project_name": project_name,
     }
     return data
 
@@ -513,7 +515,7 @@ class TestOnCardAction:
         handler._on_card_action(data)
 
         loop.call_soon_threadsafe.assert_called_once_with(
-            dispatcher.handle_card_action, "oc_abc:ou_xyz", 2
+            dispatcher.handle_card_action, "oc_abc:ou_xyz", 2, ""
         )
 
     def test_non_permission_choice_is_ignored(self):

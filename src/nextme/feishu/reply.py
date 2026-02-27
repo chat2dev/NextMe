@@ -534,6 +534,7 @@ class FeishuReplier:
         description: str,
         options: list[PermOption],
         session_id: str = "",
+        project_name: str = "",
     ) -> str:
         """Return a card JSON string for a permission request with numbered buttons."""
         elements: list[dict] = [
@@ -557,6 +558,7 @@ class FeishuReplier:
                         "action": "permission_choice",
                         "index": str(opt.index),
                         "session_id": session_id,
+                        "project_name": project_name,
                     },
                 }
             )

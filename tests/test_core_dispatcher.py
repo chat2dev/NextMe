@@ -923,3 +923,73 @@ def test_handle_card_action_index_not_in_options_does_not_resolve(
     dispatcher.handle_card_action(session_id, 9)  # index 9 not in options
 
     assert not perm_future.done()
+
+
+def test_handle_card_action_with_project_name_resolves_correct_session(
+    dispatcher, session_registry, config, settings
+):
+    """project_name targets the exact session in a multi-project setup."""
+    from nextme.config.schema import Project
+
+    session_id = "chat_abc:user_xyz"
+    user_ctx = session_registry.get_or_create(session_id)
+    proj_a = config.default_project
+    proj_b = Project(name="other", path=str(proj_a.path), executor="claude-code-acp")
+
+    session_a = user_ctx.get_or_create_session(proj_a, settings)
+    session_b = user_ctx.get_or_create_session(proj_b, settings)
+    # active_project is now "other" (proj_b was set last)
+
+    perm_future_a = session_a.set_permission_pending([PermOption(index=1, label="Allow")])
+    # session_b has no pending permission
+
+    # Pass project_name so we target session_a directly
+    dispatcher.handle_card_action(session_id, 1, project_name=proj_a.name)
+
+    assert perm_future_a.done()
+    assert perm_future_a.result().option_index == 1
+
+
+def test_handle_card_action_without_project_name_scans_all_sessions(
+    dispatcher, session_registry, config, settings
+):
+    """Without project_name, handle_card_action scans all sessions for a pending perm."""
+    from nextme.config.schema import Project
+
+    session_id = "chat_abc:user_xyz"
+    user_ctx = session_registry.get_or_create(session_id)
+    proj_a = config.default_project
+    proj_b = Project(name="other", path=str(proj_a.path), executor="claude-code-acp")
+
+    session_a = user_ctx.get_or_create_session(proj_a, settings)
+    user_ctx.get_or_create_session(proj_b, settings)
+    # active_project is now "other", but session_a has the pending permission
+
+    perm_future_a = session_a.set_permission_pending([PermOption(index=1, label="Allow")])
+
+    # No project_name → falls back to scanning; should find session_a
+    dispatcher.handle_card_action(session_id, 1)
+
+    assert perm_future_a.done()
+
+
+def test_handle_card_action_wrong_project_name_does_not_resolve(
+    dispatcher, session_registry, config, settings
+):
+    """project_name pointing to a session without pending perm is a no-op."""
+    from nextme.config.schema import Project
+
+    session_id = "chat_abc:user_xyz"
+    user_ctx = session_registry.get_or_create(session_id)
+    proj_a = config.default_project
+    proj_b = Project(name="other", path=str(proj_a.path), executor="claude-code-acp")
+
+    session_a = user_ctx.get_or_create_session(proj_a, settings)
+    user_ctx.get_or_create_session(proj_b, settings)
+
+    perm_future_a = session_a.set_permission_pending([PermOption(index=1, label="Allow")])
+
+    # Points to proj_b which has no pending permission
+    dispatcher.handle_card_action(session_id, 1, project_name=proj_b.name)
+
+    assert not perm_future_a.done()  # session_a's future untouched
