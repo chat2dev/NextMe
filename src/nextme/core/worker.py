@@ -570,22 +570,32 @@ class SessionWorker:
     # ------------------------------------------------------------------
 
     async def _update_or_reply(self, task: Task, card_json: str) -> None:
-        """Update the existing progress card in-place, or fall back to a new reply.
+        """Update the existing progress card in-place, or send a new reply.
 
-        Prefers ``update_card`` (PATCH) on the progress card so the user sees
-        one card transition from "思考中..." to the final state rather than two
-        separate messages.
+        For **regular** (non-streaming) progress cards — ``_card_id`` is ``None``:
+        PATCH in place so the user sees one card transition from "思考中..." to the
+        final state.  If PATCH fails for any reason, fall through and send a new
+        reply so the result is never silently dropped.
+
+        For **streaming** (cardkit) progress cards — ``_card_id`` is set:
+        The IM message holds a ``{"card_id":"xxx"}`` reference.  Feishu rejects
+        PATCH requests on such messages with error 230099.  Skip the PATCH and
+        send a new reply directly (the streaming card remains as a progress log).
         """
-        if self._progress_message_id:
+        if self._progress_message_id and self._card_id is None:
+            # Non-streaming: try PATCH in place.
             try:
                 await self._replier.update_card(self._progress_message_id, card_json)
+                return
             except Exception:
                 logger.exception(
-                    "SessionWorker[%s]: failed to update card in-place",
+                    "SessionWorker[%s]: failed to update card in-place, "
+                    "falling back to new reply",
                     self._session.context_id,
                 )
-            return  # always return — never create a second card when progress card exists
-        # Fallback: no progress card at all — send a new reply.
+                # Fall through to send a new reply.
+
+        # Streaming mode or PATCH failed: send a new reply.
         try:
             if task.message_id:
                 await self._replier.reply_card(

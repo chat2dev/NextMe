@@ -163,13 +163,15 @@ async def test_run_dequeues_multiple_tasks(worker, session, acp_registry):
 # ---------------------------------------------------------------------------
 
 async def test_send_result_updates_progress_card_in_place(worker, replier):
-    """Result updates the existing progress card (no new card created)."""
+    """Non-streaming result updates the existing progress card in place (no new card)."""
     worker._progress_message_id = "prog_msg_id"
+    worker._card_id = None  # non-streaming mode: PATCH allowed
     task, _ = make_task("hello")
     await worker._send_result(task, "Great result")
     replier.update_card.assert_awaited_once()
     # update_card called with the progress card id
     assert replier.update_card.call_args.args[0] == "prog_msg_id"
+    replier.reply_card.assert_not_awaited()
 
 
 async def test_send_result_uses_build_result_card(worker, replier):
@@ -201,15 +203,35 @@ async def test_send_result_fallback_uses_reply_card_when_no_progress_card(worker
     replier.update_card.assert_not_awaited()
 
 
-async def test_send_result_no_fallback_when_update_card_fails(worker, replier):
-    """Even if update_card raises, reply_card must NOT be called (no duplicate card)."""
+async def test_send_result_falls_back_to_reply_card_when_update_card_fails(worker, replier):
+    """When update_card raises (e.g. network error), reply_card is used so the result
+    is never silently dropped."""
     worker._progress_message_id = "prog_msg_id"
+    worker._card_id = None  # non-streaming mode
     replier.update_card.side_effect = Exception("API error")
     task, _ = make_task("hello")
     task.message_id = "om_src"
     await worker._send_result(task, "result")
     replier.update_card.assert_awaited_once()
-    replier.reply_card.assert_not_awaited()
+    replier.reply_card.assert_awaited_once()
+
+
+async def test_send_result_sends_new_reply_in_streaming_mode(worker, replier):
+    """In streaming mode (_card_id set), result card goes via reply_card (never update_card).
+
+    The IM message holding the streaming card is a card_id reference; Feishu
+    rejects PATCH on such messages with 230099.
+    """
+    worker._progress_message_id = "om_streaming_msg"
+    worker._card_id = "ck_card_123"          # streaming mode
+    task, _ = make_task("hello")
+    task.message_id = "om_original_src"
+    await worker._send_result(task, "great result")
+    replier.update_card.assert_not_awaited()
+    replier.reply_card.assert_awaited_once()
+    # Result must be delivered to original message thread, not the streaming card.
+    call_kwargs = replier.reply_card.call_args.kwargs
+    assert replier.reply_card.call_args.args[0] == "om_original_src"
 
 
 # ---------------------------------------------------------------------------
@@ -691,7 +713,8 @@ async def test_on_progress_no_streaming_when_card_id_none(worker, replier):
 async def test_execute_task_uses_reply_card_by_id_for_group_chat_when_create_card_succeeds(
     worker, session, replier, acp_registry
 ):
-    """Group chat + create_card succeeds → uses reply_card_by_id and sets _card_id."""
+    """Group chat + create_card succeeds → uses reply_card_by_id for progress and
+    reply_card for the final result (streaming cards can't be PATCHed)."""
     _, mock_runtime = acp_registry
     replier.create_card = AsyncMock(return_value="card_xyz")
     replier.reply_card_by_id = AsyncMock(return_value="om_streaming_123")
@@ -702,7 +725,8 @@ async def test_execute_task_uses_reply_card_by_id_for_group_chat_when_create_car
     replier.reply_card_by_id.assert_awaited_once()
     call_kwargs = replier.reply_card_by_id.call_args.kwargs
     assert call_kwargs.get("in_thread") is True
-    replier.reply_card.assert_not_awaited()
+    # Result card is sent as a new reply (streaming card can't be PATCHed).
+    replier.reply_card.assert_awaited_once()
     replier.send_card.assert_not_awaited()
     assert worker._card_id == "card_xyz"
 
@@ -710,7 +734,8 @@ async def test_execute_task_uses_reply_card_by_id_for_group_chat_when_create_car
 async def test_execute_task_uses_reply_card_by_id_for_p2p_chat_when_create_card_succeeds(
     worker, session, replier, acp_registry
 ):
-    """P2P chat + create_card succeeds → uses reply_card_by_id with in_thread=False."""
+    """P2P chat + create_card succeeds → uses reply_card_by_id with in_thread=False;
+    result card sent via reply_card (streaming cards can't be PATCHed)."""
     _, mock_runtime = acp_registry
     replier.create_card = AsyncMock(return_value="card_xyz")
     replier.reply_card_by_id = AsyncMock(return_value="om_streaming_p2p")
@@ -721,13 +746,14 @@ async def test_execute_task_uses_reply_card_by_id_for_p2p_chat_when_create_card_
     replier.reply_card_by_id.assert_awaited_once()
     call_kwargs = replier.reply_card_by_id.call_args.kwargs
     assert call_kwargs.get("in_thread") is False
-    replier.reply_card.assert_not_awaited()
+    replier.reply_card.assert_awaited_once()  # result card via new reply
 
 
 async def test_execute_task_uses_send_card_by_id_when_no_message_id_and_create_card_succeeds(
     worker, session, replier, acp_registry
 ):
-    """No message_id + create_card succeeds → uses send_card_by_id."""
+    """No message_id + create_card succeeds → uses send_card_by_id for progress;
+    result sent via send_card (streaming cards can't be PATCHed)."""
     _, mock_runtime = acp_registry
     replier.create_card = AsyncMock(return_value="card_xyz")
     replier.send_card_by_id = AsyncMock(return_value="om_by_id_456")
@@ -735,7 +761,7 @@ async def test_execute_task_uses_send_card_by_id_when_no_message_id_and_create_c
     # message_id defaults to ""
     await worker._execute_task(task)
     replier.send_card_by_id.assert_awaited_once()
-    replier.send_card.assert_not_awaited()
+    replier.send_card.assert_awaited_once()  # result card via send_card
     replier.reply_card_by_id.assert_not_awaited()
     assert worker._card_id == "card_xyz"
 
