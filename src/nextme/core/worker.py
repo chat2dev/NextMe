@@ -586,6 +586,7 @@ class SessionWorker:
             template="blue",
             session_id=self._session.actual_id or "",
             elapsed=_format_elapsed(elapsed_s),
+            executor=self._session.executor,
         )
         await self._update_or_reply(task, result_card)
 

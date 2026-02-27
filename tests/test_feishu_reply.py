@@ -747,6 +747,53 @@ class TestBuildResultCardElapsed:
         assert footer_md is not None
         assert "2m" in footer_md["content"]
 
+    def test_executor_appears_between_session_id_and_elapsed(self):
+        replier, _ = make_replier()
+        parsed = json.loads(
+            replier.build_result_card(
+                "content", session_id="sess1", executor="claude", elapsed="3s"
+            )
+        )
+        elements = parsed["body"]["elements"]
+        footer_md = next(
+            (e for e in elements if e.get("tag") == "markdown" and "sess1" in e.get("content", "")),
+            None,
+        )
+        assert footer_md is not None
+        content = footer_md["content"]
+        assert "claude" in content
+        assert "3s" in content
+        # Order: session_id | executor | elapsed
+        assert content.index("sess1") < content.index("claude") < content.index("3s")
+
+    def test_executor_without_session_id(self):
+        replier, _ = make_replier()
+        parsed = json.loads(
+            replier.build_result_card("content", executor="coco", elapsed="1s")
+        )
+        elements = parsed["body"]["elements"]
+        footer_md = next(
+            (e for e in elements if e.get("tag") == "markdown" and "coco" in e.get("content", "")),
+            None,
+        )
+        assert footer_md is not None
+        assert "1s" in footer_md["content"]
+
+    def test_empty_executor_not_shown(self):
+        replier, _ = make_replier()
+        parsed = json.loads(
+            replier.build_result_card("content", session_id="s", executor="", elapsed="1s")
+        )
+        elements = parsed["body"]["elements"]
+        footer_md = next(
+            (e for e in elements if e.get("tag") == "markdown" and "耗时" in e.get("content", "")),
+            None,
+        )
+        assert footer_md is not None
+        parts = footer_md["content"].split(" | ")
+        # Should be: session_id | elapsed (no empty executor part)
+        assert len(parts) == 2
+
 
 # ---------------------------------------------------------------------------
 # get_card_id / stream_append_text / stream_set_status (async)

@@ -485,6 +485,7 @@ class FeishuReplier:
         reasoning: str = "",
         session_id: str = "",
         elapsed: str = "",
+        executor: str = "",
     ) -> str:
         """Return a card JSON string for the final result."""
         elements: list[dict] = [
@@ -508,6 +509,8 @@ class FeishuReplier:
         footer_parts: list[str] = []
         if session_id:
             footer_parts.append(f"🆔 {session_id}")
+        if executor:
+            footer_parts.append(executor)
         if elapsed:
             footer_parts.append(f"耗时: {elapsed}")
         if footer_parts:
