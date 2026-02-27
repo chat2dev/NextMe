@@ -119,7 +119,8 @@ cp nextme.json.example nextme.json
       "im:message:send_multi_users",
       "im:message:send_sys_msg",
       "im:message:update",
-      "im:resource"
+      "im:resource",
+      "cardkit:card:write"
     ],
     "user": [
       "contact:user.employee_id:readonly",
@@ -148,6 +149,7 @@ cp nextme.json.example nextme.json
 | `im:chat:read` | 读取群组信息 |
 | `im:chat:update` | 更新群组信息 |
 | `im:resource` | 上传/下载消息资源 |
+| `cardkit:card:write` | 创建和更新交互式卡片（流式进度） |
 | `contact:contact.base:readonly` | 读取基础联系人信息 |
 | `docx:document:readonly` | 读取飞书文档内容 |
 | `contact:user.employee_id:readonly` | 读取用户工号（用户权限） |

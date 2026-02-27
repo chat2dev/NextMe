@@ -119,7 +119,8 @@ Go to **Permissions & Scopes**. You can import all required scopes at once using
       "im:message:send_multi_users",
       "im:message:send_sys_msg",
       "im:message:update",
-      "im:resource"
+      "im:resource",
+      "cardkit:card:write"
     ],
     "user": [
       "contact:user.employee_id:readonly",
@@ -148,6 +149,7 @@ Scope reference:
 | `im:chat:read` | Read chat info |
 | `im:chat:update` | Update chat info |
 | `im:resource` | Upload / download message resources |
+| `cardkit:card:write` | Create and update interactive cards (streaming progress) |
 | `contact:contact.base:readonly` | Read basic contact info |
 | `docx:document:readonly` | Read Feishu Docs content |
 | `contact:user.employee_id:readonly` | Read user employee ID (user scope) |
