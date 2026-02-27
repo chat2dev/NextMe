@@ -272,11 +272,12 @@ Reply with the corresponding number to continue.
 | `app_secret` | string | Feishu App Secret |
 | `projects` | array | Project list (`name` / `path` / `executor`) |
 | `bindings` | object | Static chat→project bindings (`chat_id: project_name`) |
+| `executor_args` | array | Extra arguments appended to the executor command (e.g. `["acp", "serve"]`) |
 
 `executor` values:
 - `"claude"` (default) — DirectClaudeRuntime, uses local `claude` CLI
 - `"cc-acp"` — ACPRuntime, uses `cc-acp` subprocess (JSON-RPC 2.0)
-- `"coco"` — ACPRuntime, uses `coco` subprocess (JSON-RPC 2.0 / ACP protocol)
+- `"coco"` — ACPRuntime, uses `coco` subprocess (JSON-RPC 2.0 / ACP protocol); use `executor_args` for sub-commands
 
 **Multi-project example:**
 
@@ -287,7 +288,8 @@ Reply with the corresponding number to continue.
   "projects": [
     {"name": "backend", "path": "/path/to/backend"},
     {"name": "frontend", "path": "/path/to/frontend"},
-    {"name": "infra", "path": "/path/to/infra"}
+    {"name": "infra", "path": "/path/to/infra"},
+    {"name": "ai-agent", "path": "/path/to/ai", "executor": "coco", "executor_args": ["acp", "serve"]}
   ],
   "bindings": {
     "oc_groupchat_devops": "infra"

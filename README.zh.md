@@ -272,11 +272,12 @@ Agent 即将执行：...
 | `app_secret` | string | 飞书 App Secret |
 | `projects` | array | 项目列表（`name` / `path` / `executor`） |
 | `bindings` | object | 静态聊天→项目绑定（`chat_id: project_name`） |
+| `executor_args` | array | 追加到执行器命令的额外参数（例如 `["acp", "serve"]`） |
 
 `executor` 可选值：
 - `"claude"`（默认）— DirectClaudeRuntime，使用本地 `claude` CLI
 - `"cc-acp"` — ACPRuntime，通过 `cc-acp` 子进程（JSON-RPC 2.0）
-- `"coco"` — ACPRuntime，通过 `coco` 子进程（JSON-RPC 2.0 / ACP 协议）
+- `"coco"` — ACPRuntime，通过 `coco` 子进程（JSON-RPC 2.0 / ACP 协议）；子命令通过 `executor_args` 传入
 
 **多项目示例：**
 
@@ -287,7 +288,8 @@ Agent 即将执行：...
   "projects": [
     {"name": "backend", "path": "/path/to/backend"},
     {"name": "frontend", "path": "/path/to/frontend"},
-    {"name": "infra", "path": "/path/to/infra"}
+    {"name": "infra", "path": "/path/to/infra"},
+    {"name": "ai-agent", "path": "/path/to/ai", "executor": "coco", "executor_args": ["acp", "serve"]}
   ],
   "bindings": {
     "oc_groupchat_devops": "infra"

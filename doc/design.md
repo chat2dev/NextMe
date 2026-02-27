@@ -128,9 +128,9 @@ Feishu User ──WebSocket──▶ FeishuClient
                        PathLockRegistry.get(project_path)
                                 │ (async acquire, prevents concurrent writes from multiple Sessions)
                                 ▼
-                       ACPRuntimeRegistry.get_or_create(executor)
-                        - executor="claude" → DirectClaudeRuntime
-                        - executor="cc-acp" → ACPRuntime
+                       ACPRuntimeRegistry.get_or_create(executor, executor_args)
+                        - executor="claude"              → DirectClaudeRuntime
+                        - executor="cc-acp" / "coco"    → ACPRuntime (cmd = [executor, *executor_args])
                                 │
               ┌─────────────────┴──────────────────┐
               │ DirectClaudeRuntime (default)        │ ACPRuntime (alternative)
@@ -155,12 +155,16 @@ Feishu User ──WebSocket──▶ FeishuClient
 |----------------|---------|---------|
 | `"claude"` (default) | `DirectClaudeRuntime` | stream-json ndjson |
 | `"cc-acp"` / `"claude-code-acp"` | `ACPRuntime` | JSON-RPC 2.0 |
+| `"coco"` | `ACPRuntime` | JSON-RPC 2.0 / ACP |
+
+`executor_args` (optional `list[str]`) appends extra arguments to the subprocess command. Example: `executor="coco"` + `executor_args=["acp", "serve"]` → runs `coco acp serve`.
 
 Configuration example (`~/.nextme/nextme.json`):
 ```json
 {
   "projects": [
-    {"name": "my-project", "path": "/path/to/project", "executor": "claude"}
+    {"name": "my-project",  "path": "/path/to/project", "executor": "claude"},
+    {"name": "ai-agent",    "path": "/path/to/ai",      "executor": "coco", "executor_args": ["acp", "serve"]}
   ]
 }
 ```
@@ -409,7 +413,8 @@ class Session:
     context_id: str           # "chatID:userID"
     project_name: str
     project_path: Path
-    executor: str             # "claude" (default) or "cc-acp"
+    executor: str             # "claude" / "cc-acp" / "coco"
+    executor_args: list[str]  # extra args appended to executor command
     salt: str                 # random value for deterministic session ID generation
     actual_id: str            # session UUID returned by claude (used for --resume)
     status: TaskStatus
@@ -492,9 +497,10 @@ tools_denylist: []
 ```
 
 ### Discovery Priority (high → low)
-1. `{project_path}/.nextme/skills/*.md`
-2. `~/.nextme/skills/*.md`
-3. `{package_dir}/skills/*.md` (built-in)
+1. `{project_path}/.nextme/skills/*.md` — project-local
+2. `~/.nextme/skills/*.md` — NextMe global
+3. `~/.claude/skills/<name>/SKILL.md` — executor global (claude executor only)
+4. `{package_dir}/skills/*.md` — built-in
 
 ### Built-in Skills
 | Trigger | Function |
@@ -521,7 +527,8 @@ tools_denylist: []
   "app_id": "cli_xxx",
   "app_secret": "xxxxx",
   "projects": [
-    {"name": "my-api", "path": "/abs/path/to/project", "executor": "claude"}
+    {"name": "my-api",    "path": "/abs/path/to/project", "executor": "claude"},
+    {"name": "ai-agent",  "path": "/abs/path/to/ai",      "executor": "coco", "executor_args": ["acp", "serve"]}
   ]
 }
 ```
@@ -614,7 +621,8 @@ brotli = ["brotli>=1.0"]    # optional: brotli compression
 
 External tool dependencies (must be installed by the user):
 - `claude` (`npm install -g @anthropic-ai/claude-code`, v2+ recommended)
-- `cc-acp` (optional alternative, `npm install -g @zed-industries/claude-code-acp`)
+- `cc-acp` (optional, `npm install -g @zed-industries/claude-code-acp`)
+- `coco` (optional, ACP-compatible code agent CLI; invoke with `executor_args: ["acp", "serve"]`)
 
 ---
 
