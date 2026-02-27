@@ -1050,11 +1050,12 @@ class TestBuildStreamingProgressCard:
         parsed = json.loads(replier.build_streaming_progress_card(title="Custom Title"))
         assert parsed["header"]["title"]["content"] == "Custom Title"
 
-    def test_content_element_has_id(self):
+    def test_content_element_has_element_id(self):
         replier, _ = make_replier()
         parsed = json.loads(replier.build_streaming_progress_card())
         elements = parsed["body"]["elements"]
-        assert elements[0].get("id") == "content_el"
+        assert elements[0].get("element_id") == "content_el"
+        assert "id" not in elements[0]  # "id" is not recognized by IM renderer
 
     def test_one_element(self):
         """Streaming card has exactly one body element (content_el only).

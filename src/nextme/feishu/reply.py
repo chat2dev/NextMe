@@ -479,7 +479,7 @@ class FeishuReplier:
             },
             "body": {
                 "elements": [
-                    {"tag": "markdown", "content": content, "id": _CONTENT_ELEMENT_ID},
+                    {"tag": "markdown", "content": content, "element_id": _CONTENT_ELEMENT_ID},
                 ]
             },
         }
