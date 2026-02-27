@@ -506,8 +506,9 @@ class SessionWorker:
         card = self._replier.build_permission_card(
             description=req.description,
             options=req.options,
-            session_id=self._session.context_id,
+            session_id=self._session.actual_id or "",
             project_name=self._session.project_name,
+            executor=self._session.executor,
         )
         try:
             await self._replier.send_card(chat_id, card)

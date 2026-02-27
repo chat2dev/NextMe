@@ -535,6 +535,7 @@ class FeishuReplier:
         options: list[PermOption],
         session_id: str = "",
         project_name: str = "",
+        executor: str = "",
     ) -> str:
         """Return a card JSON string for a permission request with numbered buttons."""
         elements: list[dict] = [
@@ -559,14 +560,21 @@ class FeishuReplier:
                         "index": str(opt.index),
                         "session_id": session_id,
                         "project_name": project_name,
+                        "label": label,
+                        "executor": executor,
                     },
                 }
             )
 
+        footer_parts: list[str] = []
         if session_id:
+            footer_parts.append(f"🆔 {session_id}")
+        if executor:
+            footer_parts.append(executor)
+        if footer_parts:
             elements.append({"tag": "hr"})
             elements.append(
-                {"tag": "markdown", "content": f"🆔 {session_id}"}
+                {"tag": "markdown", "content": " | ".join(footer_parts)}
             )
 
         card = {

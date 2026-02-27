@@ -16,9 +16,10 @@ from typing import Any, Protocol
 
 import lark_oapi as lark
 from lark_oapi.event.callback.model.p2_card_action_trigger import (
+    CallBackCard,
+    CallBackToast,
     P2CardActionTrigger,
     P2CardActionTriggerResponse,
-    CallBackToast,
 )
 
 from nextme.feishu.dedup import MessageDedup
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 class _Dispatcher(Protocol):
     async def dispatch(self, task: Task) -> None: ...
-    def handle_card_action(self, session_id: str, index: int) -> None: ...
+    def handle_card_action(self, session_id: str, index: int, project_name: str = "") -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +87,9 @@ class MessageHandler:
         """Handle a card button click (card.action.trigger).
 
         Resolves a pending permission request when the user clicks a permission
-        card button.  The response returns a toast to acknowledge the click.
+        card button.  The response returns a toast and an updated card that
+        replaces the buttons with a confirmation message so they cannot be
+        clicked again.
         """
         resp = P2CardActionTriggerResponse()
         try:
@@ -101,6 +104,8 @@ class MessageHandler:
             session_id: str = value.get("session_id", "")
             index_str: str = value.get("index", "")
             project_name: str = value.get("project_name", "")
+            label: str = value.get("label", index_str)
+            executor: str = value.get("executor", "")
             if not session_id or not index_str:
                 return resp
 
@@ -121,6 +126,34 @@ class MessageHandler:
             resp.toast = CallBackToast()
             resp.toast.type = "info"
             resp.toast.content = "已收到"
+
+            # Return an updated card that replaces the buttons with a
+            # confirmation message so the user cannot click again.
+            confirmed_elements: list[dict] = [
+                {"tag": "markdown", "content": f"✅ 已选择: {label}"},
+            ]
+            footer_parts: list[str] = []
+            if session_id:
+                footer_parts.append(f"🆔 {session_id}")
+            if executor:
+                footer_parts.append(executor)
+            if footer_parts:
+                confirmed_elements.append({"tag": "hr"})
+                confirmed_elements.append(
+                    {"tag": "markdown", "content": " | ".join(footer_parts)}
+                )
+            confirmed_card = {
+                "schema": "2.0",
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": "需要授权"},
+                    "template": "orange",
+                },
+                "body": {"elements": confirmed_elements},
+            }
+            resp.card = CallBackCard()
+            resp.card.type = "raw"
+            resp.card.data = confirmed_card
         except Exception:
             logger.exception("Unhandled error in _on_card_action")
         return resp

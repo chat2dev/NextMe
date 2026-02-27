@@ -352,6 +352,71 @@ class TestBuildPermissionCard:
         assert btn_value["project_name"] == "my-proj"
         assert btn_value["session_id"] == "oc_x:ou_y"
 
+    def test_label_stored_in_button_value(self):
+        replier, _ = make_replier()
+        opts = [PermOption(index=1, label="Allow", description="Full access")]
+        parsed = json.loads(replier.build_permission_card("desc", opts))
+        elements = parsed["body"]["elements"]
+        btn_elements = [e for e in elements if e.get("tag") == "button"]
+        btn_value = btn_elements[0]["value"]
+        assert "label" in btn_value
+        assert "Allow" in btn_value["label"]
+        assert "Full access" in btn_value["label"]
+
+    def test_executor_stored_in_button_value(self):
+        replier, _ = make_replier()
+        opts = [PermOption(index=1, label="Allow")]
+        parsed = json.loads(
+            replier.build_permission_card("desc", opts, executor="claude")
+        )
+        elements = parsed["body"]["elements"]
+        btn_elements = [e for e in elements if e.get("tag") == "button"]
+        btn_value = btn_elements[0]["value"]
+        assert btn_value["executor"] == "claude"
+
+    def test_executor_appears_in_footer(self):
+        replier, _ = make_replier()
+        opts = self._make_options(1)
+        parsed = json.loads(
+            replier.build_permission_card(
+                "desc", opts, session_id="sid-1", executor="coco"
+            )
+        )
+        elements = parsed["body"]["elements"]
+        footer_elements = [
+            e for e in elements
+            if e.get("tag") == "markdown" and "coco" in e.get("content", "")
+        ]
+        assert len(footer_elements) == 1
+
+    def test_footer_uses_pipe_separator(self):
+        replier, _ = make_replier()
+        opts = self._make_options(1)
+        parsed = json.loads(
+            replier.build_permission_card(
+                "desc", opts, session_id="sid-1", executor="claude"
+            )
+        )
+        elements = parsed["body"]["elements"]
+        footer_elements = [
+            e for e in elements
+            if e.get("tag") == "markdown" and "🆔" in e.get("content", "")
+        ]
+        assert len(footer_elements) == 1
+        assert " | " in footer_elements[0]["content"]
+        assert "claude" in footer_elements[0]["content"]
+
+    def test_no_footer_when_no_session_id_or_executor(self):
+        replier, _ = make_replier()
+        opts = self._make_options(1)
+        parsed = json.loads(replier.build_permission_card("desc", opts))
+        elements = parsed["body"]["elements"]
+        footer_md = [
+            e for e in elements
+            if e.get("tag") == "markdown" and "🆔" in e.get("content", "")
+        ]
+        assert len(footer_md) == 0
+
 
 # ---------------------------------------------------------------------------
 # build_error_card

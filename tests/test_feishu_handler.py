@@ -487,6 +487,8 @@ def make_card_action_data(
     index: str = "1",
     tag: str = "button",
     project_name: str = "",
+    label: str = "1. Allow",
+    executor: str = "claude",
 ):
     """Build a mock P2CardActionTrigger-shaped object."""
     data = MagicMock()
@@ -498,6 +500,8 @@ def make_card_action_data(
         "session_id": session_id,
         "index": index,
         "project_name": project_name,
+        "label": label,
+        "executor": executor,
     }
     return data
 
@@ -596,3 +600,75 @@ class TestOnCardAction:
         resp = handler._on_card_action(data)
 
         assert isinstance(resp, P2CardActionTriggerResponse)
+
+    def test_returns_confirmed_card_in_response(self):
+        """Permission choice should return a card update that disables the buttons."""
+        from lark_oapi.event.callback.model.p2_card_action_trigger import CallBackCard
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_card_action = MagicMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = make_card_action_data(label="1. Allow", executor="claude")
+        resp = handler._on_card_action(data)
+
+        assert resp.card is not None
+        assert isinstance(resp.card, CallBackCard)
+        assert resp.card.type == "raw"
+        assert isinstance(resp.card.data, dict)
+
+    def test_confirmed_card_contains_selected_label(self):
+        """The confirmed card body should show which option was selected."""
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_card_action = MagicMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = make_card_action_data(label="2. Deny — Reject all", index="2")
+        resp = handler._on_card_action(data)
+
+        card_data = resp.card.data
+        elements = card_data["body"]["elements"]
+        content_elements = [e for e in elements if e.get("tag") == "markdown"]
+        assert any("2. Deny — Reject all" in e.get("content", "") for e in content_elements)
+
+    def test_confirmed_card_footer_contains_session_id_and_executor(self):
+        """The confirmed card footer should show session_id and executor."""
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_card_action = MagicMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = make_card_action_data(
+            session_id="sess-123", executor="coco", label="1. Allow"
+        )
+        resp = handler._on_card_action(data)
+
+        card_data = resp.card.data
+        elements = card_data["body"]["elements"]
+        footer_elements = [
+            e for e in elements
+            if e.get("tag") == "markdown" and "sess-123" in e.get("content", "")
+        ]
+        assert len(footer_elements) == 1
+        assert "coco" in footer_elements[0]["content"]
+
+    def test_non_permission_action_returns_no_card(self):
+        """Non-permission actions should not set a card update in the response."""
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_card_action = MagicMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = make_card_action_data(action_type="other_action")
+        resp = handler._on_card_action(data)
+
+        assert resp.card is None
