@@ -953,6 +953,39 @@ class TestGetCardId:
         assert result == ""
 
 
+class TestEnableStreamingMode:
+    async def test_success_calls_asettings(self):
+        """enable_streaming_mode uses PATCH /cards/:id/settings, not card JSON."""
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        mock_client.cardkit.v1.card.asettings = AsyncMock(return_value=ok)
+
+        result = await replier.enable_streaming_mode("card_abc")
+
+        assert result is True
+        mock_client.cardkit.v1.card.asettings.assert_awaited_once()
+        # Verify streaming_mode: true is in the settings JSON
+        call_body = mock_client.cardkit.v1.card.asettings.call_args.args[0].request_body
+        settings_dict = json.loads(call_body.settings)
+        assert settings_dict["config"]["streaming_mode"] is True
+
+    async def test_failure_returns_false(self, caplog):
+        import logging
+        replier, mock_client = make_replier()
+        fail = MagicMock()
+        fail.success.return_value = False
+        fail.code = 500
+        fail.msg = "not supported"
+        mock_client.cardkit.v1.card.asettings = AsyncMock(return_value=fail)
+
+        with caplog.at_level(logging.WARNING, logger="nextme.feishu.reply"):
+            result = await replier.enable_streaming_mode("card_xyz")
+
+        assert result is False
+        assert "enable_streaming_mode failed" in caplog.text
+
+
 class TestStreamSetContent:
     async def test_success_calls_acontent(self):
         """stream_set_content uses PUT /elements/:id/content (the typewriter API)."""
@@ -996,10 +1029,11 @@ class TestBuildStreamingProgressCard:
         parsed = json.loads(replier.build_streaming_progress_card())
         assert parsed["schema"] == "2.0"
 
-    def test_streaming_mode_enabled(self):
+    def test_streaming_mode_not_in_card_json(self):
+        """streaming_mode must NOT be in the card JSON — IM renderer rejects it."""
         replier, _ = make_replier()
         parsed = json.loads(replier.build_streaming_progress_card())
-        assert parsed["config"]["streaming_mode"] is True
+        assert "streaming_mode" not in parsed.get("config", {})
 
     def test_header_template_is_yellow(self):
         replier, _ = make_replier()

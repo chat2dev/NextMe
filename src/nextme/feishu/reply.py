@@ -17,6 +17,8 @@ from lark_oapi.api.cardkit.v1 import (
     CreateCardRequestBody,
     IdConvertCardRequest,
     IdConvertCardRequestBody,
+    SettingsCardRequest,
+    SettingsCardRequestBody,
 )
 from lark_oapi.api.im.v1 import (
     CreateMessageRequest,
@@ -128,10 +130,10 @@ class FeishuReplier:
         """Create a card via the cardkit API and return its *card_id*.
 
         The card JSON should be built with :meth:`build_streaming_progress_card`
-        (includes element ``id`` fields and ``streaming_mode: true``).  Once
-        created, the card can be sent to a chat via :meth:`send_card_by_id` or
-        :meth:`reply_card_by_id` and updated element-by-element via
-        :meth:`stream_append_text` / :meth:`stream_set_status`.
+        (includes element ``id`` fields).  Once created, call
+        :meth:`enable_streaming_mode` to lift Feishu QPS limits, then send the
+        card via :meth:`send_card_by_id` or :meth:`reply_card_by_id` and update
+        element-by-element via :meth:`stream_set_content`.
 
         Returns ``""`` on failure (caller falls back to regular card flow).
         """
@@ -156,6 +158,41 @@ class FeishuReplier:
         card_id: str = response.data.card_id or ""  # type: ignore[union-attr]
         logger.debug("create_card -> card_id=%s", card_id)
         return card_id
+
+    async def enable_streaming_mode(self, card_id: str) -> bool:
+        """Enable streaming mode on a cardkit card entity via PATCH /settings.
+
+        ``streaming_mode`` must NOT be placed inside the card content JSON,
+        because the IM renderer doesn't recognise it and rejects the card with
+        error 200621 "parse card json err".  Setting it via the settings API
+        instead lifts the Feishu QPS limit for PUT /content calls on this card.
+
+        Returns ``True`` on success, ``False`` on failure (streaming continues
+        but QPS limits may apply).
+        """
+        settings_json = json.dumps({"config": {"streaming_mode": True}})
+        request = (
+            SettingsCardRequest.builder()
+            .card_id(card_id)
+            .request_body(
+                SettingsCardRequestBody.builder()
+                .settings(settings_json)
+                .sequence(1)
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.cardkit.v1.card.asettings(request)
+        if not response.success():
+            logger.warning(
+                "enable_streaming_mode failed: card_id=%s code=%s msg=%s",
+                card_id,
+                response.code,
+                response.msg,
+            )
+            return False
+        logger.debug("enable_streaming_mode ok: card_id=%s", card_id)
+        return True
 
     async def send_card_by_id(self, chat_id: str, card_id: str) -> str:
         """Send a cardkit card (referenced by *card_id*) to *chat_id*.
@@ -425,20 +462,17 @@ class FeishuReplier:
         content: str = "思考中...",
         title: str = "思考中...",
     ) -> str:
-        """Return a card JSON for cardkit creation with element IDs and streaming mode.
+        """Return a card JSON for cardkit creation with element IDs for streaming.
 
-        Element IDs allow :meth:`stream_append_text` to target individual elements
-        without re-rendering the whole card.  Tool-call status lines are appended
-        inline to ``content_el`` via :meth:`stream_append_text` (the separate
-        ``status_el`` + PUT/content approach was removed because the Feishu cardkit
-        PUT endpoint returns 300313 for elements with no initial content).
-
-        This card must be created via :meth:`create_card` (cardkit API) — **not**
-        sent directly via ``im/v1``, which rejects the ``id`` field on elements.
+        ``streaming_mode`` is intentionally absent from the card JSON — the IM
+        renderer rejects unknown config fields (error 200621).  It is enabled
+        separately on the card entity via :meth:`enable_streaming_mode` after
+        creation.  Element IDs allow :meth:`stream_set_content` to target the
+        content element via the PUT /content typewriter API.
         """
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True, "streaming_mode": True},
+            "config": {"wide_screen_mode": True},
             "header": {
                 "title": {"tag": "plain_text", "content": title},
                 "template": "yellow",

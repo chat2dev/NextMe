@@ -199,6 +199,10 @@ class SessionWorker:
 
         # Step 1 — Try cardkit-first (true streaming) then fall back to a
         # regular im/v1 card with debounced full-card updates.
+        #
+        # Note: streaming_mode MUST be set via enable_streaming_mode() AFTER
+        # card creation — embedding it in the card JSON causes the IM renderer
+        # to reject the card with error 200621 "parse card json err".
         chat_id = self._session.context_id.split(":")[0]
         try:
             streaming_card = self._replier.build_streaming_progress_card(
@@ -211,6 +215,18 @@ class SessionWorker:
 
         streaming_ok = False
         if card_id:
+            # Enable streaming mode on the card entity (lifts QPS limits for
+            # PUT /content calls). Failure is non-fatal; streaming still works
+            # but QPS limits may apply.
+            try:
+                await self._replier.enable_streaming_mode(card_id)
+            except Exception as exc:
+                logger.warning(
+                    "SessionWorker[%s]: enable_streaming_mode failed: %s",
+                    self._session.context_id,
+                    exc,
+                )
+
             # Cardkit-first: reference the cardkit card_id from im/v1.
             self._card_id = card_id
             try:

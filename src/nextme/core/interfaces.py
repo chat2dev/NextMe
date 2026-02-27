@@ -70,6 +70,14 @@ class Replier(Protocol):
         """Create a card via cardkit. Returns card_id, or '' on failure."""
         ...
 
+    async def enable_streaming_mode(self, card_id: str) -> bool:
+        """Enable streaming mode on a cardkit card entity (lifts QPS limits).
+
+        Must be called after :meth:`create_card` and before any
+        :meth:`stream_set_content` calls.  Returns ``True`` on success.
+        """
+        ...
+
     async def send_card_by_id(self, chat_id: str, card_id: str) -> str:
         """Send a cardkit card referenced by card_id to chat_id. Returns message_id."""
         ...
