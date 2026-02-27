@@ -87,12 +87,12 @@ class Replier(Protocol):
         """
         ...
 
-    async def stream_append_text(self, card_id: str, text: str, sequence: int) -> None:
-        """Append *text* to the content element of a streaming card."""
-        ...
+    async def stream_set_content(self, card_id: str, full_text: str, sequence: int) -> None:
+        """Set the full accumulated text of a streaming card's content element.
 
-    async def stream_set_status(self, card_id: str, status_text: str, sequence: int) -> None:
-        """Replace the status element of a streaming card with *status_text*."""
+        Uses the cardkit PUT /content typewriter endpoint.  Callers must pass
+        the **complete** text (not just a delta); Feishu animates the diff.
+        """
         ...
 
     # ------------------------------------------------------------------

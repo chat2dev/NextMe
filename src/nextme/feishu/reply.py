@@ -17,8 +17,6 @@ from lark_oapi.api.cardkit.v1 import (
     CreateCardRequestBody,
     IdConvertCardRequest,
     IdConvertCardRequestBody,
-    PatchCardElementRequest,
-    PatchCardElementRequestBody,
 )
 from lark_oapi.api.im.v1 import (
     CreateMessageRequest,
@@ -32,9 +30,8 @@ from lark_oapi.api.im.v1 import (
     ReplyMessageRequestBody,
 )
 
-# Element IDs used in streaming progress cards (must match build_progress_card).
+# Element ID for the main content element in streaming progress cards.
 _CONTENT_ELEMENT_ID = "content_el"
-_STATUS_ELEMENT_ID = "status_el"
 
 from nextme.protocol.types import PermOption
 
@@ -255,50 +252,22 @@ class FeishuReplier:
         logger.debug("get_card_id: message_id=%s -> card_id=%s", message_id, card_id)
         return card_id
 
-    async def stream_append_text(self, card_id: str, text: str, sequence: int) -> None:
-        """Append *text* to the content element of a streaming card.
+    async def stream_set_content(self, card_id: str, full_text: str, sequence: int) -> None:
+        """Set the full text of the content element for typewriter streaming.
 
-        Uses the cardkit ``PATCH /elements/:element_id`` endpoint with
-        ``partial_element``, which appends text in streaming mode without
-        triggering a full card re-render.  The *sequence* number must be
-        strictly increasing across all calls for the same card.
+        Uses the cardkit ``PUT /elements/:element_id/content`` endpoint, which
+        is the official Feishu typewriter API: callers pass the ever-growing
+        **full accumulated text** (not just the delta), and Feishu animates the
+        difference as a typewriter effect.
+
+        The *sequence* number must be strictly increasing across all calls for
+        the same card so Feishu can discard out-of-order deliveries.
         """
-        partial = json.dumps({"tag": "markdown", "content": text}, ensure_ascii=False)
-        request = (
-            PatchCardElementRequest.builder()
-            .card_id(card_id)
-            .element_id(_CONTENT_ELEMENT_ID)
-            .request_body(
-                PatchCardElementRequestBody.builder()
-                .partial_element(partial)
-                .sequence(sequence)
-                .build()
-            )
-            .build()
-        )
-        response = await self._client.cardkit.v1.card_element.apatch(request)
-        if not response.success():
-            logger.warning(
-                "stream_append_text failed: card_id=%s seq=%d code=%s msg=%s",
-                card_id,
-                sequence,
-                response.code,
-                response.msg,
-            )
-
-    async def stream_set_status(self, card_id: str, status_text: str, sequence: int) -> None:
-        """Replace the status element content of a streaming card.
-
-        Uses the cardkit ``PUT /elements/:element_id/content`` endpoint to
-        set (not append) the full text of the status line.
-        """
-        content = json.dumps(
-            {"tag": "markdown", "content": status_text}, ensure_ascii=False
-        )
+        content = json.dumps({"tag": "markdown", "content": full_text}, ensure_ascii=False)
         request = (
             ContentCardElementRequest.builder()
             .card_id(card_id)
-            .element_id(_STATUS_ELEMENT_ID)
+            .element_id(_CONTENT_ELEMENT_ID)
             .request_body(
                 ContentCardElementRequestBody.builder()
                 .content(content)
@@ -310,12 +279,14 @@ class FeishuReplier:
         response = await self._client.cardkit.v1.card_element.acontent(request)
         if not response.success():
             logger.warning(
-                "stream_set_status failed: card_id=%s seq=%d code=%s msg=%s",
+                "stream_set_content failed: card_id=%s seq=%d code=%s msg=%s",
                 card_id,
                 sequence,
                 response.code,
                 response.msg,
             )
+        else:
+            logger.debug("stream_set_content ok: card_id=%s seq=%d", card_id, sequence)
 
     async def send_reaction(self, message_id: str, emoji: str = "SMILE") -> None:
         """Add an emoji reaction to the message identified by *message_id*."""

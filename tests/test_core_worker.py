@@ -73,8 +73,7 @@ def replier():
     # Cardkit streaming — create_card returns "" by default so worker falls back to debounce path.
     r.create_card = AsyncMock(return_value="")
     r.get_card_id = AsyncMock(return_value="")
-    r.stream_append_text = AsyncMock()
-    r.stream_set_status = AsyncMock()
+    r.stream_set_content = AsyncMock()
     r.build_help_card = MagicMock(return_value='{"card": "help"}')
     r.build_permission_card = MagicMock(return_value='{"card": "perm"}')
     r.build_streaming_progress_card = MagicMock(return_value='{"card": "streaming_progress"}')
@@ -230,23 +229,23 @@ async def test_send_result_appends_footer_to_streaming_card(worker, replier):
     replier.update_card.assert_not_awaited()
     replier.reply_card.assert_not_awaited()
     replier.send_card.assert_not_awaited()
-    # Footer must be appended via stream_append_text.
-    replier.stream_append_text.assert_awaited_once()
-    text_arg = replier.stream_append_text.call_args.args[1]
+    # Footer must be pushed via stream_set_content (full accumulated text).
+    replier.stream_set_content.assert_awaited_once()
+    text_arg = replier.stream_set_content.call_args.args[1]
     assert "---" in text_arg
     assert "耗时" in text_arg
 
 
-async def test_send_result_streaming_mode_falls_back_when_stream_append_fails(worker, replier):
-    """When stream_append_text fails in streaming mode, fall back to reply_card."""
+async def test_send_result_streaming_mode_falls_back_when_stream_set_fails(worker, replier):
+    """When stream_set_content fails in streaming mode, fall back to reply_card."""
     worker._progress_message_id = "om_streaming_msg"
     worker._card_id = "ck_card_123"
-    replier.stream_append_text.side_effect = Exception("cardkit down")
+    replier.stream_set_content.side_effect = Exception("cardkit down")
     task, _ = make_task("hello")
     task.message_id = "om_original_src"
     await worker._send_result(task, "great result")
-    replier.stream_append_text.assert_awaited_once()
-    # Fell back to new reply after stream_append_text failure.
+    replier.stream_set_content.assert_awaited_once()
+    # Fell back to new reply after stream_set_content failure.
     replier.reply_card.assert_awaited_once()
     assert replier.reply_card.call_args.args[0] == "om_original_src"
 
@@ -715,62 +714,95 @@ async def test_send_result_includes_elapsed_in_card(worker, session, replier, ac
 # _on_progress streaming path tests
 # ---------------------------------------------------------------------------
 
-async def test_on_progress_streaming_path_calls_stream_append_text(worker, replier):
-    """When card_id is set, _on_progress uses stream_append_text instead of update_card."""
+async def test_on_progress_streaming_path_calls_stream_set_content(worker, replier):
+    """When card_id is set, _on_progress uses stream_set_content (PUT /content)."""
     worker._card_id = "card_abc"
     worker._sequence = 0
-    replier.stream_append_text = AsyncMock()
     await worker._on_progress("hello", "")
-    replier.stream_append_text.assert_awaited_once_with("card_abc", "hello", 1)
+    replier.stream_set_content.assert_awaited_once_with("card_abc", "hello", 1)
     replier.update_card.assert_not_awaited()
 
 
-async def test_on_progress_streaming_path_appends_tool_status_inline(worker, replier):
-    """When card_id is set, tool_name appends a formatted status line via stream_append_text.
+async def test_on_progress_streaming_path_sends_full_accumulated_text(worker, replier):
+    """stream_set_content receives the full accumulated text (not just the latest delta).
 
-    Previously used stream_set_status (PUT/content) which returned Feishu 300313
-    for empty elements.  Now appends inline to content_el.
+    The PUT /content typewriter API requires the ever-growing complete text.
+    Reset the debounce timer before each call so both flush immediately.
     """
     worker._card_id = "card_abc"
     worker._sequence = 0
-    replier.stream_append_text = AsyncMock()
+    worker._last_streaming_update = 0.0
+    await worker._on_progress("Hello", "")
+    worker._last_streaming_update = 0.0  # bypass debounce for second call
+    await worker._on_progress(", world", "")
+    assert replier.stream_set_content.call_count == 2
+    last_call_text = replier.stream_set_content.call_args_list[-1].args[1]
+    assert last_call_text == "Hello, world"
+
+
+async def test_on_progress_streaming_path_appends_tool_status_inline(worker, replier):
+    """Tool annotation is appended inline to accumulated text and pushed via stream_set_content."""
+    worker._card_id = "card_abc"
+    worker._sequence = 0
     await worker._on_progress("", "Bash(ls)")
-    replier.stream_append_text.assert_awaited_once()
-    call_args = replier.stream_append_text.call_args
+    replier.stream_set_content.assert_awaited_once()
+    call_args = replier.stream_set_content.call_args
     assert call_args.args[0] == "card_abc"
     assert "Bash(ls)" in call_args.args[1]
     replier.update_card.assert_not_awaited()
 
 
-async def test_on_progress_streaming_path_increments_sequence(worker, replier):
-    """sequence counter increments on each streaming call."""
+async def test_on_progress_streaming_path_increments_sequence_once_per_flush(worker, replier):
+    """sequence counter increments once per API flush (delta + tool in same flush = 1 tick)."""
     worker._card_id = "card_abc"
     worker._sequence = 0
-    replier.stream_append_text = AsyncMock()
-    replier.stream_set_status = AsyncMock()
-    await worker._on_progress("a", "")
+    await worker._on_progress("a", "")    # flush #1 (last_update starts at 0.0)
     assert worker._sequence == 1
-    await worker._on_progress("b", "Bash")
-    assert worker._sequence == 3  # +1 for text, +1 for tool
+    await worker._on_progress("b", "Bash")  # tool_name → always flush regardless of debounce
+    assert worker._sequence == 2             # one flush combines delta + tool annotation
 
 
-async def test_on_progress_streaming_fallback_when_stream_append_raises(worker, replier):
-    """Streaming exceptions are caught; no re-raise."""
+async def test_on_progress_streaming_debounces_rapid_calls(worker, replier):
+    """Calls within the debounce window are not sent to the API."""
+    import time
+    worker._card_id = "card_abc"
+    worker._last_streaming_update = time.monotonic()  # simulate very recent update
+    await worker._on_progress("chunk1", "")
+    await worker._on_progress("chunk2", "")
+    # Both within debounce window — no API calls.
+    replier.stream_set_content.assert_not_awaited()
+
+
+async def test_on_progress_streaming_flushes_on_tool_name_despite_debounce(worker, replier):
+    """Tool-name events always flush even when within the debounce window."""
+    import time
+    worker._card_id = "card_abc"
+    worker._last_streaming_update = time.monotonic()  # simulate very recent update
+    await worker._on_progress("chunk1", "")       # within debounce → buffered
+    await worker._on_progress("", "Bash(ls)")     # tool event → always flush
+    replier.stream_set_content.assert_awaited_once()
+    # Full accumulated content includes the buffered chunk AND tool annotation.
+    text_arg = replier.stream_set_content.call_args.args[1]
+    assert "chunk1" in text_arg
+    assert "Bash(ls)" in text_arg
+
+
+async def test_on_progress_streaming_fallback_when_stream_set_content_raises(worker, replier):
+    """stream_set_content exceptions are caught and not re-raised."""
     worker._card_id = "card_abc"
     worker._sequence = 0
-    replier.stream_append_text = AsyncMock(side_effect=RuntimeError("network error"))
+    replier.stream_set_content = AsyncMock(side_effect=RuntimeError("network error"))
     # Should not raise
     await worker._on_progress("hello", "")
 
 
 async def test_on_progress_no_streaming_when_card_id_none(worker, replier):
-    """Without card_id, fallback debounce path is used."""
+    """Without card_id, fallback debounce path is used (stream_set_content not called)."""
     worker._card_id = None
     worker._progress_message_id = "msg_123"
     worker._last_progress_update = 0.0
-    replier.stream_append_text = AsyncMock()
     await worker._on_progress("hello", "")
-    replier.stream_append_text.assert_not_awaited()
+    replier.stream_set_content.assert_not_awaited()
     replier.update_card.assert_awaited()
 
 
@@ -797,7 +829,7 @@ async def test_execute_task_uses_reply_card_by_id_for_group_chat_when_create_car
     # Result appended as footer — no new reply card sent.
     replier.reply_card.assert_not_awaited()
     replier.send_card.assert_not_awaited()
-    replier.stream_append_text.assert_awaited()
+    replier.stream_set_content.assert_awaited()
     assert worker._card_id == "card_xyz"
 
 
@@ -818,7 +850,7 @@ async def test_execute_task_uses_reply_card_by_id_for_p2p_chat_when_create_card_
     assert call_kwargs.get("in_thread") is False
     # Result appended as footer — no new reply card sent.
     replier.reply_card.assert_not_awaited()
-    replier.stream_append_text.assert_awaited()
+    replier.stream_set_content.assert_awaited()
 
 
 async def test_execute_task_uses_send_card_by_id_when_no_message_id_and_create_card_succeeds(
@@ -836,7 +868,7 @@ async def test_execute_task_uses_send_card_by_id_when_no_message_id_and_create_c
     # Result appended as footer — no new card sent.
     replier.send_card.assert_not_awaited()
     replier.reply_card_by_id.assert_not_awaited()
-    replier.stream_append_text.assert_awaited()
+    replier.stream_set_content.assert_awaited()
     assert worker._card_id == "card_xyz"
 
 

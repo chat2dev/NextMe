@@ -923,7 +923,7 @@ class TestBuildResultCardElapsed:
 
 
 # ---------------------------------------------------------------------------
-# get_card_id / stream_append_text / stream_set_status (async)
+# get_card_id / stream_set_content (async)
 # ---------------------------------------------------------------------------
 
 
@@ -953,44 +953,19 @@ class TestGetCardId:
         assert result == ""
 
 
-class TestStreamAppendText:
-    async def test_success_calls_apatch(self):
-        replier, mock_client = make_replier()
-        ok = MagicMock()
-        ok.success.return_value = True
-        mock_client.cardkit.v1.card_element.apatch = AsyncMock(return_value=ok)
-
-        await replier.stream_append_text("card_123", "hello", 1)
-
-        mock_client.cardkit.v1.card_element.apatch.assert_awaited_once()
-
-    async def test_failure_no_exception(self, caplog):
-        import logging
-        replier, mock_client = make_replier()
-        fail = MagicMock()
-        fail.success.return_value = False
-        fail.code = 500
-        fail.msg = "server error"
-        mock_client.cardkit.v1.card_element.apatch = AsyncMock(return_value=fail)
-
-        with caplog.at_level(logging.WARNING, logger="nextme.feishu.reply"):
-            await replier.stream_append_text("card_999", "text", 5)
-
-        assert "stream_append_text failed" in caplog.text
-
-
-class TestStreamSetStatus:
+class TestStreamSetContent:
     async def test_success_calls_acontent(self):
+        """stream_set_content uses PUT /elements/:id/content (the typewriter API)."""
         replier, mock_client = make_replier()
         ok = MagicMock()
         ok.success.return_value = True
         mock_client.cardkit.v1.card_element.acontent = AsyncMock(return_value=ok)
 
-        await replier.stream_set_status("card_123", "_Bash · 5s_", 2)
+        await replier.stream_set_content("card_123", "Hello, world", 1)
 
         mock_client.cardkit.v1.card_element.acontent.assert_awaited_once()
 
-    async def test_failure_no_exception(self, caplog):
+    async def test_failure_logs_warning(self, caplog):
         import logging
         replier, mock_client = make_replier()
         fail = MagicMock()
@@ -1000,9 +975,9 @@ class TestStreamSetStatus:
         mock_client.cardkit.v1.card_element.acontent = AsyncMock(return_value=fail)
 
         with caplog.at_level(logging.WARNING, logger="nextme.feishu.reply"):
-            await replier.stream_set_status("card_x", "status", 3)
+            await replier.stream_set_content("card_999", "full text", 5)
 
-        assert "stream_set_status failed" in caplog.text
+        assert "stream_set_content failed" in caplog.text
 
 
 # ---------------------------------------------------------------------------

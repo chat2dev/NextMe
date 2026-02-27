@@ -39,6 +39,11 @@ from .session import Session
 
 logger = logging.getLogger(__name__)
 
+# Minimum interval between streaming card content updates via PUT /content.
+# Cards with streaming_mode=true have no Feishu QPS limit, so this purely
+# controls perceived smoothness — 50 ms ≈ 20 updates/s feels real-time.
+_STREAMING_DEBOUNCE_SECONDS: float = 0.05
+
 
 def _format_elapsed(seconds: int) -> str:
     """Return a compact human-readable elapsed time string (e.g. '5s', '1m 30s')."""
@@ -88,6 +93,8 @@ class SessionWorker:
         # Streaming card state (reset per-task).
         self._card_id: Optional[str] = None   # cardkit card_id (None = use fallback)
         self._sequence: int = 0               # strictly-increasing sequence counter
+        self._streaming_content: str = ""     # full accumulated text for PUT /content
+        self._last_streaming_update: float = 0.0  # debounce timestamp
 
     @property
     def _proj(self) -> str:
@@ -184,6 +191,8 @@ class SessionWorker:
         self._active_in_thread = task.chat_type == "group"
         self._card_id = None
         self._sequence = 0
+        self._streaming_content = ""
+        self._last_streaming_update = 0.0
 
         # group → thread reply; p2p → quote reply; no message_id → top-level.
         in_thread = self._active_in_thread
@@ -403,36 +412,44 @@ class SessionWorker:
             self._progress_buffer.append(delta)
 
         # ------------------------------------------------------------------
-        # Streaming path — cardkit element-level updates (no debounce).
+        # Streaming path — PUT /content with full accumulated text.
+        #
+        # The Feishu cardkit typewriter API (PUT /elements/:id/content) expects
+        # the ever-growing FULL text on every call, not just a delta.  Feishu
+        # animates the difference as a typewriter effect.
+        #
+        # Debounce: batch multiple LLM token chunks into one API call so we
+        # send ≤ 1/DEBOUNCE_S updates per second instead of one per token.
+        # Tool-use events are always flushed immediately.
         # ------------------------------------------------------------------
         if self._card_id:
             elapsed_str = _format_elapsed(int(time.monotonic() - self._task_start))
+
             if delta:
-                self._sequence += 1
-                try:
-                    await self._replier.stream_append_text(
-                        self._card_id, delta, self._sequence
-                    )
-                except Exception as exc:
-                    logger.debug(
-                        "SessionWorker[%s]: stream_append_text failed (seq=%d): %s",
-                        self._session.context_id,
-                        self._sequence,
-                        exc,
-                    )
+                self._streaming_content += delta
+
             if tool_name:
-                # Append a formatted tool-status line inline (avoids the PUT/content
-                # endpoint which returns Feishu 300313 for empty/new elements).
+                # Append tool-status annotation inline to the accumulated text.
+                self._streaming_content += f"\n\n_{tool_name} · {elapsed_str}_"
+
+            now = time.monotonic()
+            if (
+                not tool_name
+                and now - self._last_streaming_update < _STREAMING_DEBOUNCE_SECONDS
+            ):
+                # Not enough time and no tool event — skip this update.
+                return
+
+            if self._streaming_content:
                 self._sequence += 1
-                status_line = f"\n\n_{tool_name} · {elapsed_str}_"
+                self._last_streaming_update = now
                 try:
-                    await self._replier.stream_append_text(
-                        self._card_id, status_line, self._sequence
+                    await self._replier.stream_set_content(
+                        self._card_id, self._streaming_content, self._sequence
                     )
                 except Exception as exc:
                     logger.debug(
-                        "SessionWorker[%s]: stream_append_text (status) failed "
-                        "(seq=%d): %s",
+                        "SessionWorker[%s]: stream_set_content failed (seq=%d): %s",
                         self._session.context_id,
                         self._sequence,
                         exc,
@@ -648,8 +665,9 @@ class SessionWorker:
         elapsed_str = _format_elapsed(elapsed_s)
 
         if self._card_id:
-            # Streaming mode — finalize in place: append "---\nfooter" to the
-            # existing streaming card so the user sees one card, not two.
+            # Streaming mode — finalize the streaming card in place: append a
+            # "---\nfooter" to the full accumulated content and push via PUT
+            # /content so the user sees one card (no duplicate reply).
             footer_parts: list[str] = []
             if self._session.actual_id:
                 footer_parts.append(f"🆔 {self._session.actual_id}")
@@ -657,18 +675,19 @@ class SessionWorker:
                 footer_parts.append(self._session.executor)
             footer_parts.append(f"耗时: {elapsed_str}")
             footer = " | ".join(footer_parts)
+            final_text = self._streaming_content + f"\n\n---\n{footer}"
             self._sequence += 1
             try:
-                await self._replier.stream_append_text(
+                await self._replier.stream_set_content(
                     self._card_id,
-                    f"\n\n---\n{footer}",
+                    final_text,
                     self._sequence,
                 )
                 return
             except Exception as exc:
                 logger.warning(
-                    "SessionWorker[%s]: failed to append result footer to "
-                    "streaming card (%s); falling back to new reply",
+                    "SessionWorker[%s]: failed to finalize streaming card (%s); "
+                    "falling back to new reply",
                     self._session.context_id,
                     exc,
                 )
