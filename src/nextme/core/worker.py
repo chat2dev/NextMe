@@ -472,10 +472,12 @@ class SessionWorker:
         if self._progress_message_id:
             try:
                 await self._replier.update_card(self._progress_message_id, card)
-            except Exception:
-                logger.exception(
-                    "SessionWorker[%s]: failed to update progress card",
+            except Exception as exc:
+                # Progress updates are best-effort; log briefly and continue.
+                logger.warning(
+                    "SessionWorker[%s]: failed to update progress card: %s",
                     self._session.context_id,
+                    exc,
                 )
         else:
             # Fallback: initial card send failed; send a new card keeping the
@@ -490,10 +492,11 @@ class SessionWorker:
                     self._progress_message_id = await self._replier.send_card(
                         chat_id, card
                     )
-            except Exception:
-                logger.exception(
-                    "SessionWorker[%s]: failed to send fallback progress card",
+            except Exception as exc:
+                logger.warning(
+                    "SessionWorker[%s]: failed to send fallback progress card: %s",
                     self._session.context_id,
+                    exc,
                 )
 
     # ------------------------------------------------------------------
@@ -608,11 +611,12 @@ class SessionWorker:
             try:
                 await self._replier.update_card(self._progress_message_id, card_json)
                 return
-            except Exception:
-                logger.exception(
-                    "SessionWorker[%s]: failed to update card in-place, "
+            except Exception as exc:
+                logger.warning(
+                    "SessionWorker[%s]: failed to update card in-place (%s); "
                     "falling back to new reply",
                     self._session.context_id,
+                    exc,
                 )
                 # Fall through to send a new reply.
 
@@ -625,10 +629,11 @@ class SessionWorker:
             else:
                 chat_id = self._session.context_id.split(":")[0]
                 await self._replier.send_card(chat_id, card_json)
-        except Exception:
-            logger.exception(
-                "SessionWorker[%s]: failed to send fallback reply card",
+        except Exception as exc:
+            logger.error(
+                "SessionWorker[%s]: failed to send fallback reply card: %s",
                 self._session.context_id,
+                exc,
             )
 
     async def _send_result(self, task: Task, content: str) -> None:
