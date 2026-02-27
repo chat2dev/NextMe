@@ -538,26 +538,23 @@ class FeishuReplier:
             {"tag": "hr"},
         ]
 
-        # One action row per option so each button gets its own line on mobile.
+        # One button per option so each appears on its own line on mobile.
+        # schema 2.0 does not support the legacy "action" wrapper tag;
+        # buttons are placed directly as body elements instead.
         for opt in options:
             label = f"{opt.index}. {opt.label}"
             if opt.description:
                 label += f" — {opt.description}"
             elements.append(
                 {
-                    "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": label},
-                            "type": "primary" if opt.index == 1 else "default",
-                            "value": {
-                                "action": "permission_choice",
-                                "index": str(opt.index),
-                                "session_id": session_id,
-                            },
-                        }
-                    ],
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": label},
+                    "type": "primary" if opt.index == 1 else "default",
+                    "value": {
+                        "action": "permission_choice",
+                        "index": str(opt.index),
+                        "session_id": session_id,
+                    },
                 }
             )
 

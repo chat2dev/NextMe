@@ -240,39 +240,38 @@ class TestBuildPermissionCard:
         assert len(md_elements) >= 1
         assert md_elements[0]["content"] == "Allow access?"
 
-    def test_one_action_element_per_option(self):
+    def test_one_button_element_per_option(self):
         replier, _ = make_replier()
         options = self._make_options(3)
         parsed = json.loads(replier.build_permission_card("desc", options))
         elements = parsed["body"]["elements"]
-        action_elements = [e for e in elements if e.get("tag") == "action"]
-        assert len(action_elements) == 3
+        btn_elements = [e for e in elements if e.get("tag") == "button"]
+        assert len(btn_elements) == 3
 
     def test_first_option_button_is_primary(self):
         replier, _ = make_replier()
         options = self._make_options(2)
         parsed = json.loads(replier.build_permission_card("desc", options))
         elements = parsed["body"]["elements"]
-        action_elements = [e for e in elements if e.get("tag") == "action"]
-        first_button = action_elements[0]["actions"][0]
-        assert first_button["type"] == "primary"
+        btn_elements = [e for e in elements if e.get("tag") == "button"]
+        assert btn_elements[0]["type"] == "primary"
 
     def test_subsequent_option_buttons_are_default(self):
         replier, _ = make_replier()
         options = self._make_options(3)
         parsed = json.loads(replier.build_permission_card("desc", options))
         elements = parsed["body"]["elements"]
-        action_elements = [e for e in elements if e.get("tag") == "action"]
-        for action_el in action_elements[1:]:
-            assert action_el["actions"][0]["type"] == "default"
+        btn_elements = [e for e in elements if e.get("tag") == "button"]
+        for btn in btn_elements[1:]:
+            assert btn["type"] == "default"
 
     def test_button_label_contains_index_and_label(self):
         replier, _ = make_replier()
         opts = [PermOption(index=1, label="Allow")]
         parsed = json.loads(replier.build_permission_card("desc", opts))
         elements = parsed["body"]["elements"]
-        action_elements = [e for e in elements if e.get("tag") == "action"]
-        btn_text = action_elements[0]["actions"][0]["text"]["content"]
+        btn_elements = [e for e in elements if e.get("tag") == "button"]
+        btn_text = btn_elements[0]["text"]["content"]
         assert "1" in btn_text
         assert "Allow" in btn_text
 
@@ -281,8 +280,8 @@ class TestBuildPermissionCard:
         opts = [PermOption(index=1, label="Allow", description="Grants full access")]
         parsed = json.loads(replier.build_permission_card("desc", opts))
         elements = parsed["body"]["elements"]
-        action_elements = [e for e in elements if e.get("tag") == "action"]
-        btn_text = action_elements[0]["actions"][0]["text"]["content"]
+        btn_elements = [e for e in elements if e.get("tag") == "button"]
+        btn_text = btn_elements[0]["text"]["content"]
         assert "Grants full access" in btn_text
         assert "—" in btn_text
 
@@ -291,8 +290,8 @@ class TestBuildPermissionCard:
         opts = [PermOption(index=1, label="Allow")]
         parsed = json.loads(replier.build_permission_card("desc", opts))
         elements = parsed["body"]["elements"]
-        action_elements = [e for e in elements if e.get("tag") == "action"]
-        btn_text = action_elements[0]["actions"][0]["text"]["content"]
+        btn_elements = [e for e in elements if e.get("tag") == "button"]
+        btn_text = btn_elements[0]["text"]["content"]
         assert "—" not in btn_text
 
     def test_session_id_in_button_value(self):
@@ -302,8 +301,8 @@ class TestBuildPermissionCard:
             replier.build_permission_card("desc", opts, session_id="sess-xyz")
         )
         elements = parsed["body"]["elements"]
-        action_elements = [e for e in elements if e.get("tag") == "action"]
-        btn_value = action_elements[0]["actions"][0]["value"]
+        btn_elements = [e for e in elements if e.get("tag") == "button"]
+        btn_value = btn_elements[0]["value"]
         assert btn_value["session_id"] == "sess-xyz"
 
     def test_session_id_adds_footer_note(self):
@@ -334,8 +333,8 @@ class TestBuildPermissionCard:
         opts = [PermOption(index=2, label="Deny")]
         parsed = json.loads(replier.build_permission_card("desc", opts))
         elements = parsed["body"]["elements"]
-        action_elements = [e for e in elements if e.get("tag") == "action"]
-        btn_value = action_elements[0]["actions"][0]["value"]
+        btn_elements = [e for e in elements if e.get("tag") == "button"]
+        btn_value = btn_elements[0]["value"]
         assert btn_value["action"] == "permission_choice"
         assert btn_value["index"] == "2"
 
