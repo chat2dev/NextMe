@@ -854,3 +854,72 @@ async def test_dispatcher_loads_dynamic_bindings_from_state_store(
         state_store=mock_store,
     )
     assert d._dynamic_bindings == {"oc_existing": project.name}
+
+
+# ---------------------------------------------------------------------------
+# Tests: handle_card_action
+# ---------------------------------------------------------------------------
+
+
+def test_handle_card_action_resolves_permission(
+    dispatcher, session_registry, config, settings
+):
+    """handle_card_action resolves a pending permission future via button click."""
+    session_id = "chat_abc:user_xyz"
+    user_ctx = session_registry.get_or_create(session_id)
+    project = config.default_project
+    session = user_ctx.get_or_create_session(project, settings)
+
+    perm_future = session.set_permission_pending([
+        PermOption(index=1, label="Allow"),
+        PermOption(index=2, label="Deny"),
+    ])
+
+    dispatcher.handle_card_action(session_id, 1)
+
+    assert perm_future.done()
+    result = perm_future.result()
+    assert result.option_index == 1
+    assert result.option_label == "Allow"
+
+
+def test_handle_card_action_unknown_session_does_not_raise(dispatcher):
+    """handle_card_action with unknown session_id logs a warning but does not raise."""
+    dispatcher.handle_card_action("nonexistent:session", 1)  # should not raise
+
+
+def test_handle_card_action_no_active_session_does_not_raise(
+    dispatcher, session_registry
+):
+    """handle_card_action with no active session logs a warning but does not raise."""
+    session_registry.get_or_create("chat_abc:user_xyz")
+    dispatcher.handle_card_action("chat_abc:user_xyz", 1)  # no active session, no raise
+
+
+def test_handle_card_action_no_pending_permission_does_not_raise(
+    dispatcher, session_registry, config, settings
+):
+    """handle_card_action when no permission is pending is a no-op."""
+    session_id = "chat_abc:user_xyz"
+    user_ctx = session_registry.get_or_create(session_id)
+    user_ctx.get_or_create_session(config.default_project, settings)
+    # No perm future set
+    dispatcher.handle_card_action(session_id, 1)  # should not raise
+
+
+def test_handle_card_action_index_not_in_options_does_not_resolve(
+    dispatcher, session_registry, config, settings
+):
+    """handle_card_action with an index not in options does not resolve the future."""
+    session_id = "chat_abc:user_xyz"
+    user_ctx = session_registry.get_or_create(session_id)
+    session = user_ctx.get_or_create_session(config.default_project, settings)
+
+    perm_future = session.set_permission_pending([
+        PermOption(index=1, label="Allow"),
+        PermOption(index=2, label="Deny"),
+    ])
+
+    dispatcher.handle_card_action(session_id, 9)  # index 9 not in options
+
+    assert not perm_future.done()

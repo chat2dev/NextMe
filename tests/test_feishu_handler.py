@@ -474,3 +474,123 @@ class TestOnMessageReceive:
         with patch.object(handler, "handle_message") as mock_handle:
             handler._on_message_receive(event)
             mock_handle.assert_called_once_with(event)
+
+
+# ---------------------------------------------------------------------------
+# _on_card_action
+# ---------------------------------------------------------------------------
+
+
+def make_card_action_data(
+    action_type: str = "permission_choice",
+    session_id: str = "oc_chat:ou_user",
+    index: str = "1",
+    tag: str = "button",
+):
+    """Build a mock P2CardActionTrigger-shaped object."""
+    data = MagicMock()
+    data.event = MagicMock()
+    data.event.action = MagicMock()
+    data.event.action.tag = tag
+    data.event.action.value = {
+        "action": action_type,
+        "session_id": session_id,
+        "index": index,
+    }
+    return data
+
+
+class TestOnCardAction:
+    def test_permission_choice_schedules_handle_card_action(self):
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_card_action = MagicMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = make_card_action_data(session_id="oc_abc:ou_xyz", index="2")
+        handler._on_card_action(data)
+
+        loop.call_soon_threadsafe.assert_called_once_with(
+            dispatcher.handle_card_action, "oc_abc:ou_xyz", 2
+        )
+
+    def test_non_permission_choice_is_ignored(self):
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_card_action = MagicMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = make_card_action_data(action_type="other_action")
+        handler._on_card_action(data)
+
+        loop.call_soon_threadsafe.assert_not_called()
+
+    def test_returns_toast_on_permission_choice(self):
+        from lark_oapi.event.callback.model.p2_card_action_trigger import (
+            P2CardActionTriggerResponse,
+        )
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_card_action = MagicMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = make_card_action_data()
+        resp = handler._on_card_action(data)
+
+        assert isinstance(resp, P2CardActionTriggerResponse)
+        assert resp.toast is not None
+        assert resp.toast.content == "已收到"
+
+    def test_no_loop_does_not_raise(self):
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_card_action = MagicMock()
+        # No loop attached
+
+        data = make_card_action_data()
+        # Should not raise
+        handler._on_card_action(data)
+        dispatcher.handle_card_action.assert_not_called()
+
+    def test_invalid_index_does_not_raise(self):
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_card_action = MagicMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = make_card_action_data(index="not_a_number")
+        handler._on_card_action(data)
+
+        loop.call_soon_threadsafe.assert_not_called()
+
+    def test_missing_session_id_does_not_schedule(self):
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_card_action = MagicMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = make_card_action_data(session_id="")
+        handler._on_card_action(data)
+
+        loop.call_soon_threadsafe.assert_not_called()
+
+    def test_none_event_returns_empty_response(self):
+        from lark_oapi.event.callback.model.p2_card_action_trigger import (
+            P2CardActionTriggerResponse,
+        )
+        handler, _, _ = make_handler()
+
+        data = MagicMock()
+        data.event = None
+        resp = handler._on_card_action(data)
+
+        assert isinstance(resp, P2CardActionTriggerResponse)

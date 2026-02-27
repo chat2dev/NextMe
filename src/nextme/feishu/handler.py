@@ -15,6 +15,11 @@ from datetime import datetime
 from typing import Any, Protocol
 
 import lark_oapi as lark
+from lark_oapi.event.callback.model.p2_card_action_trigger import (
+    P2CardActionTrigger,
+    P2CardActionTriggerResponse,
+    CallBackToast,
+)
 
 from nextme.feishu.dedup import MessageDedup
 from nextme.protocol.types import Reply, Task
@@ -28,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 class _Dispatcher(Protocol):
     async def dispatch(self, task: Task) -> None: ...
+    def handle_card_action(self, session_id: str, index: int) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +67,7 @@ class MessageHandler:
         return (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._on_message_receive)
+            .register_p2_card_action_trigger(self._on_card_action)
             .build()
         )
 
@@ -74,6 +81,48 @@ class MessageHandler:
             self.handle_message(data)  # type: ignore[arg-type]
         except Exception:
             logger.exception("Unhandled error in _on_message_receive")
+
+    def _on_card_action(self, data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
+        """Handle a card button click (card.action.trigger).
+
+        Resolves a pending permission request when the user clicks a permission
+        card button.  The response returns a toast to acknowledge the click.
+        """
+        resp = P2CardActionTriggerResponse()
+        try:
+            event = data.event
+            if event is None or event.action is None:
+                return resp
+
+            value: dict = event.action.value or {}
+            if value.get("action") != "permission_choice":
+                return resp
+
+            session_id: str = value.get("session_id", "")
+            index_str: str = value.get("index", "")
+            if not session_id or not index_str:
+                return resp
+
+            try:
+                index = int(index_str)
+            except (ValueError, TypeError):
+                logger.warning("_on_card_action: invalid index %r", index_str)
+                return resp
+
+            loop = self._loop
+            if loop is not None and loop.is_running():
+                loop.call_soon_threadsafe(
+                    self._dispatcher.handle_card_action, session_id, index
+                )
+            else:
+                logger.warning("_on_card_action: no running event loop, dropping action")
+
+            resp.toast = CallBackToast()
+            resp.toast.type = "info"
+            resp.toast.content = "已收到"
+        except Exception:
+            logger.exception("Unhandled error in _on_card_action")
+        return resp
 
     def handle_message(self, data: Any) -> None:
         """Extract fields from *data*, dedup, create a Task, and dispatch it.

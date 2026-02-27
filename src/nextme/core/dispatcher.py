@@ -210,7 +210,7 @@ class TaskDispatcher:
         # 2. Permission reply
         # ------------------------------------------------------------------
         if self._is_permission_reply(session, text):
-            self._apply_permission_reply(session, text, task)
+            self._apply_permission_reply(session, text)
             return
 
         # ------------------------------------------------------------------
@@ -505,18 +505,54 @@ class TaskDispatcher:
             await handle_help(replier, chat_id)
 
     # ------------------------------------------------------------------
+    # Public: card action handling
+    # ------------------------------------------------------------------
+
+    def handle_card_action(self, session_id: str, index: int) -> None:
+        """Resolve a pending permission via a card button click.
+
+        Must be called from the asyncio event loop thread (use
+        ``loop.call_soon_threadsafe`` when bridging from another thread).
+
+        Args:
+            session_id: The ``context_id`` stored in the button ``value``.
+            index: The option index the user clicked.
+        """
+        user_ctx = self._session_registry.get(session_id)
+        if user_ctx is None:
+            logger.warning(
+                "handle_card_action: no context for session_id=%r", session_id
+            )
+            return
+
+        session = user_ctx.get_active_session()
+        if session is None:
+            logger.warning(
+                "handle_card_action: no active session for session_id=%r", session_id
+            )
+            return
+
+        if not self._is_permission_reply(session, str(index)):
+            logger.debug(
+                "handle_card_action: no pending permission for session_id=%r",
+                session_id,
+            )
+            return
+
+        self._apply_permission_reply(session, str(index))
+
+    # ------------------------------------------------------------------
     # Private: permission reply handling
     # ------------------------------------------------------------------
 
     def _apply_permission_reply(
-        self, session: Session, text: str, task: Task
+        self, session: Session, text: str
     ) -> None:
         """Resolve the pending permission future with the user's choice.
 
         Args:
             session: The session that is waiting for permission.
             text: The user's digit reply (e.g. ``"1"``).
-            task: The incoming task (used for logging).
         """
         index = int(text)
         matching_option = next(
