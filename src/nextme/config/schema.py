@@ -14,6 +14,9 @@ class Project(BaseModel):
     executor: str = "claude"
     """Agent executor command.  Built-in values:
     ``"claude"`` (DirectClaudeRuntime), ``"cc-acp"`` / ``"coco"`` (ACPRuntime)."""
+    executor_args: list[str] = Field(default_factory=list)
+    """Extra arguments appended to *executor* when spawning the subprocess.
+    Example: ``["acp", "serve"]`` for ``coco acp serve``."""
 
     @field_validator("path")
     @classmethod

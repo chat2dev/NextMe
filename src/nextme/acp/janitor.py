@@ -57,6 +57,7 @@ class ACPRuntimeRegistry:
         cwd: str,
         settings: Settings,
         executor: str = "claude",
+        executor_args: list[str] | None = None,
     ) -> _AnyRuntime:
         """Return the existing runtime for *session_id*, or create one.
 
@@ -75,15 +76,19 @@ class ACPRuntimeRegistry:
             cwd: Working directory passed to the subprocess.
             settings: Application settings used by the runtime.
             executor: Executor command.  Defaults to ``"claude"``.
+            executor_args: Extra arguments appended to *executor* when spawning
+                the subprocess (e.g. ``["acp", "serve"]`` for ``coco acp serve``).
 
         Returns:
             A runtime instance (possibly freshly created).
         """
         if session_id not in self._runtimes:
+            args = executor_args or []
             logger.info(
-                "ACPRuntimeRegistry: creating %s runtime for session %r",
+                "ACPRuntimeRegistry: creating %s runtime for session %r (cmd=%r)",
                 "ACPRuntime" if executor in _ACP_EXECUTOR_NAMES else "DirectClaudeRuntime",
                 session_id,
+                [executor, *args] if args else executor,
             )
             runtime: _AnyRuntime
             if executor in _ACP_EXECUTOR_NAMES:
@@ -92,6 +97,7 @@ class ACPRuntimeRegistry:
                     cwd=cwd,
                     settings=settings,
                     executor=executor,
+                    executor_args=args,
                 )
             else:
                 runtime = DirectClaudeRuntime(

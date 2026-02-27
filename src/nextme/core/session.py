@@ -51,6 +51,7 @@ class Session:
         self.project_name: str = project.name
         self.project_path: Path = Path(project.path)
         self.executor: str = project.executor
+        self.executor_args: list[str] = list(project.executor_args)
         self.salt: str = secrets.token_hex(8)
         self.actual_id: str = ""
         self.status: TaskStatus = TaskStatus.IDLE

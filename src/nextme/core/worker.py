@@ -268,6 +268,7 @@ class SessionWorker:
                 cwd=str(self._session.project_path),
                 settings=self._settings,
                 executor=self._session.executor,
+                executor_args=self._session.executor_args,
             )
 
             try:

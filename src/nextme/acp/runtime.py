@@ -78,6 +78,8 @@ class ACPRuntime:
         cwd: Working directory for the ACP subprocess.
         settings: Application settings (idle timeout, debounce, …).
         executor: Executable name / path for the ACP subprocess.
+        executor_args: Extra arguments appended to *executor* when spawning
+            the subprocess (e.g. ``["acp", "serve"]`` for ``coco acp serve``).
     """
 
     def __init__(
@@ -86,11 +88,13 @@ class ACPRuntime:
         cwd: str,
         settings: Settings,
         executor: str = "claude-code-acp",
+        executor_args: list[str] | None = None,
     ) -> None:
         self._session_id = session_id
         self._cwd = cwd
         self._settings = settings
         self._executor = executor
+        self._executor_args: list[str] = list(executor_args) if executor_args else []
 
         # ACP's own session id (returned in ``session/new`` response).
         self._actual_id: Optional[str] = None
@@ -144,10 +148,11 @@ class ACPRuntime:
         if self._ready and self.is_running:
             return
 
+        cmd = [self._executor, *self._executor_args]
         logger.info(
             "ACPRuntime[%s]: starting subprocess %r in %r",
             self._session_id,
-            self._executor,
+            cmd,
             self._cwd,
         )
 
@@ -163,7 +168,7 @@ class ACPRuntime:
         child_env.setdefault("TERM", "xterm")
 
         self._proc = await asyncio.create_subprocess_exec(
-            self._executor,
+            *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
