@@ -21,11 +21,13 @@ over the target path (POSIX ``rename(2)`` / Windows ``os.replace``).
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import json
 import logging
 import os
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -174,10 +176,14 @@ class MemoryManager:
         return sorted_facts[:n]
 
     def add_fact(self, context_id: str, fact: Fact) -> None:
-        """Append *fact* to the in-memory store and mark context dirty.
+        """Append *fact* to the in-memory store, merging near-duplicates.
 
-        If the context has not been loaded, the fact is silently dropped
-        (callers should :meth:`load` first).
+        If an existing fact has a difflib similarity ratio > 0.85, the two are
+        merged in-place (higher-confidence text wins).  Otherwise the fact is
+        appended.  When the store exceeds ``settings.memory_max_facts`` the
+        lowest-confidence facts are evicted.
+
+        If the context has not been loaded, the fact is silently dropped.
         """
         data = self._cache.get(context_id)
         if data is None:
@@ -185,8 +191,66 @@ class MemoryManager:
                 "MemoryManager.add_fact: context %r not loaded; skipping", context_id
             )
             return
+
+        # Dedup: merge with any existing fact that is very similar.
+        for existing in data.fact_store.facts:
+            ratio = difflib.SequenceMatcher(
+                None, existing.text.lower(), fact.text.lower()
+            ).ratio()
+            if ratio > 0.85:
+                if fact.confidence >= existing.confidence:
+                    existing.text = fact.text
+                    existing.confidence = fact.confidence
+                    existing.updated_at = datetime.now()
+                self._dirty.add(context_id)
+                return
+
         data.fact_store.facts.append(fact)
+
+        # Eviction: drop lowest-confidence facts when over the limit.
+        max_facts: int = getattr(self._settings, "memory_max_facts", 100)
+        if len(data.fact_store.facts) > max_facts:
+            data.fact_store.facts.sort(key=lambda f: f.confidence, reverse=True)
+            data.fact_store.facts = data.fact_store.facts[:max_facts]
+
         self._dirty.add(context_id)
+
+    def replace_fact(self, context_id: str, idx: int, new_text: str) -> bool:
+        """Replace the text of the *idx*-th fact (sorted by confidence desc).
+
+        Returns ``True`` on success, ``False`` if context not loaded or *idx*
+        is out of range.
+        """
+        data = self._cache.get(context_id)
+        if data is None:
+            return False
+        sorted_facts = sorted(
+            data.fact_store.facts, key=lambda f: f.confidence, reverse=True
+        )
+        if idx < 0 or idx >= len(sorted_facts):
+            return False
+        sorted_facts[idx].text = new_text
+        sorted_facts[idx].updated_at = datetime.now()
+        self._dirty.add(context_id)
+        return True
+
+    def forget_fact(self, context_id: str, idx: int) -> bool:
+        """Remove the *idx*-th fact (sorted by confidence desc).
+
+        Returns ``True`` on success, ``False`` if context not loaded or *idx*
+        is out of range.
+        """
+        data = self._cache.get(context_id)
+        if data is None:
+            return False
+        sorted_facts = sorted(
+            data.fact_store.facts, key=lambda f: f.confidence, reverse=True
+        )
+        if idx < 0 or idx >= len(sorted_facts):
+            return False
+        data.fact_store.facts.remove(sorted_facts[idx])
+        self._dirty.add(context_id)
+        return True
 
     def update_user_context(self, context_id: str, ctx: UserContextMemory) -> None:
         """Replace the in-memory UserContextMemory and mark context dirty."""

@@ -248,9 +248,9 @@ class TestMemoryManagerGetTopFacts:
 
     async def test_returns_facts_sorted_by_confidence(self, mem_mgr):
         await mem_mgr.load("user123")
-        fact_high = Fact(text="High confidence fact", confidence=0.95)
-        fact_low = Fact(text="Low confidence fact", confidence=0.5)
-        fact_mid = Fact(text="Mid confidence fact", confidence=0.75)
+        fact_high = Fact(text="use uv as package manager", confidence=0.95)
+        fact_low = Fact(text="coverage threshold is 85 percent", confidence=0.5)
+        fact_mid = Fact(text="python version required is 3.12 or newer", confidence=0.75)
         mem_mgr.add_fact("user123", fact_low)
         mem_mgr.add_fact("user123", fact_high)
         mem_mgr.add_fact("user123", fact_mid)
