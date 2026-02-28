@@ -103,6 +103,14 @@ class Replier(Protocol):
         """
         ...
 
+    async def update_card_entity(self, card_id: str, card_json: str, sequence: int) -> None:
+        """Replace the full content of a cardkit card entity (PUT /cards/:card_id).
+
+        Used to finalize a streaming card — atomically updates header title,
+        template colour, and body content in one call.
+        """
+        ...
+
     # ------------------------------------------------------------------
     # Sync card builders
     # ------------------------------------------------------------------

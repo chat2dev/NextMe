@@ -669,22 +669,22 @@ class SessionWorker:
         elapsed_str = _format_elapsed(elapsed_s)
 
         if self._card_id:
-            # Streaming mode — finalize the streaming card in place: append a
-            # "---\nfooter" to the full accumulated content and push via PUT
-            # /content so the user sees one card (no duplicate reply).
-            footer_parts: list[str] = []
-            if self._session.actual_id:
-                footer_parts.append(f"🆔 {self._session.actual_id}")
-            if self._session.executor:
-                footer_parts.append(self._session.executor)
-            footer_parts.append(f"耗时: {elapsed_str}")
-            footer = " | ".join(footer_parts)
-            final_text = self._streaming_content + f"\n\n---\n{footer}"
+            # Streaming mode — replace the full card (header + body) via
+            # PUT /cards/:card_id so the title changes from "思考中..." to
+            # "完成" and the template turns blue, with the footer embedded.
+            final_card = self._replier.build_result_card(
+                content=self._streaming_content or content or "(无输出)",
+                title=f"完成 {self._proj}",
+                template="blue",
+                session_id=self._session.actual_id or "",
+                elapsed=elapsed_str,
+                executor=self._session.executor,
+            )
             self._sequence += 1
             try:
-                await self._replier.stream_set_content(
+                await self._replier.update_card_entity(
                     self._card_id,
-                    final_text,
+                    final_card,
                     self._sequence,
                 )
                 return

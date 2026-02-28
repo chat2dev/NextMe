@@ -12,6 +12,7 @@ import uuid as _uuid_mod
 
 import lark_oapi as lark
 from lark_oapi.api.cardkit.v1 import (
+    Card,
     ContentCardElementRequest,
     ContentCardElementRequestBody,
     CreateCardRequest,
@@ -20,6 +21,8 @@ from lark_oapi.api.cardkit.v1 import (
     IdConvertCardRequestBody,
     SettingsCardRequest,
     SettingsCardRequestBody,
+    UpdateCardRequest,
+    UpdateCardRequestBody,
 )
 from lark_oapi.api.im.v1 import (
     CreateMessageRequest,
@@ -327,6 +330,44 @@ class FeishuReplier:
             )
         else:
             logger.debug("stream_set_content ok: card_id=%s seq=%d", card_id, sequence)
+
+    async def update_card_entity(self, card_id: str, card_json: str, sequence: int) -> None:
+        """Replace the full content of a cardkit card entity via PUT /cards/:card_id.
+
+        Used to finalize a streaming card — updates the header title/template
+        (e.g. "思考中..." → "完成") and body in one atomic operation.
+
+        The *sequence* number must be strictly increasing across all calls for
+        the same card so Feishu can discard out-of-order deliveries.
+        """
+        request = (
+            UpdateCardRequest.builder()
+            .card_id(card_id)
+            .request_body(
+                UpdateCardRequestBody.builder()
+                .card(
+                    Card.builder()
+                    .type("card_json")
+                    .data(card_json)
+                    .build()
+                )
+                .uuid(str(_uuid_mod.uuid4()))
+                .sequence(sequence)
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.cardkit.v1.card.aupdate(request)
+        if not response.success():
+            logger.warning(
+                "update_card_entity failed: card_id=%s seq=%d code=%s msg=%s",
+                card_id,
+                sequence,
+                response.code,
+                response.msg,
+            )
+        else:
+            logger.debug("update_card_entity ok: card_id=%s seq=%d", card_id, sequence)
 
     async def send_reaction(self, message_id: str, emoji: str = "SMILE") -> None:
         """Add an emoji reaction to the message identified by *message_id*."""
