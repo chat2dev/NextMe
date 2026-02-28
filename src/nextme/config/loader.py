@@ -1,11 +1,10 @@
 """Multi-source configuration loader with priority merging.
 
 Priority order (low → high):
-  1. ~/.nextme/nextme.json
+  1. ~/.nextme/settings.json
   2. {cwd}/nextme.json
-  3. ~/.nextme/settings.json
-  4. .env file  (python-dotenv)
-  5. NEXTME_* environment variables
+  3. .env file  (python-dotenv)
+  4. NEXTME_* environment variables
 """
 
 from __future__ import annotations
@@ -111,13 +110,13 @@ class ConfigLoader:
 
         Merge order (each later source overrides earlier values):
 
-        1. ``~/.nextme/nextme.json``  — user-global defaults
-        2. ``{cwd}/nextme.json``      — project-local overrides
-        3. ``.env`` file              — dotenv key/value pairs
-        4. ``NEXTME_*`` env vars      — highest-priority overrides
+        1. ``~/.nextme/settings.json`` — user-global defaults (shared with Settings)
+        2. ``{cwd}/nextme.json``        — project-local overrides
+        3. ``.env`` file                — dotenv key/value pairs
+        4. ``NEXTME_*`` env vars        — highest-priority overrides
         """
-        # --- Layer 1: user-global nextme.json ----------------------------
-        merged: dict[str, Any] = _read_json(_NEXTME_HOME / "nextme.json")
+        # --- Layer 1: user-global settings.json --------------------------
+        merged: dict[str, Any] = _read_json(_NEXTME_HOME / "settings.json")
 
         # --- Layer 2: cwd-local nextme.json ------------------------------
         if cwd is not None:

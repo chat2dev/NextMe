@@ -194,7 +194,7 @@ class TestLoadAppConfig:
     def test_projects_loaded_from_local_json(self, tmp_path, monkeypatch, tmp_path_factory):
         """Local project appears in the result (may be merged with global)."""
         monkeypatch.delenv("NEXTME_APP_ID", raising=False)
-        # Isolate from real ~/.nextme/nextme.json by redirecting _NEXTME_HOME
+        # Isolate from real ~/.nextme/settings.json by redirecting _NEXTME_HOME
         fake_home = tmp_path_factory.mktemp("home")
         monkeypatch.setattr("nextme.config.loader._NEXTME_HOME", fake_home)
         projects = [{"name": "myproj", "path": str(tmp_path)}]
@@ -265,10 +265,10 @@ class TestMergeBehaviour:
     """Verify that projects and bindings are merged (not replaced) across sources."""
 
     def _isolated_loader(self, monkeypatch, tmp_path_factory, global_cfg, local_cfg, local_dir):
-        """Helper: write global and local nextme.json with isolated _NEXTME_HOME."""
+        """Helper: write global settings.json and local nextme.json with isolated _NEXTME_HOME."""
         fake_home = tmp_path_factory.mktemp("home")
         monkeypatch.setattr("nextme.config.loader._NEXTME_HOME", fake_home)
-        (fake_home / "nextme.json").write_text(json.dumps(global_cfg), encoding="utf-8")
+        (fake_home / "settings.json").write_text(json.dumps(global_cfg), encoding="utf-8")
         (local_dir / "nextme.json").write_text(json.dumps(local_cfg), encoding="utf-8")
         return ConfigLoader.load_app_config(cwd=local_dir)
 
