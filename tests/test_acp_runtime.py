@@ -578,6 +578,25 @@ async def test_execute_exception_in_queue_raises(runtime):
         await runtime.execute(task, on_progress, on_permission)
 
 
+async def test_execute_eof_sentinel_raises(runtime):
+    """EOFError sentinel from _run_reader unblocks execute and raises RuntimeError."""
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
+    task, _ = make_task("query")
+
+    async def on_progress(delta, tool):
+        pass
+
+    async def on_permission(req):
+        return PermissionChoice(request_id="", option_index=1)
+
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
+    # Simulate _run_reader detecting EOF before the final session/prompt response
+    await queue.put(EOFError("subprocess closed stdout unexpectedly"))
+
+    with pytest.raises(RuntimeError, match="reader error"):
+        await runtime.execute(task, on_progress, on_permission)
+
+
 async def test_execute_canceled_task_returns_immediately(runtime):
     mock_client, queue, _ = _setup_runtime_ready(runtime)
     task, _ = make_task("work", canceled=True)
@@ -1078,3 +1097,72 @@ async def test_execute_no_auto_approve_when_disabled(tmp_path):
     mock_client.send_response.assert_awaited_once_with(
         77, {"outcome": {"selected": {"optionId": "allow_once"}}}
     )
+
+
+# ---------------------------------------------------------------------------
+# _run_reader EOF sentinel
+# ---------------------------------------------------------------------------
+
+
+async def test_run_reader_puts_eof_sentinel_on_clean_exit(runtime):
+    """_run_reader puts an EOFError into the queue when stdout closes normally."""
+    runtime._msg_queue = asyncio.Queue()
+
+    # Mock client whose read_lines() yields one message then returns (EOF).
+    async def _fake_read_lines():
+        yield {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+
+    mock_client = MagicMock()
+    mock_client.read_lines = _fake_read_lines
+    runtime._client = mock_client
+
+    await runtime._run_reader()
+
+    # First item: the message itself
+    first = runtime._msg_queue.get_nowait()
+    assert first == {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+
+    # Second item: the EOF sentinel
+    sentinel = runtime._msg_queue.get_nowait()
+    assert isinstance(sentinel, EOFError)
+    assert "stdout" in str(sentinel).lower() or "EOF" in str(sentinel)
+
+
+async def test_run_reader_puts_exception_on_read_error(runtime):
+    """_run_reader puts the exception into the queue on read error."""
+    runtime._msg_queue = asyncio.Queue()
+
+    async def _bad_read_lines():
+        raise OSError("pipe broken")
+        yield  # make it an async generator
+
+    mock_client = MagicMock()
+    mock_client.read_lines = _bad_read_lines
+    runtime._client = mock_client
+
+    await runtime._run_reader()
+
+    sentinel = runtime._msg_queue.get_nowait()
+    assert isinstance(sentinel, OSError)
+
+
+async def test_run_reader_eof_sentinel_surfaces_error_in_execute(runtime):
+    """execute() raises RuntimeError when _run_reader puts an EOF sentinel mid-task."""
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
+    task, _ = make_task("work")
+
+    async def on_progress(delta, tool):
+        pass
+
+    async def on_permission(req):
+        return PermissionChoice(request_id="", option_index=1)
+
+    # session/new response, then a tool_call notification, then EOF (coco crashed)
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
+    await queue.put({"jsonrpc": "2.0", "method": "session/update", "params": {
+        "update": {"sessionUpdate": "tool_call", "title": "apply_patch"},
+    }})
+    await queue.put(EOFError("subprocess closed stdout unexpectedly"))
+
+    with pytest.raises(RuntimeError, match="reader error"):
+        await runtime.execute(task, on_progress, on_permission)

@@ -557,7 +557,7 @@ class SessionWorker:
         """
         chat_id = self._session.context_id.split(":")[0]
         logger.info(
-            "SessionWorker[%s]: permission notification id=%r description=%r",
+            "SessionWorker[%s]: permission request received id=%r description=%r",
             self._session.context_id,
             req.request_id,
             req.description,

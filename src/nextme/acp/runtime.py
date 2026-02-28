@@ -501,6 +501,12 @@ class ACPRuntime:
 
             # --- session/request_permission (server → client request) ----
             elif kind == "server_request":
+                logger.info(
+                    "ACPRuntime[%s]: permission request received (jsonrpc_id=%r, method=%r)",
+                    self._session_id,
+                    msg.get("id"),
+                    msg.get("method"),
+                )
                 await self._handle_permission(msg, on_permission)
 
             else:
@@ -782,6 +788,14 @@ class ACPRuntime:
         except Exception as exc:
             logger.warning("ACPRuntime[%s]: reader error: %s", self._session_id, exc)
             await self._msg_queue.put(exc)
+        else:
+            # Normal EOF — subprocess closed stdout before we received the
+            # final session/prompt response.  Put a sentinel so the execute
+            # loop unblocks and surfaces a clear error instead of hanging.
+            logger.info("ACPRuntime[%s]: subprocess stdout closed (EOF)", self._session_id)
+            await self._msg_queue.put(
+                EOFError(f"ACPRuntime[{self._session_id}]: subprocess closed stdout unexpectedly")
+            )
 
     async def _drain_stderr(self) -> None:
         """Continuously read stderr to prevent pipe blockage."""
@@ -796,7 +810,7 @@ class ACPRuntime:
                     line = line_bytes.decode("utf-8").rstrip()
                 except UnicodeDecodeError:
                     line = repr(line_bytes)
-                logger.debug("ACPRuntime[%s] stderr: %s", self._session_id, line)
+                logger.info("ACPRuntime[%s] stderr: %s", self._session_id, line)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
