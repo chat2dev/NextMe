@@ -16,6 +16,7 @@ It is responsible for:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from typing import Optional
@@ -372,7 +373,7 @@ class TaskDispatcher:
             if not arg:
                 active = user_ctx.active_project
                 bound = self._resolve_bound_project(chat_id)
-                lines = ["**项目列表:**\n"]
+                proj_lines: list[str] = []
                 for p in self._config.projects:
                     markers = []
                     if p.name == active:
@@ -380,9 +381,18 @@ class TaskDispatcher:
                     if bound and p.name == bound:
                         markers.append("⚓ 绑定")
                     marker_str = f"  `{'  '.join(markers)}`" if markers else ""
-                    lines.append(f"• **{p.name}**{marker_str}  `{p.path}`")
-                lines.append("\n用法: `/project <name>` 切换 | `/project bind <name>` 绑定 | `/project unbind` 解绑")
-                await replier.send_text(chat_id, "\n".join(lines))
+                    proj_lines.append(f"• **{p.name}**{marker_str}  `{p.path}`")
+                proj_lines.append("\n用法: `/project <name>` 切换 | `/project bind <name>` 绑定 | `/project unbind` 解绑")
+                proj_card = {
+                    "schema": "2.0",
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "title": {"tag": "plain_text", "content": "项目列表"},
+                        "template": "blue",
+                    },
+                    "body": {"elements": [{"tag": "markdown", "content": "\n".join(proj_lines)}]},
+                }
+                await replier.send_card(chat_id, json.dumps(proj_card, ensure_ascii=False))
                 return
 
             sub_parts = arg.split(maxsplit=1)
@@ -414,7 +424,7 @@ class TaskDispatcher:
             if not arg:
                 skills = self._skill_registry.list_all()
                 if not skills:
-                    await replier.send_text(chat_id, "当前没有已注册的 Skill。")
+                    skill_content = "当前没有已注册的 Skill。"
                 else:
                     source_order = ["project", "nextme", "global", "builtin"]
                     source_labels = {
@@ -426,14 +436,24 @@ class TaskDispatcher:
                     by_source: dict[str, list] = {}
                     for s in sorted(skills, key=lambda x: x.meta.trigger):
                         by_source.setdefault(s.source or "builtin", []).append(s)
-                    lines = ["**已注册 Skills:**"]
+                    skill_lines: list[str] = []
                     for src in source_order:
                         if src not in by_source:
                             continue
-                        lines.append(f"\n**{source_labels[src]}**")
+                        skill_lines.append(f"**{source_labels[src]}**")
                         for s in by_source[src]:
-                            lines.append(f"  • `/skill {s.meta.trigger}` — {s.meta.description}")
-                    await replier.send_text(chat_id, "\n".join(lines))
+                            skill_lines.append(f"  • `/skill {s.meta.trigger}` — {s.meta.description}")
+                    skill_content = "\n".join(skill_lines)
+                skill_card = {
+                    "schema": "2.0",
+                    "config": {"wide_screen_mode": True},
+                    "header": {
+                        "title": {"tag": "plain_text", "content": "Skills"},
+                        "template": "blue" if skills else "grey",
+                    },
+                    "body": {"elements": [{"tag": "markdown", "content": skill_content}]},
+                }
+                await replier.send_card(chat_id, json.dumps(skill_card, ensure_ascii=False))
                 return
             # Look up the skill and enqueue a rendered prompt as a normal task.
             trigger, _, user_input = arg.partition(" ")
@@ -469,7 +489,7 @@ class TaskDispatcher:
             await self._ensure_worker(session, replier)
 
         elif command == "/task":
-            lines = ["**当前任务队列:**\n"]
+            lines: list[str] = []
             has_any = False
             for project_name, sess in user_ctx.sessions.items():
                 active_marker = "★ " if project_name == user_ctx.active_project else ""
@@ -482,10 +502,17 @@ class TaskDispatcher:
                         lines.append(f"  执行中: `{active_task.id[:8]}…` {active_task.content[:40]}")
                     if queue_size > 0:
                         lines.append(f"  队列等待: {queue_size} 个任务")
-            if not has_any:
-                await replier.send_text(chat_id, "当前没有进行中的任务。")
-            else:
-                await replier.send_text(chat_id, "\n".join(lines))
+            content = "\n".join(lines) if has_any else "当前没有进行中的任务。"
+            card = {
+                "schema": "2.0",
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "title": {"tag": "plain_text", "content": "任务队列"},
+                    "template": "blue" if has_any else "grey",
+                },
+                "body": {"elements": [{"tag": "markdown", "content": content}]},
+            }
+            await replier.send_card(chat_id, json.dumps(card, ensure_ascii=False))
 
         elif command == "/remember":
             if not arg:

@@ -201,14 +201,22 @@ class TestLoadSkillFile:
 
 
 class TestSkillRegistry:
-    def test_load_with_no_args_loads_builtin_skills(self):
+    def test_load_with_no_args_loads_builtin_skills(self, tmp_path, monkeypatch):
+        # Patch _BUILTIN_SKILLS_DIR to a tmp dir with known skill files so the
+        # test does not depend on which files happen to exist in the real skills/.
+        builtin = tmp_path / "builtin"
+        builtin.mkdir()
+        for trigger in ("review", "commit", "explain"):
+            (builtin / f"{trigger}.md").write_text(
+                f"---\nname: {trigger.title()}\ntrigger: {trigger}\n---\nTemplate.\n"
+            )
+        monkeypatch.setattr("nextme.skills.registry._BUILTIN_SKILLS_DIR", builtin)
+
         registry = SkillRegistry()
         registry.load()
 
         skills = registry.list_all()
         triggers = {s.meta.trigger for s in skills}
-
-        # Built-in skills directory has: commit, debug, explain, review, test
         assert "review" in triggers
         assert "commit" in triggers
         assert "explain" in triggers
@@ -229,7 +237,14 @@ class TestSkillRegistry:
         assert skill is not None
         assert skill.meta.name == "Custom Review"
 
-    def test_get_returns_skill_by_trigger(self):
+    def test_get_returns_skill_by_trigger(self, tmp_path, monkeypatch):
+        builtin = tmp_path / "builtin"
+        builtin.mkdir()
+        (builtin / "review.md").write_text(
+            "---\nname: Review\ntrigger: review\n---\nTemplate.\n"
+        )
+        monkeypatch.setattr("nextme.skills.registry._BUILTIN_SKILLS_DIR", builtin)
+
         registry = SkillRegistry()
         registry.load()
 

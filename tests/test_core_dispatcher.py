@@ -192,15 +192,18 @@ async def test_dispatch_project_command_with_name(dispatcher, mock_replier):
 
 
 async def test_dispatch_project_command_no_arg(dispatcher, mock_replier):
-    """/project with no argument sends usage help."""
+    """/project with no argument sends a card with project list."""
     task = make_task("/project")
     with patch("nextme.core.dispatcher.handle_project", new_callable=AsyncMock) as mock_proj:
         await dispatcher.dispatch(task)
-    # handle_project should NOT be called; instead a text message with usage is sent
+    # handle_project should NOT be called; instead a card with project list is sent
     mock_proj.assert_not_awaited()
-    mock_replier.send_text.assert_awaited_once()
-    sent_text = mock_replier.send_text.call_args.args[1]
-    assert "project" in sent_text.lower() or "用法" in sent_text
+    mock_replier.send_card.assert_awaited_once()
+    card_json = mock_replier.send_card.call_args.args[1]
+    import json as _json
+    card = _json.loads(card_json)
+    assert card["header"]["title"]["content"] == "项目列表"
+    assert "project" in card_json.lower() or "项目" in card_json
 
 
 # ---------------------------------------------------------------------------
@@ -217,12 +220,14 @@ async def test_dispatch_skill_with_trigger(dispatcher, mock_replier):
 
 
 async def test_dispatch_skill_no_arg(dispatcher, mock_replier):
-    """/skill with no argument sends usage error."""
+    """/skill with no argument sends a card with skills list."""
     task = make_task("/skill")
     await dispatcher.dispatch(task)
-    mock_replier.send_text.assert_awaited_once()
-    sent_text = mock_replier.send_text.call_args.args[1]
-    assert "skill" in sent_text.lower() or "用法" in sent_text
+    mock_replier.send_card.assert_awaited_once()
+    card_json = mock_replier.send_card.call_args.args[1]
+    import json as _json
+    card = _json.loads(card_json)
+    assert card["header"]["title"]["content"] == "Skills"
 
 
 # ---------------------------------------------------------------------------
