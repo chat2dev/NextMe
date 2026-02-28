@@ -57,6 +57,7 @@ uv sync
 
 ```bash
 mkdir -p ~/.nextme
+cp settings.json.example ~/.nextme/settings.json
 ```
 
 Edit `~/.nextme/settings.json`:

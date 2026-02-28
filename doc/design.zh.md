@@ -28,7 +28,7 @@
 ```
 nextme/
 ├── pyproject.toml
-├── nextme.json.example          # 配置模板
+├── settings.json.example        # 配置模板
 ├── .env.example
 ├── doc/                         # 设计文档
 │   └── design.md

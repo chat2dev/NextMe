@@ -28,7 +28,7 @@ The user needs a Python Bot that acts as a bridge between Feishu IM and the unde
 ```
 nextme/
 ├── pyproject.toml
-├── nextme.json.example          # configuration template
+├── settings.json.example        # configuration template
 ├── .env.example
 ├── doc/                         # design documents
 │   └── design.md
