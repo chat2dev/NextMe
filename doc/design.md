@@ -159,7 +159,7 @@ Feishu User ──WebSocket──▶ FeishuClient
 
 `executor_args` (optional `list[str]`) appends extra arguments to the subprocess command. Example: `executor="coco"` + `executor_args=["acp", "serve"]` → runs `coco acp serve`.
 
-Configuration example (`~/.nextme/nextme.json`):
+Configuration example (`~/.nextme/settings.json`):
 ```json
 {
   "projects": [
@@ -366,7 +366,7 @@ DirectClaudeRuntime (skip-permissions, no permission requests)
 ACPRuntime sends session/request_permission
   → Session.perm_future = asyncio.Future()
   → send permission card to user (with numbered options)
-  → worker await perm_future (max wait 5min)
+  → worker await perm_future (blocks until user responds or /stop cancels)
 User replies "1"
   → TaskDispatcher identifies as permission reply
   → perm_future.set_result(choice)
@@ -517,11 +517,12 @@ tools_denylist: []
 
 ### Priority (low → high)
 ```
-~/.nextme/nextme.json  →  {cwd}/nextme.json  →
-~/.nextme/settings.json  →  .env  →  NEXTME_* environment variables
+~/.nextme/settings.json  →  {cwd}/nextme.json  →  .env  →  NEXTME_* environment variables
 ```
 
-### `nextme.json`
+`~/.nextme/settings.json` is the single user-level config file containing both app credentials/project list and runtime behaviour. `{cwd}/nextme.json` is an optional project-local override layer (projects and bindings are merged; other fields override).
+
+### `~/.nextme/settings.json`
 ```json
 {
   "app_id": "cli_xxx",
@@ -529,21 +530,15 @@ tools_denylist: []
   "projects": [
     {"name": "my-api",    "path": "/abs/path/to/project", "executor": "claude"},
     {"name": "ai-agent",  "path": "/abs/path/to/ai",      "executor": "coco", "executor_args": ["acp", "serve"]}
-  ]
-}
-```
-
-### `~/.nextme/settings.json`
-```json
-{
+  ],
   "acp_idle_timeout_seconds": 7200,
   "task_queue_capacity": 1024,
   "memory_debounce_seconds": 30,
   "context_max_bytes": 1000000,
   "context_compression": "zlib",
   "log_level": "INFO",
-  "progress_debounce_seconds": 3.0,
-  "permission_timeout_seconds": 300.0
+  "progress_debounce_seconds": 0.5,
+  "permission_auto_approve": false
 }
 ```
 
@@ -584,9 +579,8 @@ SIGTERM / SIGINT graceful shutdown:
 
 ```
 ~/.nextme/
-├── nextme.json          # user-level config (app_id, app_secret, projects)
-├── settings.json        # behavioral settings (timeouts, debounce, log level)
-├── state.json           # Session state (actual_id, active_project)
+├── settings.json        # single user-level config (credentials + projects + behaviour settings)
+├── state.json           # Session state (actual_id, active_project, dynamic bindings)
 ├── nextme.pid           # PID file (nextme down targets SIGTERM here)
 ├── memory/
 │   └── {md5(ctx_id)}/   # per-user long-term memory

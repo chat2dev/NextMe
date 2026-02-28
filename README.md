@@ -53,13 +53,13 @@ uv sync
 
 ### Configure
 
-**1. Create `nextme.json`**
+**1. Create `~/.nextme/settings.json`**
 
 ```bash
-cp nextme.json.example nextme.json
+mkdir -p ~/.nextme
 ```
 
-Edit `nextme.json`:
+Edit `~/.nextme/settings.json`:
 
 ```json
 {
@@ -86,7 +86,7 @@ Go to the [Feishu Open Platform](https://open.feishu.cn/) and follow the steps b
 
 **Step 2 — Get credentials**
 
-Go to **Credentials & Basic Info**, copy **App ID** and **App Secret**, and paste them into `nextme.json`:
+Go to **Credentials & Basic Info**, copy **App ID** and **App Secret**, and paste them into `~/.nextme/settings.json`:
 
 ```json
 {
@@ -259,14 +259,17 @@ Reply with the corresponding number to continue.
 ### Priority (low → high)
 
 ```
-~/.nextme/nextme.json
+~/.nextme/settings.json
   → {cwd}/nextme.json
-    → ~/.nextme/settings.json
-      → .env
-        → NEXTME_* environment variables
+    → .env
+      → NEXTME_* environment variables
 ```
 
-### `nextme.json` fields
+`~/.nextme/settings.json` is the single user-level config file. It holds both app credentials / project list **and** runtime behaviour settings. The optional `{cwd}/nextme.json` can add or override project-local entries.
+
+### `~/.nextme/settings.json` fields
+
+**App credentials & projects**
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -281,7 +284,20 @@ Reply with the corresponding number to continue.
 - `"cc-acp"` — ACPRuntime, uses `cc-acp` subprocess (JSON-RPC 2.0)
 - `"coco"` — ACPRuntime, uses `coco` subprocess (JSON-RPC 2.0 / ACP protocol); use `executor_args` for sub-commands
 
-**Multi-project example:**
+**Runtime behaviour**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `acp_idle_timeout_seconds` | `7200` | Idle timeout before ACPRuntime process is killed |
+| `task_queue_capacity` | `1024` | Per-session task queue capacity |
+| `memory_debounce_seconds` | `30` | State / memory flush debounce interval (s) |
+| `context_max_bytes` | `1000000` | Context size threshold for compression |
+| `context_compression` | `"zlib"` | Compression algorithm: `zlib` / `lzma` / `brotli` |
+| `progress_debounce_seconds` | `0.5` | Progress card update debounce interval (s) |
+| `permission_auto_approve` | `false` | Auto-approve ACPRuntime permission requests without user confirmation |
+| `log_level` | `"INFO"` | Log verbosity |
+
+**Multi-project example (`~/.nextme/settings.json`):**
 
 ```json
 {
@@ -298,19 +314,6 @@ Reply with the corresponding number to continue.
   }
 }
 ```
-
-### `~/.nextme/settings.json` fields
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `acp_idle_timeout_seconds` | `7200` | Idle timeout before ACPRuntime process is killed |
-| `task_queue_capacity` | `1024` | Per-session task queue capacity |
-| `memory_debounce_seconds` | `30` | State / memory flush debounce interval (s) |
-| `context_max_bytes` | `1000000` | Context size threshold for compression |
-| `context_compression` | `"zlib"` | Compression algorithm: `zlib` / `lzma` / `brotli` |
-| `progress_debounce_seconds` | `3.0` | Progress card update debounce interval (s) |
-| `permission_timeout_seconds` | `300.0` | Permission confirmation timeout (s) |
-| `log_level` | `"INFO"` | Log verbosity |
 
 ### Environment variables
 
@@ -375,9 +378,8 @@ Invoke with `/skill myskill`.
 
 ```
 ~/.nextme/
-├── nextme.json          # user-level config
-├── settings.json        # behaviour settings
-├── state.json           # session state (actual_id, active project)
+├── settings.json        # single user-level config (credentials + projects + settings)
+├── state.json           # session state (actual_id, active project, dynamic bindings)
 ├── nextme.pid           # PID file (used by nextme down)
 ├── memory/
 │   └── {user_hash}/     # per-user memory (facts / preferences)
@@ -452,7 +454,7 @@ NextMe assigns an independent asyncio worker to each `(user, project)` pair, so 
 
 **Routing priority (highest → lowest):**
 
-1. Static binding in `nextme.json` (`bindings` field)
+1. Static binding in `~/.nextme/settings.json` (`bindings` field)
 2. Dynamic binding set via `/project bind <name>` (persisted in `state.json`)
 3. User's current active project (`/project <name>`)
 4. First project in the `projects` list (default)

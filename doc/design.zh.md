@@ -156,7 +156,7 @@ Feishu User ──WebSocket──▶ FeishuClient
 | `"claude"` (默认) | `DirectClaudeRuntime` | stream-json ndjson |
 | `"cc-acp"` / `"claude-code-acp"` | `ACPRuntime` | JSON-RPC 2.0 |
 
-配置示例（`~/.nextme/nextme.json`）：
+配置示例（`~/.nextme/settings.json`）：
 ```json
 {
   "projects": [
@@ -362,7 +362,7 @@ DirectClaudeRuntime（skip-permissions，无权限请求）
 ACPRuntime 发送 session/request_permission
   → Session.perm_future = asyncio.Future()
   → 发送权限卡片给用户（带编号选项）
-  → worker await perm_future（最长等待 5min）
+  → worker await perm_future（持续等待，直到用户响应或 /stop 取消）
 用户回复 "1"
   → TaskDispatcher 识别为权限回复
   → perm_future.set_result(choice)
@@ -511,32 +511,28 @@ tools_denylist: []
 
 ### 优先级（低→高）
 ```
-~/.nextme/nextme.json  →  {cwd}/nextme.json  →
-~/.nextme/settings.json  →  .env  →  NEXTME_* 环境变量
+~/.nextme/settings.json  →  {cwd}/nextme.json  →  .env  →  NEXTME_* 环境变量
 ```
 
-### `nextme.json`
+`~/.nextme/settings.json` 是唯一的用户级配置文件，同时包含应用凭证/项目列表和运行时行为设置。`{cwd}/nextme.json` 是可选的项目本地覆盖层（projects 和 bindings 做合并，其他字段直接覆盖）。
+
+### `~/.nextme/settings.json`
 ```json
 {
   "app_id": "cli_xxx",
   "app_secret": "xxxxx",
   "projects": [
-    {"name": "my-api", "path": "/abs/path/to/project", "executor": "claude"}
-  ]
-}
-```
-
-### `~/.nextme/settings.json`
-```json
-{
+    {"name": "my-api", "path": "/abs/path/to/project", "executor": "claude"},
+    {"name": "ai-agent", "path": "/abs/path/to/ai", "executor": "coco", "executor_args": ["acp", "serve"]}
+  ],
   "acp_idle_timeout_seconds": 7200,
   "task_queue_capacity": 1024,
   "memory_debounce_seconds": 30,
   "context_max_bytes": 1000000,
   "context_compression": "zlib",
   "log_level": "INFO",
-  "progress_debounce_seconds": 3.0,
-  "permission_timeout_seconds": 300.0
+  "progress_debounce_seconds": 0.5,
+  "permission_auto_approve": false
 }
 ```
 
@@ -577,9 +573,8 @@ SIGTERM / SIGINT 优雅停机：
 
 ```
 ~/.nextme/
-├── nextme.json          # 用户级配置（app_id, app_secret, projects）
-├── settings.json        # 行为设置（超时、去抖、日志级别）
-├── state.json           # Session 状态（actual_id, active_project）
+├── settings.json        # 用户级配置（凭证 + 项目 + 运行时设置）
+├── state.json           # Session 状态（actual_id, active_project, 动态绑定）
 ├── nextme.pid           # PID 文件（nextme down 定向 SIGTERM）
 ├── memory/
 │   └── {md5(ctx_id)}/   # per-user 长期记忆
