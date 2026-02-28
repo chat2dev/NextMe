@@ -42,7 +42,7 @@ def reset_session_registry():
 
 @pytest.fixture
 def settings():
-    return Settings(task_queue_capacity=5, permission_timeout_seconds=1.0)
+    return Settings(task_queue_capacity=5)
 
 
 @pytest.fixture

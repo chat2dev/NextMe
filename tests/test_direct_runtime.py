@@ -21,7 +21,7 @@ from nextme.protocol.types import PermissionChoice, PermissionRequest, Task
 
 
 def make_settings(**kw):
-    return Settings(progress_debounce_seconds=0.0, permission_timeout_seconds=5.0, **kw)
+    return Settings(progress_debounce_seconds=0.0, **kw)
 
 
 def make_task(content="hello", canceled=False, timeout_seconds=10.0):

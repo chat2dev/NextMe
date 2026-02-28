@@ -13,7 +13,6 @@ def settings():
         memory_debounce_seconds=1,
         task_queue_capacity=10,
         progress_debounce_seconds=0.1,
-        permission_timeout_seconds=1.0,
     )
 
 

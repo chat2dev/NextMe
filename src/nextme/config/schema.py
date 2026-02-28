@@ -59,7 +59,6 @@ class Settings(BaseModel):
     context_compression: Literal["zlib", "lzma", "brotli"] = "zlib"
     log_level: str = "INFO"
     progress_debounce_seconds: float = 0.5
-    permission_timeout_seconds: float = 300.0
     permission_auto_approve: bool = False
     """Auto-approve permission requests immediately without waiting for user input.
 

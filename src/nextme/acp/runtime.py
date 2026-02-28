@@ -607,23 +607,24 @@ class ACPRuntime:
             )
             return
 
+        # Block indefinitely — no timeout, no fallback.
+        # CancelledError (e.g. /stop) propagates naturally to the execute loop.
+        # Any other unexpected exception sends an error response to the
+        # subprocess so it is not left hanging on an unanswered request.
         try:
-            choice: PermissionChoice = await asyncio.wait_for(
-                on_permission(internal_req),
-                timeout=self._settings.permission_timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "ACPRuntime[%s]: permission timed out after %.0fs, using first option",
-                self._session_id,
-                self._settings.permission_timeout_seconds,
-            )
-            choice = PermissionChoice(request_id="", option_index=1)
+            choice: PermissionChoice = await on_permission(internal_req)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.warning(
-                "ACPRuntime[%s]: on_permission raised: %s", self._session_id, exc
+                "ACPRuntime[%s]: on_permission raised unexpectedly: %s",
+                self._session_id,
+                exc,
             )
-            choice = PermissionChoice(request_id="", option_index=1)
+            await self._client.send_error_response(
+                perm_req.jsonrpc_id, -32000, "permission handling failed"
+            )
+            return
 
         # Map the 1-based index back to the option_id string.
         chosen_index = max(1, choice.option_index) - 1

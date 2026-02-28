@@ -70,7 +70,7 @@ def reset_registry():
 
 @pytest.fixture
 def settings():
-    return Settings(task_queue_capacity=10, permission_timeout_seconds=1.0)
+    return Settings(task_queue_capacity=10)
 
 
 @pytest.fixture

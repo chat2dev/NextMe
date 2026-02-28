@@ -546,9 +546,8 @@ class SessionWorker:
         "reject"), the active task is marked as cancelled so the agent stops
         processing after the current tool call completes.
 
-        Note: For ACP executors with a short internal permission timeout (e.g.
-        coco ~10 s), ``permission_timeout_seconds`` should be set below that
-        threshold so our response arrives before the executor rejects the call.
+        There is no timeout: the method blocks indefinitely until the user
+        responds or the worker is cancelled (e.g. via ``/stop``).
 
         Args:
             req: The permission request from ACPRuntime.
@@ -600,10 +599,10 @@ class SessionWorker:
         future = self._session.set_permission_pending(req.options)
 
         try:
-            choice = await asyncio.wait_for(
-                asyncio.shield(future),
-                timeout=self._settings.permission_timeout_seconds,
-            )
+            # Block indefinitely — no timeout, no fallback.
+            # asyncio.shield keeps the future alive if the coroutine is
+            # cancelled (e.g. /stop); cancel_permission() cleans it up below.
+            choice = await asyncio.shield(future)
             logger.info(
                 "SessionWorker[%s]: permission choice index=%d label=%r",
                 self._session.context_id,
@@ -623,14 +622,6 @@ class SessionWorker:
                             self._session.context_id,
                         )
             return choice
-        except asyncio.TimeoutError:
-            logger.warning(
-                "SessionWorker[%s]: permission timed out after %.0fs",
-                self._session.context_id,
-                self._settings.permission_timeout_seconds,
-            )
-            self._session.cancel_permission()
-            return PermissionChoice(request_id=req.request_id, option_index=1)
         except asyncio.CancelledError:
             self._session.cancel_permission()
             raise

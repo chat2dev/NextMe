@@ -46,7 +46,6 @@ def settings():
     return Settings(
         task_queue_capacity=10,
         progress_debounce_seconds=0.0,  # no debounce for tests
-        permission_timeout_seconds=1.0,
     )
 
 
@@ -300,7 +299,6 @@ async def test_on_progress_debounces_when_not_enough_time_elapsed(worker, replie
     worker._settings = Settings(
         task_queue_capacity=10,
         progress_debounce_seconds=10.0,  # very long debounce
-        permission_timeout_seconds=1.0,
         streaming_enabled=True,
     )
     worker._progress_message_id = "msg_123"
@@ -333,7 +331,6 @@ async def test_on_progress_updates_when_tool_name_provided(worker, replier):
     worker._settings = Settings(
         task_queue_capacity=10,
         progress_debounce_seconds=10.0,
-        permission_timeout_seconds=1.0,
         streaming_enabled=True,
     )
     worker._progress_message_id = "msg_123"
@@ -394,44 +391,6 @@ async def test_on_permission_sends_permission_card(worker, session, replier):
     replier.build_permission_card.assert_called_once()
     replier.send_card.assert_awaited()
 
-
-async def test_on_permission_timeout_returns_default_choice(worker, session, replier):
-    """When no one resolves the future, _on_permission should timeout and return index=1."""
-    # Use a very short timeout
-    worker._settings = Settings(
-        task_queue_capacity=10,
-        progress_debounce_seconds=0.0,
-        permission_timeout_seconds=0.05,  # 50ms
-    )
-    req = PermissionRequest(
-        session_id="oc_chat:ou_user",
-        request_id="req-timeout",
-        description="This will timeout",
-        options=[PermOption(index=1, label="Default"), PermOption(index=2, label="Other")],
-    )
-    # Don't resolve the future — let it time out
-    result = await worker._on_permission(req)
-    assert result.option_index == 1
-    assert result.request_id == "req-timeout"
-
-
-async def test_on_permission_timeout_calls_cancel_permission(worker, session, replier):
-    """After a timeout, cancel_permission should be called on the session."""
-    worker._settings = Settings(
-        task_queue_capacity=10,
-        progress_debounce_seconds=0.0,
-        permission_timeout_seconds=0.05,
-    )
-    req = PermissionRequest(
-        session_id="oc_chat:ou_user",
-        request_id="req-cancel",
-        description="This will timeout and cancel",
-        options=[PermOption(index=1, label="Default")],
-    )
-    with patch.object(session, "cancel_permission", wraps=session.cancel_permission) as mock_cancel:
-        await worker._on_permission(req)
-        # cancel_permission is called on timeout
-        mock_cancel.assert_called()
 
 
 async def test_on_permission_passes_context_id_as_session_id(worker, session, replier):

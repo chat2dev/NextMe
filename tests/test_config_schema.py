@@ -151,10 +151,6 @@ class TestSettings:
         s = Settings()
         assert s.progress_debounce_seconds == 0.5
 
-    def test_default_permission_timeout_seconds(self):
-        s = Settings()
-        assert s.permission_timeout_seconds == 300.0
-
     def test_context_compression_valid_values(self):
         for val in ("zlib", "lzma", "brotli"):
             s = Settings(context_compression=val)
@@ -168,7 +164,6 @@ class TestSettings:
             memory_debounce_seconds=10,
             log_level="DEBUG",
             progress_debounce_seconds=1.5,
-            permission_timeout_seconds=60.0,
         )
         assert s.claude_path == "/usr/local/bin/claude"
         assert s.acp_idle_timeout_seconds == 3600
@@ -176,7 +171,6 @@ class TestSettings:
         assert s.memory_debounce_seconds == 10
         assert s.log_level == "DEBUG"
         assert s.progress_debounce_seconds == 1.5
-        assert s.permission_timeout_seconds == 60.0
 
 
 # ---------------------------------------------------------------------------

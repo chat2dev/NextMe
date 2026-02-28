@@ -41,7 +41,6 @@ def make_settings() -> Settings:
     return Settings(
         task_queue_capacity=10,
         progress_debounce_seconds=0.0,
-        permission_timeout_seconds=2.0,
     )
 
 
@@ -168,13 +167,10 @@ async def test_permission_not_resolved_with_actual_id(tmp_path):
     This reproduces the bug where session_id in the button value was set to
     actual_id (e.g. 'd7ec3dbc-...') instead of context_id ('oc_xxx:ou_xxx'),
     causing handle_card_action to log 'no context for session_id' and leave
-    the permission future pending until timeout.
+    the permission future pending.  The correct context_id must be used to
+    actually resolve the permission and allow the task to complete.
     """
-    settings = Settings(
-        task_queue_capacity=10,
-        progress_debounce_seconds=0.0,
-        permission_timeout_seconds=0.3,  # short timeout for test speed
-    )
+    settings = make_settings()
     config = make_config(tmp_path)
     replier = make_replier()
     feishu_client = make_im_adapter(replier)
@@ -203,20 +199,34 @@ async def test_permission_not_resolved_with_actual_id(tmp_path):
     )
 
     await dispatcher.dispatch(task)
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0.1)  # let worker reach and send permission card
 
-    # Try to resolve with actual_id (the bug scenario) — should be a no-op.
+    # Verify there is a pending permission future on the session.
+    user_ctx = session_registry.get(CONTEXT_ID)
+    assert user_ctx is not None
+    session = user_ctx.sessions.get(PROJECT_NAME)
+    assert session is not None
+    assert session.perm_future is not None and not session.perm_future.done()
+
+    # Try to resolve with actual_id (the bug scenario) — must be a no-op.
     dispatcher.handle_card_action(
         session_id=ACTUAL_ID,  # wrong! this is actual_id, not context_id
         index=1,
         project_name=PROJECT_NAME,
     )
+    await asyncio.sleep(0.05)
 
-    # Permission was not resolved via the card action; task times out and
-    # defaults to index=1 anyway, so it still completes — but via timeout path.
-    await asyncio.sleep(0.5)
+    # Permission future still pending — wrong id did not resolve it.
+    assert not session.perm_future.done()
 
-    # Task completed via timeout (default choice=1), not via card action.
+    # Resolve correctly with context_id; task should now complete.
+    dispatcher.handle_card_action(
+        session_id=CONTEXT_ID,
+        index=1,
+        project_name=PROJECT_NAME,
+    )
+    await asyncio.sleep(0.3)
+
     replier.build_result_card.assert_called()
 
 

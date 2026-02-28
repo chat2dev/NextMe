@@ -45,7 +45,6 @@ def make_runtime(tmp_path, settings=None, executor="echo"):
     if settings is None:
         settings = Settings(
             progress_debounce_seconds=0.0,
-            permission_timeout_seconds=1.0,
         )
     return ACPRuntime(
         session_id="test-session",
@@ -59,7 +58,6 @@ def make_runtime(tmp_path, settings=None, executor="echo"):
 def settings():
     return Settings(
         progress_debounce_seconds=0.0,
-        permission_timeout_seconds=1.0,
     )
 
 
@@ -332,11 +330,10 @@ async def test_ensure_ready_sends_initialize_and_waits(runtime):
 
 async def test_ensure_ready_raises_on_timeout(tmp_path):
     """ensure_ready raises RuntimeError when initialize response never arrives."""
-    settings = Settings(progress_debounce_seconds=0.0, permission_timeout_seconds=0.1)
     rt = ACPRuntime(
         session_id="slow-session",
         cwd=str(tmp_path),
-        settings=settings,
+        settings=Settings(progress_debounce_seconds=0.0),
         executor="echo",
     )
 
@@ -544,42 +541,6 @@ async def test_execute_handles_permission_request(runtime):
         99, {"outcome": {"selected": {"optionId": "allow_once"}}}
     )
 
-
-async def test_execute_permission_timeout_uses_first_option(runtime):
-    """When on_permission times out, the first option is sent as the default."""
-    mock_client, queue, _ = _setup_runtime_ready(runtime)
-    runtime._settings = Settings(
-        progress_debounce_seconds=0.0,
-        permission_timeout_seconds=0.05,
-    )
-    task, _ = make_task("risky")
-
-    async def on_progress(delta, tool):
-        pass
-
-    async def on_permission(req):
-        await asyncio.sleep(9999)
-        return PermissionChoice(request_id="", option_index=2)
-
-    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
-    await queue.put({
-        "jsonrpc": "2.0",
-        "id": 88,
-        "method": "session/request_permission",
-        "params": {
-            "sessionId": "s1",
-            "toolCall": {},
-            "options": [{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"}],
-        },
-    })
-    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
-
-    await runtime.execute(task, on_progress, on_permission)
-
-    # Timeout → first option used.
-    mock_client.send_response.assert_awaited_once()
-    args = mock_client.send_response.call_args.args
-    assert args[1]["outcome"]["selected"]["optionId"] == "allow_once"
 
 
 async def test_execute_error_response_raises(runtime):
@@ -1031,7 +992,6 @@ async def test_execute_auto_approves_immediately_when_enabled(tmp_path):
     session_level_allow and fires a background notification."""
     settings = Settings(
         progress_debounce_seconds=0.0,
-        permission_timeout_seconds=1.0,
         permission_auto_approve=True,
     )
     runtime = make_runtime(tmp_path, settings=settings)
@@ -1079,7 +1039,6 @@ async def test_execute_no_auto_approve_when_disabled(tmp_path):
     """When permission_auto_approve=False (default) on_permission is called and awaited."""
     settings = Settings(
         progress_debounce_seconds=0.0,
-        permission_timeout_seconds=1.0,
         permission_auto_approve=False,
     )
     runtime = make_runtime(tmp_path, settings=settings)
