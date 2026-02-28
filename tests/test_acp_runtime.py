@@ -11,7 +11,10 @@ from nextme.acp.runtime import (
     _STOP_GRACEFUL_TIMEOUT_SECONDS,
     _STRIP_ENV_EXACT,
     _STRIP_ENV_PREFIX,
+    _pick_auto_approve_option,
+    _notify_auto_approved,
 )
+from nextme.acp.protocol import PermissionOption
 from nextme.config.schema import Settings
 from nextme.protocol.types import Task, PermissionChoice, PermOption, PermissionRequest
 
@@ -912,3 +915,207 @@ def test_regular_vars_preserved():
     assert env["USER"] == parent["USER"]
     assert env["ANTHROPIC_API_KEY"] == parent["ANTHROPIC_API_KEY"]
     assert env["VIRTUAL_ENV"] == parent["VIRTUAL_ENV"]
+
+
+# ---------------------------------------------------------------------------
+# _pick_auto_approve_option
+# ---------------------------------------------------------------------------
+
+
+def _make_perm_option(option_id: str, kind: str = "") -> PermissionOption:
+    return PermissionOption(option_id=option_id, name=option_id, kind=kind)
+
+
+def test_pick_auto_approve_prefers_session_level_allow():
+    options = [
+        _make_perm_option("reject_once", "reject_once"),
+        _make_perm_option("session_level_allow", "allow_always"),
+        _make_perm_option("allow_once", "allow_once"),
+    ]
+    assert _pick_auto_approve_option(options) == "session_level_allow"
+
+
+def test_pick_auto_approve_falls_back_to_allow_always():
+    options = [
+        _make_perm_option("reject_once", "reject_once"),
+        _make_perm_option("allow_always", "allow_always"),
+    ]
+    assert _pick_auto_approve_option(options) == "allow_always"
+
+
+def test_pick_auto_approve_falls_back_to_always_allow():
+    options = [
+        _make_perm_option("reject_once", "reject_once"),
+        _make_perm_option("always_allow", "always_allow"),
+    ]
+    assert _pick_auto_approve_option(options) == "always_allow"
+
+
+def test_pick_auto_approve_falls_back_to_allow_family_by_kind():
+    options = [
+        _make_perm_option("reject_once", "reject_once"),
+        _make_perm_option("custom_allow", "allow_custom"),
+    ]
+    assert _pick_auto_approve_option(options) == "custom_allow"
+
+
+def test_pick_auto_approve_falls_back_to_allow_family_by_option_id():
+    options = [
+        _make_perm_option("reject_once", "reject_once"),
+        _make_perm_option("allow_once", ""),  # no kind, but option_id contains "allow"
+    ]
+    assert _pick_auto_approve_option(options) == "allow_once"
+
+
+def test_pick_auto_approve_falls_back_to_first_when_no_allow():
+    options = [
+        _make_perm_option("reject_once", "reject_once"),
+        _make_perm_option("deny_all", "deny_all"),
+    ]
+    assert _pick_auto_approve_option(options) == "reject_once"
+
+
+def test_pick_auto_approve_empty_list_returns_fallback():
+    assert _pick_auto_approve_option([]) == "allow_once"
+
+
+# ---------------------------------------------------------------------------
+# _notify_auto_approved
+# ---------------------------------------------------------------------------
+
+
+async def test_notify_auto_approved_calls_on_permission_with_empty_options():
+    """_notify_auto_approved fires on_permission with a req whose options=[]."""
+    calls = []
+
+    async def on_permission(req: PermissionRequest) -> PermissionChoice:
+        calls.append(req)
+        return PermissionChoice(request_id=req.request_id, option_index=1)
+
+    req = PermissionRequest(
+        session_id="s1",
+        request_id="req-auto",
+        description="Run bash",
+        options=[PermOption(index=1, label="allow_once")],
+    )
+    await _notify_auto_approved(on_permission, req)
+
+    assert len(calls) == 1
+    assert calls[0].options == []  # empty — signals auto-approve notification
+    assert calls[0].description == "Run bash"
+    assert calls[0].request_id == "req-auto"
+
+
+async def test_notify_auto_approved_swallows_exceptions():
+    """Exceptions in on_permission are silently discarded (best-effort)."""
+    async def on_permission(req: PermissionRequest) -> PermissionChoice:
+        raise RuntimeError("unexpected error")
+
+    req = PermissionRequest(
+        session_id="s1",
+        request_id="req-err",
+        description="desc",
+        options=[],
+    )
+    # Should not raise.
+    await _notify_auto_approved(on_permission, req)
+
+
+# ---------------------------------------------------------------------------
+# Auto-approve path in execute / _handle_permission
+# ---------------------------------------------------------------------------
+
+
+async def test_execute_auto_approves_immediately_when_enabled(tmp_path):
+    """When permission_auto_approve=True the runtime responds immediately with
+    session_level_allow and fires a background notification."""
+    settings = Settings(
+        progress_debounce_seconds=0.0,
+        permission_timeout_seconds=1.0,
+        permission_auto_approve=True,
+    )
+    runtime = make_runtime(tmp_path, settings=settings)
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
+
+    task, _ = make_task("risky")
+    perm_notify_calls = []
+
+    async def on_progress(delta, tool):
+        pass
+
+    async def on_permission(req: PermissionRequest) -> PermissionChoice:
+        perm_notify_calls.append(req)
+        return PermissionChoice(request_id=req.request_id, option_index=1)
+
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
+    await queue.put({
+        "jsonrpc": "2.0",
+        "id": 99,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "s1",
+            "toolCall": {"title": "Run bash command"},
+            "options": [
+                {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                {"optionId": "session_level_allow", "name": "Allow for session", "kind": "allow_always"},
+            ],
+        },
+    })
+    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
+
+    await runtime.execute(task, on_progress, on_permission)
+
+    # Response sent immediately with session_level_allow (highest preference).
+    mock_client.send_response.assert_awaited_once_with(
+        99, {"outcome": {"selected": {"optionId": "session_level_allow"}}}
+    )
+    # on_permission is eventually called via background task with empty options.
+    await asyncio.sleep(0.05)  # let background task run
+    assert len(perm_notify_calls) == 1
+    assert perm_notify_calls[0].options == []
+
+
+async def test_execute_no_auto_approve_when_disabled(tmp_path):
+    """When permission_auto_approve=False (default) on_permission is called and awaited."""
+    settings = Settings(
+        progress_debounce_seconds=0.0,
+        permission_timeout_seconds=1.0,
+        permission_auto_approve=False,
+    )
+    runtime = make_runtime(tmp_path, settings=settings)
+    mock_client, queue, _ = _setup_runtime_ready(runtime)
+
+    task, _ = make_task("risky")
+    perm_calls = []
+
+    async def on_progress(delta, tool):
+        pass
+
+    async def on_permission(req: PermissionRequest) -> PermissionChoice:
+        perm_calls.append(req)
+        return PermissionChoice(request_id=req.request_id, option_index=1)
+
+    await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
+    await queue.put({
+        "jsonrpc": "2.0",
+        "id": 77,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": "s1",
+            "toolCall": {"title": "Write file"},
+            "options": [
+                {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+            ],
+        },
+    })
+    await queue.put({"jsonrpc": "2.0", "id": 2, "result": {"stopReason": "end_turn"}})
+
+    await runtime.execute(task, on_progress, on_permission)
+
+    # on_permission called with non-empty options (awaited synchronously).
+    assert len(perm_calls) == 1
+    assert len(perm_calls[0].options) == 1  # options present
+    # Response sent using user's chosen option.
+    mock_client.send_response.assert_awaited_once_with(
+        77, {"outcome": {"selected": {"optionId": "allow_once"}}}
+    )

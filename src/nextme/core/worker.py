@@ -537,6 +537,11 @@ class SessionWorker:
         Sends a permission card to the chat, then waits on the session's
         permission future (resolved when the user clicks a button).
 
+        When ``req.options`` is empty this is an auto-approve notification
+        (fired by :func:`~nextme.acp.runtime._notify_auto_approved`): a simple
+        informational text is sent and the method returns immediately without
+        waiting for user input.
+
         If the user chooses a deny/reject option (label contains "deny" or
         "reject"), the active task is marked as cancelled so the agent stops
         processing after the current tool call completes.
@@ -558,6 +563,19 @@ class SessionWorker:
             req.request_id,
             req.description,
         )
+
+        # Auto-approve notification path: empty options means the runtime has
+        # already responded on our behalf — just inform the user and return.
+        if not req.options:
+            desc = req.description or "工具调用"
+            try:
+                await self._replier.send_text(chat_id, f"已自动授权: {desc}")
+            except Exception:
+                logger.exception(
+                    "SessionWorker[%s]: failed to send auto-approve notification",
+                    self._session.context_id,
+                )
+            return PermissionChoice(request_id=req.request_id, option_index=1)
 
         # Build and send the permission card.
         # session_id = context_id so handle_card_action can look up the

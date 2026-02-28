@@ -536,6 +536,47 @@ async def test_on_permission_allow_does_not_cancel_active_task(worker, session, 
     assert active_task_obj.canceled is False
 
 
+async def test_on_permission_auto_approve_notification_returns_immediately(worker, session, replier):
+    """When options is empty (auto-approve notification), _on_permission returns
+    immediately without waiting for user input."""
+    req = PermissionRequest(
+        session_id="oc_chat:ou_user",
+        request_id="req-auto",
+        description="Run bash command",
+        options=[],  # empty = auto-approve notification
+    )
+    result = await worker._on_permission(req)
+    assert result.option_index == 1
+    assert result.request_id == "req-auto"
+
+
+async def test_on_permission_auto_approve_notification_sends_text(worker, session, replier):
+    """Auto-approve notification sends an informational text, not a card."""
+    req = PermissionRequest(
+        session_id="oc_chat:ou_user",
+        request_id="req-auto-text",
+        description="Run bash command",
+        options=[],
+    )
+    await worker._on_permission(req)
+    replier.send_text.assert_awaited_once()
+    text_arg = replier.send_text.call_args.args[1]
+    assert "Run bash command" in text_arg
+
+
+async def test_on_permission_auto_approve_notification_does_not_build_permission_card(worker, session, replier):
+    """Auto-approve notification must NOT send a clickable permission card."""
+    req = PermissionRequest(
+        session_id="oc_chat:ou_user",
+        request_id="req-auto-nocard",
+        description="Write file",
+        options=[],
+    )
+    await worker._on_permission(req)
+    replier.build_permission_card.assert_not_called()
+    replier.send_card.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # _execute_task integration-style tests
 # ---------------------------------------------------------------------------

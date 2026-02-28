@@ -69,6 +69,56 @@ _STOP_GRACEFUL_TIMEOUT_SECONDS = 5
 _STRIP_ENV_EXACT: frozenset[str] = frozenset({"CLAUDECODE"})
 _STRIP_ENV_PREFIX = "CLAUDE_CODE_"
 
+# Option IDs that represent session-wide approval, ordered by preference.
+# If any of these appear in the permission request options, we pick the first
+# match so subsequent tool calls in the same session won't trigger again.
+_SESSION_ALLOW_OPTION_IDS = ("session_level_allow", "allow_always", "always_allow")
+
+
+def _pick_auto_approve_option(options: list) -> str:
+    """Return the best option_id for auto-approval.
+
+    Preference order:
+    1. Any session-wide allow option (avoids repeated permission prompts).
+    2. First allow-family option (kind contains "allow").
+    3. First option in the list.
+    4. Hard-coded ``"allow_once"`` fallback.
+    """
+    for preferred in _SESSION_ALLOW_OPTION_IDS:
+        for opt in options:
+            if opt.option_id == preferred:
+                return preferred
+    for opt in options:
+        if "allow" in (opt.kind or "").lower() or "allow" in (opt.option_id or "").lower():
+            return opt.option_id
+    return options[0].option_id if options else "allow_once"
+
+
+async def _notify_auto_approved(
+    on_permission: Callable[[PermissionRequest], Awaitable[PermissionChoice]],
+    req: PermissionRequest,
+) -> None:
+    """Call on_permission with a pre-resolved choice for informational display.
+
+    The choice uses option_index=1 (first allow option) so the worker can show
+    an informational card without waiting for user input.  Any exception is
+    swallowed — this is a best-effort notification.
+    """
+    try:
+        auto_choice = PermissionChoice(request_id=req.request_id, option_index=1)
+        # Inject the auto-choice into a synthetic PermissionRequest that has no
+        # interactive options (empty list), signalling the worker to skip the
+        # permission card's clickable buttons and show a read-only notice.
+        info_req = PermissionRequest(
+            session_id=req.session_id,
+            request_id=req.request_id,
+            description=req.description,
+            options=[],  # empty → worker builds a non-interactive info card
+        )
+        await on_permission(info_req)
+    except Exception:
+        pass  # notification is best-effort
+
 
 class ACPRuntime:
     """Manages one ACP subprocess and drives the prompt/response lifecycle.
@@ -525,6 +575,37 @@ class ACPRuntime:
             description=description,
             options=perm_options,
         )
+
+        # ------------------------------------------------------------------
+        # Auto-approve mode: respond immediately without waiting for user.
+        #
+        # Some ACP executors (e.g. coco acp serve) have a very short internal
+        # timeout (~2-4 s) for permission responses.  By the time the user
+        # receives the Feishu card on mobile and clicks a button, coco has
+        # already timed out and rejected the tool call.
+        #
+        # When permission_auto_approve=True we send the broadest available
+        # allow option (session_level_allow > first allow > first option)
+        # immediately, then fire on_permission as a background task so the
+        # user still sees an informational card (without clickable buttons).
+        # ------------------------------------------------------------------
+        if self._settings.permission_auto_approve:
+            # Pick the best "allow" option: prefer session-wide allow.
+            option_id = _pick_auto_approve_option(perm_req.options)
+            result = permission_response_result(option_id)
+            await self._client.send_response(perm_req.jsonrpc_id, result)
+            logger.info(
+                "ACPRuntime[%s]: permission auto-approved (option=%r, description=%r)",
+                self._session_id,
+                option_id,
+                description,
+            )
+            # Notify the user asynchronously (best-effort, does not block).
+            asyncio.create_task(
+                _notify_auto_approved(on_permission, internal_req),
+                name=f"perm-notify-{self._session_id}",
+            )
+            return
 
         try:
             choice: PermissionChoice = await asyncio.wait_for(

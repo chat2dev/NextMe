@@ -60,6 +60,18 @@ class Settings(BaseModel):
     log_level: str = "INFO"
     progress_debounce_seconds: float = 0.5
     permission_timeout_seconds: float = 300.0
+    permission_auto_approve: bool = False
+    """Auto-approve permission requests immediately without waiting for user input.
+
+    When ``True``, the runtime responds to ``session/request_permission`` with
+    the first session-wide allow option (``session_level_allow``) immediately
+    and sends the user an informational card (no buttons).
+
+    Enable this for ACP executors with short internal permission timeouts
+    (e.g. ``coco acp serve``, which times out in ~2–4 s before the user can
+    click a Feishu card on mobile).  The direct ``claude`` executor blocks
+    indefinitely and does **not** need this setting.
+    """
     streaming_enabled: bool = False
     """Enable cardkit streaming mode for real-time typewriter updates.
     When False (default) the bot uses debounced full-card PATCH updates."""
