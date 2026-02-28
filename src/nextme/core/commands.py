@@ -90,16 +90,21 @@ async def handle_stop(
     session: Session,
     replier: Replier,
     chat_id: str,
+    runtime: Optional[AgentRuntime] = None,
 ) -> None:
     """Cancel the task currently executing in *session*.
 
-    Sets the active task's ``canceled`` flag and cancels any pending permission
-    future.  Sends a confirmation text message.
+    Sets the active task's ``canceled`` flag, cancels any pending permission
+    future, and calls ``runtime.cancel()`` to interrupt the agent subprocess.
+    Sends a confirmation text message.
 
     Args:
         session: The active session.
         replier: Feishu message sender.
         chat_id: Target chat.
+        runtime: The associated agent runtime, if any.  When provided,
+            ``runtime.cancel()`` is called to immediately interrupt the
+            in-flight subprocess (SIGTERM / session/cancel).
     """
     logger.info(
         "handle_stop: stopping active task for context_id=%r", session.context_id
@@ -115,6 +120,15 @@ async def handle_stop(
         )
 
     session.cancel_permission()
+
+    if runtime is not None:
+        try:
+            await runtime.cancel()
+        except Exception:
+            logger.exception(
+                "handle_stop: error calling runtime.cancel() for context_id=%r",
+                session.context_id,
+            )
 
     try:
         await replier.send_text(chat_id, "已发送取消信号，当前任务将尽快停止。")

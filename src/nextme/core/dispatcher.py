@@ -362,7 +362,8 @@ class TaskDispatcher:
             if session is None:
                 await replier.send_text(chat_id, "当前没有活跃 Session。")
                 return
-            await handle_stop(session, replier, chat_id)
+            runtime = self._acp_registry.get(f"{context_id}:{session.project_name}")
+            await handle_stop(session, replier, chat_id, runtime=runtime)
 
         elif command == "/status":
             await handle_status(user_ctx, replier, chat_id)

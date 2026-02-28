@@ -162,6 +162,21 @@ async def test_handle_stop_handles_send_text_exception_gracefully(session):
     await handle_stop(session, bad_replier, "oc_chat")
 
 
+async def test_handle_stop_calls_runtime_cancel_when_provided(session, replier):
+    """handle_stop calls runtime.cancel() when runtime is provided."""
+    runtime = MagicMock()
+    runtime.cancel = AsyncMock()
+    await handle_stop(session, replier, "oc_chat", runtime=runtime)
+    runtime.cancel.assert_awaited_once()
+
+
+async def test_handle_stop_skips_runtime_cancel_when_not_provided(session, replier):
+    """handle_stop is safe when no runtime is passed (backward-compat)."""
+    # Should not raise and must still send the confirmation text.
+    await handle_stop(session, replier, "oc_chat", runtime=None)
+    replier.send_text.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # handle_help tests
 # ---------------------------------------------------------------------------
