@@ -103,13 +103,14 @@ class TestACPClientSendResponse:
         mock_proc = make_mock_proc()
         client = ACPClient(mock_proc)
 
-        await client.send_response(7, {"outcome": {"selected": {"optionId": "allow_once"}}})
+        await client.send_response(7, {"outcome": {"outcome": "selected", "optionId": "allow_once"}})
 
         written = mock_proc.stdin.write.call_args[0][0]
         d = json.loads(written.decode("utf-8").rstrip())
         assert d["jsonrpc"] == "2.0"
         assert d["id"] == 7
-        assert d["result"]["outcome"]["selected"]["optionId"] == "allow_once"
+        assert d["result"]["outcome"]["outcome"] == "selected"
+        assert d["result"]["outcome"]["optionId"] == "allow_once"
 
     async def test_send_error_response(self):
         mock_proc = make_mock_proc()

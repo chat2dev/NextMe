@@ -538,7 +538,7 @@ async def test_execute_handles_permission_request(runtime):
     assert perm_calls[0].description == "Run bash command"
     # Response sent with the user's chosen option (index=1 → allow_once).
     mock_client.send_response.assert_awaited_once_with(
-        99, {"outcome": {"selected": {"optionId": "allow_once"}}}
+        99, {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
     )
 
 
@@ -1046,7 +1046,7 @@ async def test_execute_auto_approves_immediately_when_enabled(tmp_path):
 
     # Response sent immediately with session_level_allow (highest preference).
     mock_client.send_response.assert_awaited_once_with(
-        99, {"outcome": {"selected": {"optionId": "session_level_allow"}}}
+        99, {"outcome": {"outcome": "selected", "optionId": "session_level_allow"}}
     )
     # on_permission is eventually called via background task with empty options.
     await asyncio.sleep(0.05)  # let background task run
@@ -1095,7 +1095,7 @@ async def test_execute_no_auto_approve_when_disabled(tmp_path):
     assert len(perm_calls[0].options) == 1  # options present
     # Response sent using user's chosen option.
     mock_client.send_response.assert_awaited_once_with(
-        77, {"outcome": {"selected": {"optionId": "allow_once"}}}
+        77, {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
     )
 
 

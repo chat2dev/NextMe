@@ -171,11 +171,13 @@ class TestParamBuilders:
 class TestPermissionHelpers:
     def test_permission_response_result(self):
         r = permission_response_result("allow_once")
-        assert r["outcome"]["selected"]["optionId"] == "allow_once"
+        # ACP wire format: tagged-union with "outcome" as string discriminant
+        assert r["outcome"]["outcome"] == "selected"
+        assert r["outcome"]["optionId"] == "allow_once"
 
     def test_permission_cancel_result(self):
         r = permission_cancel_result()
-        assert "cancelled" in r["outcome"]
+        assert r["outcome"]["outcome"] == "cancelled"
 
     def test_parse_permission_request(self):
         msg = {

@@ -183,12 +183,19 @@ def parse_permission_request(msg: dict[str, Any]) -> InboundPermissionRequest:
 def permission_response_result(option_id: str) -> dict[str, Any]:
     """Build the ``result`` for a ``session/request_permission`` response.
 
+    ACP wire format (tagged-union, from SDK MarshalJSON):
+    ``{"outcome": {"outcome": "selected", "optionId": "<id>"}}``
+
+    The inner object uses ``"outcome"`` as the string discriminant and
+    ``"optionId"`` as a sibling field.  The outer ``"outcome"`` key is the
+    field name in ``RequestPermissionResponse``.
+
     Args:
         option_id: The chosen ``PermissionOption.option_id`` string.
     """
-    return {"outcome": {"selected": {"optionId": option_id}}}
+    return {"outcome": {"outcome": "selected", "optionId": option_id}}
 
 
 def permission_cancel_result() -> dict[str, Any]:
     """Build a cancellation result for a ``session/request_permission`` response."""
-    return {"outcome": {"cancelled": {}}}
+    return {"outcome": {"outcome": "cancelled"}}
