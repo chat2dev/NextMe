@@ -60,6 +60,9 @@ class Settings(BaseModel):
     log_level: str = "INFO"
     progress_debounce_seconds: float = 0.5
     permission_timeout_seconds: float = 300.0
+    streaming_enabled: bool = False
+    """Enable cardkit streaming mode for real-time typewriter updates.
+    When False (default) the bot uses debounced full-card PATCH updates."""
 
 
 class ProjectState(BaseModel):

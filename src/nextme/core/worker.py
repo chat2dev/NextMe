@@ -204,14 +204,16 @@ class SessionWorker:
         # (cardkit accepts it; the IM renderer only sees a card_id reference,
         # never the raw JSON, so there is no 200621 parse error).
         chat_id = self._session.context_id.split(":")[0]
-        try:
-            streaming_card = self._replier.build_streaming_progress_card(
-                content="思考中...",
-                title=f"思考中... {self._proj}",
-            )
-            card_id = await self._replier.create_card(streaming_card)
-        except Exception:
-            card_id = ""
+        card_id = ""
+        if self._settings.streaming_enabled:
+            try:
+                streaming_card = self._replier.build_streaming_progress_card(
+                    content="思考中...",
+                    title=f"思考中... {self._proj}",
+                )
+                card_id = await self._replier.create_card(streaming_card)
+            except Exception:
+                card_id = ""
 
         streaming_ok = False
         if card_id:

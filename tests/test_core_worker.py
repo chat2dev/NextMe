@@ -535,15 +535,27 @@ async def test_on_permission_allow_does_not_cancel_active_task(worker, session, 
 # ---------------------------------------------------------------------------
 
 async def test_execute_task_sends_initial_progress_card(worker, session, replier, acp_registry):
-    """With create_card returning '' (fixture default), falls back to regular card."""
+    """streaming_enabled=False (default): streaming not attempted, regular card used."""
     _, mock_runtime = acp_registry
     task, replies = make_task("hello")
     await worker._execute_task(task)
-    # Streaming card was attempted (always tried)
-    replier.build_streaming_progress_card.assert_called()
-    # Cardkit create failed (returns ""); fallback regular card used
+    # Streaming disabled by default — cardkit path skipped entirely
+    replier.build_streaming_progress_card.assert_not_called()
+    replier.create_card.assert_not_awaited()
+    # Regular card is used
     replier.build_progress_card.assert_called()
     replier.send_card.assert_awaited()
+
+
+async def test_execute_task_attempts_streaming_when_enabled(worker, session, replier, acp_registry):
+    """streaming_enabled=True: cardkit path is attempted."""
+    _, mock_runtime = acp_registry
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
+    task, _ = make_task("hello")
+    await worker._execute_task(task)
+    # Streaming attempted (create_card returns "" → fallback to regular)
+    replier.build_streaming_progress_card.assert_called()
+    replier.create_card.assert_awaited()
 
 
 async def test_execute_task_sends_result_on_success(worker, session, replier, acp_registry):
@@ -817,6 +829,7 @@ async def test_execute_task_uses_reply_card_by_id_for_group_chat_when_create_car
     """Group chat + create_card succeeds → uses reply_card_by_id for progress;
     result is appended as footer to streaming card (no new reply sent)."""
     _, mock_runtime = acp_registry
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     replier.create_card = AsyncMock(return_value="card_xyz")
     replier.reply_card_by_id = AsyncMock(return_value="om_streaming_123")
     task, _ = make_task("hello")
@@ -839,6 +852,7 @@ async def test_execute_task_uses_reply_card_by_id_for_p2p_chat_when_create_card_
     """P2P chat + create_card succeeds → uses reply_card_by_id with in_thread=False;
     result finalizes streaming card via update_card_entity (no new reply sent)."""
     _, mock_runtime = acp_registry
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     replier.create_card = AsyncMock(return_value="card_xyz")
     replier.reply_card_by_id = AsyncMock(return_value="om_streaming_p2p")
     task, _ = make_task("hello")
@@ -859,6 +873,7 @@ async def test_execute_task_uses_send_card_by_id_when_no_message_id_and_create_c
     """No message_id + create_card succeeds → uses send_card_by_id for progress;
     result finalizes streaming card via update_card_entity (no new send_card)."""
     _, mock_runtime = acp_registry
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     replier.create_card = AsyncMock(return_value="card_xyz")
     replier.send_card_by_id = AsyncMock(return_value="om_by_id_456")
     task, _ = make_task("hello")
@@ -877,6 +892,7 @@ async def test_execute_task_card_id_is_none_after_cardkit_fallback(
 ):
     """When create_card returns '', _card_id stays None (fallback debounce)."""
     _, mock_runtime = acp_registry
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     replier.create_card = AsyncMock(return_value="")
     task, _ = make_task("hello")
     await worker._execute_task(task)
@@ -892,6 +908,7 @@ async def test_execute_task_falls_back_to_regular_card_when_reply_card_by_id_ret
     reply endpoint rejects the card_id reference format.
     """
     _, mock_runtime = acp_registry
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     replier.create_card = AsyncMock(return_value="card_xyz")
     replier.reply_card_by_id = AsyncMock(return_value="")  # simulate 230099
     task, _ = make_task("hello")
@@ -908,6 +925,7 @@ async def test_execute_task_card_id_set_when_create_card_succeeds(
 ):
     """When create_card succeeds, _card_id is set to the returned card_id."""
     _, mock_runtime = acp_registry
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     replier.create_card = AsyncMock(return_value="card_abc")
     replier.send_card_by_id = AsyncMock(return_value="om_123")
     task, _ = make_task("hello")
