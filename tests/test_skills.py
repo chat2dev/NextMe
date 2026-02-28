@@ -259,26 +259,114 @@ class TestSkillRegistry:
         skill = registry.get("this_trigger_does_not_exist_xyz")
         assert skill is None
 
-    def test_list_all_returns_all_registered_skills(self):
+    def test_list_all_returns_all_registered_skills(self, tmp_path, monkeypatch):
+        builtin = tmp_path / "builtin"
+        builtin.mkdir()
+        for trigger in ("review", "commit", "explain"):
+            (builtin / f"{trigger}.md").write_text(
+                f"---\nname: {trigger.title()}\ntrigger: {trigger}\n---\nTemplate.\n"
+            )
+        monkeypatch.setattr("nextme.skills.registry._BUILTIN_SKILLS_DIR", builtin)
+
         registry = SkillRegistry()
         registry.load()
 
         skills = registry.list_all()
         assert isinstance(skills, list)
-        assert len(skills) >= 3  # at least review, commit, explain
+        assert len(skills) >= 3
 
-    def test_non_existent_directory_silently_skipped(self, tmp_path, caplog):
-        # Use a project path with no .nextme/skills dir
+    def test_non_existent_directory_silently_skipped(self, tmp_path, caplog, monkeypatch):
+        # Use a project path with no .nextme/skills dir.
+        # Patch _BUILTIN_SKILLS_DIR to empty dir so test is self-contained.
+        empty = tmp_path / "empty_builtin"
+        empty.mkdir()
+        monkeypatch.setattr("nextme.skills.registry._BUILTIN_SKILLS_DIR", empty)
+
         non_existent_project = tmp_path / "no_project_here"
-
         registry = SkillRegistry()
-        # Should not raise
         with caplog.at_level(logging.DEBUG):
             registry.load(project_path=non_existent_project)
+        # Should not raise and may have loaded global skills only
+        assert isinstance(registry.list_all(), list)
 
-        # Should have loaded built-in skills fine
-        skills = registry.list_all()
-        assert len(skills) >= 1
+    def test_load_nested_skill_via_skill_md(self, tmp_path, monkeypatch):
+        """Tier-2 NextMe built-in: SKILL.md inside a subdirectory is loaded,
+        trigger defaults to the parent directory name."""
+        builtin = tmp_path / "builtin"
+        skill_dir = builtin / "my-tool"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: My Tool\ndescription: A test tool\n---\nTemplate.\n"
+        )
+        # Add a doc file that must be ignored.
+        (skill_dir / "README.md").write_text("# My Tool\nDocumentation.\n")
+        monkeypatch.setattr("nextme.skills.registry._BUILTIN_SKILLS_DIR", builtin)
+
+        registry = SkillRegistry()
+        registry.load()
+
+        skill = registry.get("my-tool")
+        assert skill is not None
+        assert skill.meta.name == "My Tool"
+        assert skill.meta.trigger == "my-tool"
+        assert skill.source == "nextme"
+
+    def test_load_deeply_nested_skill_md(self, tmp_path, monkeypatch):
+        """SKILL.md two levels deep (e.g. skills/public/<name>/SKILL.md) is found."""
+        builtin = tmp_path / "builtin"
+        skill_dir = builtin / "public" / "deep-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: Deep Skill\ndescription: deep\n---\nTemplate.\n"
+        )
+        monkeypatch.setattr("nextme.skills.registry._BUILTIN_SKILLS_DIR", builtin)
+
+        registry = SkillRegistry()
+        registry.load()
+
+        skill = registry.get("deep-skill")
+        assert skill is not None
+        assert skill.meta.trigger == "deep-skill"
+
+    def test_readme_md_inside_subdir_is_not_loaded_as_skill(self, tmp_path, monkeypatch):
+        """Non-SKILL.md files inside subdirectories are ignored."""
+        builtin = tmp_path / "builtin"
+        subdir = builtin / "some-tool"
+        subdir.mkdir(parents=True)
+        (subdir / "README.md").write_text(
+            "---\nname: Readme\ntrigger: readme\n---\nDoc.\n"
+        )
+        monkeypatch.setattr("nextme.skills.registry._BUILTIN_SKILLS_DIR", builtin)
+
+        registry = SkillRegistry()
+        registry.load()
+
+        assert registry.get("readme") is None
+        assert registry.get("some-tool") is None
+
+    def test_project_nested_skill_overrides_builtin(self, tmp_path, monkeypatch):
+        """Tier-3 project skill (nested SKILL.md) overrides tier-2 built-in."""
+        builtin = tmp_path / "builtin"
+        builtin.mkdir()
+        (builtin / "review.md").write_text(
+            "---\nname: Builtin Review\ntrigger: review\n---\nBuiltin.\n"
+        )
+        monkeypatch.setattr("nextme.skills.registry._BUILTIN_SKILLS_DIR", builtin)
+
+        # Project skill in nested dir.
+        proj_skill_dir = tmp_path / "project" / ".nextme" / "skills" / "review"
+        proj_skill_dir.mkdir(parents=True)
+        (proj_skill_dir / "SKILL.md").write_text(
+            "---\nname: Project Review\ndescription: Override\n---\nProject.\n"
+        )
+
+        registry = SkillRegistry()
+        registry.load(project_path=tmp_path / "project")
+
+        skill = registry.get("review")
+        assert skill is not None
+        assert skill.meta.name == "Project Review"
+        assert skill.source == "project"
 
     def test_invalid_skill_file_silently_skipped(self, tmp_path, caplog):
         skill_dir = tmp_path / ".nextme" / "skills"

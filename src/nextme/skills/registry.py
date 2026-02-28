@@ -1,13 +1,30 @@
 """SkillRegistry — scan and register skill ``.md`` files.
 
-Discovery priority (high to low)
----------------------------------
-1. ``{project_path}/.nextme/skills/*.md``  — project-local overrides
-2. ``~/.nextme/skills/*.md``               — user-global skills
-3. ``{package_root}/skills/*.md``          — built-in skills bundled with nextme
+Three-tier discovery (low → high priority; higher tier shadows lower)
+---------------------------------------------------------------------
+1. **Global** (``source="global"``)
+   ``~/.claude/skills/<name>/SKILL.md`` — Claude built-in or installed skills.
+   Trigger is taken from the subdirectory name (or frontmatter if present).
 
-A skill loaded from a higher-priority directory *shadows* any skill with the
-same trigger from a lower-priority directory.
+2. **NextMe built-in** (``source="nextme"``)
+   ``{package_root}/skills/`` — skills bundled with NextMe, including nested
+   subdirectories (e.g. ``skills/public/<name>/SKILL.md``).
+   Also scans ``~/.nextme/skills/`` for user-installed NextMe skills.
+
+3. **Project** (``source="project"``)
+   ``{project_path}/.nextme/skills/`` — project-local skills, including
+   nested subdirectories.  Highest priority; overrides all other tiers.
+
+Within each tier, skills are loaded in alphabetical order.  A skill loaded
+from a higher-priority tier *shadows* any skill with the same trigger from
+a lower-priority tier.
+
+File patterns recognised inside each directory
+----------------------------------------------
+* **Flat**  ``{dir}/<name>.md``            — trigger defaults to file stem.
+* **Nested** ``{dir}/**/<name>/SKILL.md``  — trigger defaults to the
+  immediate parent directory name.  Other ``.md`` files inside the
+  subdirectory (README, QUICKSTART, …) are ignored.
 """
 
 from __future__ import annotations
@@ -23,9 +40,8 @@ logger = logging.getLogger(__name__)
 _NEXTME_HOME = Path("~/.nextme").expanduser()
 _CLAUDE_HOME = Path("~/.claude").expanduser()
 
-# Built-in skills directory: go up four levels from this file
-# (src/nextme/skills/registry.py → src/nextme/skills → src/nextme → src → project root)
-# then into skills/.
+# Tier-2 built-in skills directory: four levels up from this file
+# src/nextme/skills/registry.py → src/nextme/skills → src/nextme → src → project root
 _BUILTIN_SKILLS_DIR: Path = Path(__file__).parent.parent.parent.parent / "skills"
 
 
@@ -35,7 +51,7 @@ _BUILTIN_SKILLS_DIR: Path = Path(__file__).parent.parent.parent.parent / "skills
 
 
 class SkillRegistry:
-    """Scan and register skill ``.md`` files from multiple directories.
+    """Scan and register skill ``.md`` files from the three skill tiers.
 
     Usage::
 
@@ -60,41 +76,36 @@ class SkillRegistry:
         project_path: Path | None = None,
         executors: set[str] | None = None,
     ) -> None:
-        """Scan all skill directories and register skills by trigger.
+        """Scan all skill tiers and register skills by trigger.
 
-        Directories are scanned in order from *lowest* to *highest*
-        priority so that higher-priority skills overwrite lower-priority
-        ones in the registry.
+        Tiers are loaded from *lowest* to *highest* priority so that
+        higher-priority skills overwrite lower-priority ones.
 
         Parameters
         ----------
         project_path:
-            Optional project root directory.  When provided, the
-            ``.nextme/skills/`` subdirectory within it is also scanned.
+            Optional project root directory.  When provided,
+            ``{project_path}/.nextme/skills/`` is scanned as tier 3.
         executors:
-            Set of executor names used across all configured projects
-            (e.g. ``{"claude", "cc-acp"}``).  When *None* the method falls
-            back to including global skills for all known executor types.
-            Currently only ``"claude"``-prefixed executors map to a global
-            skill directory (``~/.claude/skills/``).
+            Set of executor names (e.g. ``{"claude"}``).  When ``None``
+            or when the set contains a ``"claude"``-prefixed executor,
+            the global tier (``~/.claude/skills/``) is included.
         """
         self._skills.clear()
 
-        # Order: built-in (lowest) → nextme-global → project-local (highest)
-        directories: list[tuple[Path, str]] = [
-            (_BUILTIN_SKILLS_DIR, "builtin"),
-            (_NEXTME_HOME / "skills", "nextme"),
-        ]
-        if project_path is not None:
-            directories.append((project_path / ".nextme" / "skills", "project"))
-
-        for directory, source in directories:
-            self._load_directory(directory, source=source)
-
-        # Global skills from executor-specific directories.
-        # ~/.claude/skills/<name>/SKILL.md — only for claude-based executors.
+        # Tier 1: Global — Claude's built-in / installed skills (lowest priority).
         if executors is None or any(e.startswith("claude") for e in executors):
-            self._load_claude_skills()
+            self._load_directory(_CLAUDE_HOME / "skills", source="global")
+
+        # Tier 2: NextMe built-in (package) + user-installed NextMe skills.
+        self._load_directory(_BUILTIN_SKILLS_DIR, source="nextme")
+        self._load_directory(_NEXTME_HOME / "skills", source="nextme")
+
+        # Tier 3: Project-local (highest priority).
+        if project_path is not None:
+            self._load_directory(
+                project_path / ".nextme" / "skills", source="project"
+            )
 
     def get(self, trigger: str) -> Optional[Skill]:
         """Return the :class:`Skill` registered for *trigger*, or ``None``.
@@ -115,78 +126,57 @@ class SkillRegistry:
     # ------------------------------------------------------------------
 
     def _load_directory(self, directory: Path, *, source: str = "") -> None:
-        """Load all ``.md`` files from *directory* into the registry.
+        """Load skill files from *directory*, including nested subdirectories.
 
-        Non-existent directories are silently skipped.  Files that fail
-        to parse are logged as warnings and skipped.
+        Two file patterns are recognised:
+
+        * **Flat**: ``{directory}/<name>.md`` — trigger defaults to file stem.
+        * **Nested**: ``{directory}/**/<name>/SKILL.md`` — trigger defaults to
+          the immediate parent directory name.  Other ``.md`` files inside
+          subdirectories are ignored (treated as documentation).
+
+        Non-existent directories are silently skipped.  Files that fail to
+        parse are logged as warnings and skipped.
         """
         if not directory.is_dir():
             logger.debug("SkillRegistry: directory not found, skipping: %s", directory)
             return
 
-        skill_files = sorted(directory.glob("*.md"))
-        if not skill_files:
+        # Collect (path, trigger_override) pairs.
+        candidates: list[tuple[Path, str]] = []
+
+        # Flat .md files directly in the directory root.
+        for path in sorted(directory.glob("*.md")):
+            candidates.append((path, path.stem))
+
+        # SKILL.md files in any subdirectory at any depth.
+        for path in sorted(directory.rglob("SKILL.md")):
+            candidates.append((path, path.parent.name))
+
+        if not candidates:
             logger.debug("SkillRegistry: no skill files in %s", directory)
             return
 
-        logger.debug(
-            "SkillRegistry: loading %d skill file(s) from %s",
-            len(skill_files),
-            directory,
-        )
-
-        for path in skill_files:
-            try:
-                skill = load_skill_file(path, source=source)
-            except (ValueError, OSError) as exc:
-                logger.warning(
-                    "SkillRegistry: failed to load skill file %r: %s", str(path), exc
-                )
-                continue
-
-            self._register(skill, path)
-
-        logger.info(
-            "SkillRegistry: %d skill(s) registered after loading %s",
-            len(self._skills),
-            directory,
-        )
-
-    def _load_claude_skills(self) -> None:
-        """Load Claude global skills from ``~/.claude/skills/<name>/SKILL.md``.
-
-        Each subdirectory represents one skill; the directory name is used as
-        the trigger.  Skills loaded here have source ``"claude"`` and are
-        inserted between built-in and nextme-global in priority, so they can
-        be overridden by user / project skills.
-        """
-        claude_skills_dir = _CLAUDE_HOME / "skills"
-        if not claude_skills_dir.is_dir():
-            logger.debug("SkillRegistry: Claude skills dir not found: %s", claude_skills_dir)
-            return
-
-        loaded = 0
-        for skill_dir in sorted(claude_skills_dir.iterdir()):
-            skill_file = skill_dir / "SKILL.md"
-            if not skill_file.is_file():
-                continue
-            trigger = skill_dir.name
+        count_before = len(self._skills)
+        for path, trigger_override in candidates:
             try:
                 skill = load_skill_file(
-                    skill_file,
-                    trigger_override=trigger,
-                    source="global",
+                    path, trigger_override=trigger_override, source=source
                 )
             except (ValueError, OSError) as exc:
                 logger.warning(
-                    "SkillRegistry: failed to load Claude skill %r: %s", trigger, exc
+                    "SkillRegistry: failed to load skill %r: %s", str(path), exc
                 )
                 continue
-            self._register(skill, skill_file)
-            loaded += 1
+            self._register(skill, path)
 
-        if loaded:
-            logger.info("SkillRegistry: %d global skill(s) loaded", loaded)
+        loaded = len(self._skills) - count_before
+        logger.info(
+            "SkillRegistry: %d skill(s) loaded from %s [%s]",
+            loaded,
+            directory,
+            source,
+        )
 
     def _register(self, skill: "Skill", path: Path) -> None:
         """Insert *skill* into the registry, logging overrides."""

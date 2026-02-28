@@ -426,12 +426,11 @@ class TaskDispatcher:
                 if not skills:
                     skill_content = "当前没有已注册的 Skill。"
                 else:
-                    source_order = ["project", "nextme", "global", "builtin"]
+                    source_order = ["global", "nextme", "project"]
                     source_labels = {
-                        "project": "项目级",
-                        "nextme": "NextMe 全局",
-                        "global": "全局",
-                        "builtin": "内置",
+                        "global": "Claude 全局",
+                        "nextme": "NextMe 内置",
+                        "project": "项目",
                     }
                     by_source: dict[str, list] = {}
                     for s in sorted(skills, key=lambda x: x.meta.trigger):
