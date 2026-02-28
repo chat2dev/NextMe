@@ -998,6 +998,26 @@ class TestStreamSetContent:
 
         mock_client.cardkit.v1.card_element.acontent.assert_awaited_once()
 
+    async def test_content_is_plain_text_not_json_wrapped(self):
+        """PUT /content must receive plain text, not {"tag":"markdown","content":"..."}."""
+        replier, mock_client = make_replier()
+        ok = MagicMock()
+        ok.success.return_value = True
+        captured = {}
+
+        async def capture(req):
+            captured["req"] = req
+            return ok
+
+        mock_client.cardkit.v1.card_element.acontent = capture
+
+        await replier.stream_set_content("card_x", "plain markdown **text**", 2)
+
+        body = captured["req"].request_body
+        assert body.content == "plain markdown **text**"
+        # Must NOT be a JSON-serialised element dict
+        assert not body.content.startswith("{")
+
     async def test_failure_logs_warning(self, caplog):
         import logging
         replier, mock_client = make_replier()

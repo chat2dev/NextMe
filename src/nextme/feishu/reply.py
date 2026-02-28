@@ -303,7 +303,6 @@ class FeishuReplier:
         The *sequence* number must be strictly increasing across all calls for
         the same card so Feishu can discard out-of-order deliveries.
         """
-        content = json.dumps({"tag": "markdown", "content": full_text}, ensure_ascii=False)
         request = (
             ContentCardElementRequest.builder()
             .card_id(card_id)
@@ -311,7 +310,7 @@ class FeishuReplier:
             .request_body(
                 ContentCardElementRequestBody.builder()
                 .uuid(str(_uuid_mod.uuid4()))
-                .content(content)
+                .content(full_text)
                 .sequence(sequence)
                 .build()
             )
