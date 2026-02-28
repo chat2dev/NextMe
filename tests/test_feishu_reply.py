@@ -1029,11 +1029,16 @@ class TestBuildStreamingProgressCard:
         parsed = json.loads(replier.build_streaming_progress_card())
         assert parsed["schema"] == "2.0"
 
-    def test_streaming_mode_not_in_card_json(self):
-        """streaming_mode must NOT be in the card JSON — IM renderer rejects it."""
+    def test_streaming_mode_in_card_json(self):
+        """streaming_mode must be in the card JSON for cardkit creation.
+
+        The IM renderer never sees this JSON — it only receives a card_id
+        reference {"type":"card","data":{"card_id":"..."}}, so streaming_mode
+        in the card config does not cause 200621 parse errors.
+        """
         replier, _ = make_replier()
         parsed = json.loads(replier.build_streaming_progress_card())
-        assert "streaming_mode" not in parsed.get("config", {})
+        assert parsed["config"]["streaming_mode"] is True
 
     def test_header_template_is_yellow(self):
         replier, _ = make_replier()
@@ -1167,19 +1172,26 @@ class TestSendCardById:
 
         assert result == ""
 
-    async def test_content_references_card_id(self):
-        """Content sent to im/v1 must be {"card_id": "..."} JSON."""
+    async def test_content_format_is_card_entity_reference(self):
+        """Content sent to im/v1 must be {"type":"card","data":{"card_id":"..."}} JSON."""
         import json as json_mod
         replier, mock_client = make_replier()
         ok = MagicMock()
         ok.success.return_value = True
         ok.data.message_id = "om_123"
-        mock_client.im.v1.message.acreate = AsyncMock(return_value=ok)
+        captured = {}
+
+        async def capture_create(req):
+            captured["req"] = req
+            return ok
+
+        mock_client.im.v1.message.acreate = capture_create
 
         await replier.send_card_by_id("oc_chat_123", "card_xyz")
 
-        # Verify acreate was called (content encoding is internal to builder)
-        mock_client.im.v1.message.acreate.assert_awaited_once()
+        body = captured["req"].request_body
+        content = json_mod.loads(body.content)
+        assert content == {"type": "card", "data": {"card_id": "card_xyz"}}
 
 
 # ---------------------------------------------------------------------------

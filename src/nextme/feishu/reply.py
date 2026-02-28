@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid as _uuid_mod
 
 import lark_oapi as lark
 from lark_oapi.api.cardkit.v1 import (
@@ -198,10 +199,11 @@ class FeishuReplier:
         """Send a cardkit card (referenced by *card_id*) to *chat_id*.
 
         Uses ``im/v1`` with ``msg_type="interactive"`` and content
-        ``{"card_id": "..."}`` so Feishu resolves the live card from cardkit.
+        ``{"type":"card","data":{"card_id":"..."}}`` so Feishu resolves the
+        live card entity from cardkit.
         Returns the new ``message_id``, or ``""`` on failure.
         """
-        content = json.dumps({"card_id": card_id})
+        content = json.dumps({"type": "card", "data": {"card_id": card_id}})
         request = (
             CreateMessageRequest.builder()
             .receive_id_type("chat_id")
@@ -233,10 +235,11 @@ class FeishuReplier:
         """Reply to *message_id* with a cardkit card referenced by *card_id*.
 
         Uses ``im/v1`` reply with ``msg_type="interactive"`` and content
-        ``{"card_id": "..."}`` so Feishu resolves the live card from cardkit.
+        ``{"type":"card","data":{"card_id":"..."}}`` so Feishu resolves the
+        live card entity from cardkit.
         Returns the new ``message_id``, or ``""`` on failure.
         """
-        content = json.dumps({"card_id": card_id})
+        content = json.dumps({"type": "card", "data": {"card_id": card_id}})
         request = (
             ReplyMessageRequest.builder()
             .message_id(message_id)
@@ -307,6 +310,7 @@ class FeishuReplier:
             .element_id(_CONTENT_ELEMENT_ID)
             .request_body(
                 ContentCardElementRequestBody.builder()
+                .uuid(str(_uuid_mod.uuid4()))
                 .content(content)
                 .sequence(sequence)
                 .build()
@@ -464,15 +468,15 @@ class FeishuReplier:
     ) -> str:
         """Return a card JSON for cardkit creation with element IDs for streaming.
 
-        ``streaming_mode`` is intentionally absent from the card JSON — the IM
-        renderer rejects unknown config fields (error 200621).  It is enabled
-        separately on the card entity via :meth:`enable_streaming_mode` after
-        creation.  Element IDs allow :meth:`stream_set_content` to target the
-        content element via the PUT /content typewriter API.
+        ``streaming_mode: true`` is included in the card config as required by
+        the cardkit API (the IM renderer never sees this JSON — it only receives
+        a ``{"type":"card","data":{"card_id":"..."}}`` reference).  Element IDs
+        allow :meth:`stream_set_content` to target the content element via the
+        PUT /content typewriter API.
         """
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "streaming_mode": True},
             "header": {
                 "title": {"tag": "plain_text", "content": title},
                 "template": "yellow",

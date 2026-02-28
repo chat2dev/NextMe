@@ -72,7 +72,6 @@ def replier():
     r.reply_card_by_id = AsyncMock(return_value="thread_card_by_id_789")
     # Cardkit streaming — create_card returns "" by default so worker falls back to debounce path.
     r.create_card = AsyncMock(return_value="")
-    r.enable_streaming_mode = AsyncMock(return_value=True)
     r.get_card_id = AsyncMock(return_value="")
     r.stream_set_content = AsyncMock()
     r.build_help_card = MagicMock(return_value='{"card": "help"}')
