@@ -225,6 +225,7 @@ class ACPRuntime:
             cwd=self._cwd,
             env=child_env,
             start_new_session=True,  # process group isolation
+            limit=16 * 1024 * 1024,  # 16 MB — prevent LimitExceededError on large JSON lines
         )
 
         self._client = ACPClient(self._proc)

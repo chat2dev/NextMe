@@ -231,6 +231,7 @@ class DirectClaudeRuntime:
             stderr=asyncio.subprocess.PIPE,
             cwd=self._cwd,
             env=env,
+            limit=16 * 1024 * 1024,  # 16 MB — prevent LimitExceededError on large JSON lines
         )
         self._current_proc = proc
 
