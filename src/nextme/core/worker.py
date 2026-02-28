@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import time
 from typing import Optional
@@ -33,16 +34,17 @@ from ..protocol.types import (
     Task,
     TaskStatus,
 )
+from ..feishu.progress_card import RunProgressCard
 from .interfaces import Replier
 from .path_lock import PathLockRegistry
 from .session import Session
 
 logger = logging.getLogger(__name__)
 
-# Minimum interval between streaming card content updates via PUT /content.
-# Cards with streaming_mode=true have no Feishu QPS limit, so this purely
-# controls perceived smoothness — 50 ms ≈ 20 updates/s feels real-time.
-_STREAMING_DEBOUNCE_SECONDS: float = 0.05
+# Minimum interval between full-card updates via PUT /cards/:card_id.
+# Feishu CardKit allows ~5 QPS per card for full updates; 200 ms leaves
+# comfortable headroom while still feeling responsive.
+_STREAMING_DEBOUNCE_SECONDS: float = 0.2
 
 
 def _format_elapsed(seconds: int) -> str:
@@ -91,10 +93,10 @@ class SessionWorker:
         self._active_in_thread: bool = False  # thread vs quote-reply mode
 
         # Streaming card state (reset per-task).
-        self._card_id: Optional[str] = None   # cardkit card_id (None = use fallback)
-        self._sequence: int = 0               # strictly-increasing sequence counter
-        self._streaming_content: str = ""     # full accumulated text for PUT /content
-        self._last_streaming_update: float = 0.0  # debounce timestamp
+        self._card_id: Optional[str] = None          # cardkit card_id (None = use fallback)
+        self._sequence: int = 0                      # strictly-increasing sequence counter
+        self._run_card: Optional[RunProgressCard] = None  # event tracker for streaming
+        self._last_streaming_update: float = 0.0     # debounce timestamp
 
     @property
     def _proj(self) -> str:
@@ -191,7 +193,7 @@ class SessionWorker:
         self._active_in_thread = task.chat_type == "group"
         self._card_id = None
         self._sequence = 0
-        self._streaming_content = ""
+        self._run_card = None
         self._last_streaming_update = 0.0
 
         # group → thread reply; p2p → quote reply; no message_id → top-level.
@@ -207,11 +209,11 @@ class SessionWorker:
         card_id = ""
         if self._settings.streaming_enabled:
             try:
-                streaming_card = self._replier.build_streaming_progress_card(
-                    content="思考中...",
-                    title=f"思考中... {self._proj}",
+                self._run_card = RunProgressCard()
+                initial_card_json = json.dumps(
+                    self._run_card.build_card("running", self._proj), ensure_ascii=False
                 )
-                card_id = await self._replier.create_card(streaming_card)
+                card_id = await self._replier.create_card(initial_card_json)
             except Exception:
                 card_id = ""
 
@@ -429,14 +431,14 @@ class SessionWorker:
         # Tool-use events are always flushed immediately.
         # ------------------------------------------------------------------
         if self._card_id:
-            elapsed_str = _format_elapsed(int(time.monotonic() - self._task_start))
+            if self._run_card is None:
+                self._run_card = RunProgressCard()
 
+            elapsed_s = int(time.monotonic() - self._task_start)
             if delta:
-                self._streaming_content += delta
-
+                self._run_card.add_text_chunk(delta)
             if tool_name:
-                # Append tool-status annotation inline to the accumulated text.
-                self._streaming_content += f"\n\n_{tool_name} · {elapsed_str}_"
+                self._run_card.add_tool(tool_name, elapsed_s)
 
             now = time.monotonic()
             if (
@@ -446,16 +448,20 @@ class SessionWorker:
                 # Not enough time and no tool event — skip this update.
                 return
 
-            if self._streaming_content:
+            if delta or tool_name:
                 self._sequence += 1
                 self._last_streaming_update = now
                 try:
-                    await self._replier.stream_set_content(
-                        self._card_id, self._streaming_content, self._sequence
+                    card_json = json.dumps(
+                        self._run_card.build_card("running", self._proj),
+                        ensure_ascii=False,
+                    )
+                    await self._replier.update_card_entity(
+                        self._card_id, card_json, self._sequence
                     )
                 except Exception as exc:
                     logger.debug(
-                        "SessionWorker[%s]: stream_set_content failed (seq=%d): %s",
+                        "SessionWorker[%s]: update_card_entity failed (seq=%d): %s",
                         self._session.context_id,
                         self._sequence,
                         exc,
@@ -686,12 +692,12 @@ class SessionWorker:
 
         if self._card_id:
             # Streaming mode — replace the full card (header + body) via
-            # PUT /cards/:card_id so the title changes from "思考中..." to
-            # "完成" and the template turns blue, with the footer embedded.
+            # PUT /cards/:card_id so the execution-log card transitions to the
+            # final answer card with a green "✅ 完成" header.
             final_card = self._replier.build_result_card(
-                content=self._streaming_content or content or "(无输出)",
-                title=f"完成 {self._proj}",
-                template="blue",
+                content=content or "(无输出)",
+                title=f"✅ 完成 {self._proj}",
+                template="green",
                 session_id=self._session.actual_id or "",
                 elapsed=elapsed_str,
                 executor=self._session.executor,

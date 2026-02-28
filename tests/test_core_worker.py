@@ -1,6 +1,7 @@
 """Unit tests for nextme.core.worker.SessionWorker."""
 
 import asyncio
+import json
 import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -559,8 +560,8 @@ async def test_execute_task_attempts_streaming_when_enabled(worker, session, rep
     worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     task, _ = make_task("hello")
     await worker._execute_task(task)
-    # Streaming attempted (create_card returns "" → fallback to regular)
-    replier.build_streaming_progress_card.assert_called()
+    # Streaming attempted via RunProgressCard.build_card() + create_card()
+    # (create_card returns "" → fallback to regular card)
     replier.create_card.assert_awaited()
 
 
@@ -734,41 +735,46 @@ async def test_send_result_includes_elapsed_in_card(worker, session, replier, ac
 # _on_progress streaming path tests
 # ---------------------------------------------------------------------------
 
-async def test_on_progress_streaming_path_calls_stream_set_content(worker, replier):
-    """When card_id is set, _on_progress uses stream_set_content (PUT /content)."""
+async def test_on_progress_streaming_path_calls_update_card_entity(worker, replier):
+    """When card_id is set, _on_progress uses update_card_entity (full card update)."""
     worker._card_id = "card_abc"
     worker._sequence = 0
     await worker._on_progress("hello", "")
-    replier.stream_set_content.assert_awaited_once_with("card_abc", "hello", 1)
+    replier.update_card_entity.assert_awaited_once()
+    args = replier.update_card_entity.call_args.args
+    assert args[0] == "card_abc"   # card_id
+    assert args[2] == 1            # sequence
+    # Card JSON must contain the text chunk in the body
+    card_body = json.dumps(json.loads(args[1]).get("body", {}))
+    assert "hello" in card_body
     replier.update_card.assert_not_awaited()
 
 
-async def test_on_progress_streaming_path_sends_full_accumulated_text(worker, replier):
-    """stream_set_content receives the full accumulated text (not just the latest delta).
-
-    The PUT /content typewriter API requires the ever-growing complete text.
-    Reset the debounce timer before each call so both flush immediately.
-    """
+async def test_on_progress_streaming_path_accumulates_text_in_card(worker, replier):
+    """Card body contains accumulated text after multiple deltas."""
     worker._card_id = "card_abc"
     worker._sequence = 0
     worker._last_streaming_update = 0.0
     await worker._on_progress("Hello", "")
-    worker._last_streaming_update = 0.0  # bypass debounce for second call
+    worker._last_streaming_update = 0.0  # bypass debounce
     await worker._on_progress(", world", "")
-    assert replier.stream_set_content.call_count == 2
-    last_call_text = replier.stream_set_content.call_args_list[-1].args[1]
-    assert last_call_text == "Hello, world"
+    assert replier.update_card_entity.call_count == 2
+    last_args = replier.update_card_entity.call_args_list[-1].args
+    card_body = json.dumps(json.loads(last_args[1]).get("body", {}))
+    assert "Hello" in card_body
+    assert "world" in card_body
 
 
-async def test_on_progress_streaming_path_appends_tool_status_inline(worker, replier):
-    """Tool annotation is appended inline to accumulated text and pushed via stream_set_content."""
+async def test_on_progress_streaming_path_shows_tool_in_card(worker, replier):
+    """Tool name appears in the card body when tool_name is provided."""
     worker._card_id = "card_abc"
     worker._sequence = 0
     await worker._on_progress("", "Bash(ls)")
-    replier.stream_set_content.assert_awaited_once()
-    call_args = replier.stream_set_content.call_args
+    replier.update_card_entity.assert_awaited_once()
+    call_args = replier.update_card_entity.call_args
     assert call_args.args[0] == "card_abc"
-    assert "Bash(ls)" in call_args.args[1]
+    card_body = json.dumps(json.loads(call_args.args[1]).get("body", {}))
+    assert "Bash(ls)" in card_body
     replier.update_card.assert_not_awaited()
 
 
@@ -790,7 +796,7 @@ async def test_on_progress_streaming_debounces_rapid_calls(worker, replier):
     await worker._on_progress("chunk1", "")
     await worker._on_progress("chunk2", "")
     # Both within debounce window — no API calls.
-    replier.stream_set_content.assert_not_awaited()
+    replier.update_card_entity.assert_not_awaited()
 
 
 async def test_on_progress_streaming_flushes_on_tool_name_despite_debounce(worker, replier):
@@ -800,30 +806,31 @@ async def test_on_progress_streaming_flushes_on_tool_name_despite_debounce(worke
     worker._last_streaming_update = time.monotonic()  # simulate very recent update
     await worker._on_progress("chunk1", "")       # within debounce → buffered
     await worker._on_progress("", "Bash(ls)")     # tool event → always flush
-    replier.stream_set_content.assert_awaited_once()
-    # Full accumulated content includes the buffered chunk AND tool annotation.
-    text_arg = replier.stream_set_content.call_args.args[1]
-    assert "chunk1" in text_arg
-    assert "Bash(ls)" in text_arg
+    replier.update_card_entity.assert_awaited_once()
+    # Card body includes the buffered chunk AND the tool name.
+    call_args = replier.update_card_entity.call_args
+    card_body = json.dumps(json.loads(call_args.args[1]).get("body", {}))
+    assert "chunk1" in card_body
+    assert "Bash(ls)" in card_body
 
 
-async def test_on_progress_streaming_fallback_when_stream_set_content_raises(worker, replier):
-    """stream_set_content exceptions are caught and not re-raised."""
+async def test_on_progress_streaming_exception_caught(worker, replier):
+    """update_card_entity exceptions are caught and not re-raised."""
     worker._card_id = "card_abc"
     worker._sequence = 0
-    replier.stream_set_content = AsyncMock(side_effect=RuntimeError("network error"))
+    replier.update_card_entity = AsyncMock(side_effect=RuntimeError("network error"))
     # Should not raise
     await worker._on_progress("hello", "")
 
 
 async def test_on_progress_no_streaming_when_card_id_none(worker, replier):
-    """Without card_id, fallback debounce path is used (stream_set_content not called)."""
+    """Without card_id, fallback debounce path is used (update_card_entity not called)."""
     worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     worker._card_id = None
     worker._progress_message_id = "msg_123"
     worker._last_progress_update = 0.0
     await worker._on_progress("hello", "")
-    replier.stream_set_content.assert_not_awaited()
+    replier.update_card_entity.assert_not_awaited()
     replier.update_card.assert_awaited()
 
 
