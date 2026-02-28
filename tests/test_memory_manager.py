@@ -32,11 +32,13 @@ async def test_add_fact_dedup_merges_similar_fact(mm):
 async def test_add_fact_dedup_keeps_old_text_when_lower_confidence(mm):
     ctx = await _load(mm)
     mm.add_fact(ctx, Fact(text="use uv not pip", confidence=0.9))
+    mm._dirty.discard(ctx)  # clear dirty from the first add
     mm.add_fact(ctx, Fact(text="use uv not pip!", confidence=0.7))  # lower confidence
     facts = mm.get_top_facts(ctx, n=10)
     assert len(facts) == 1
     assert facts[0].text == "use uv not pip"   # old text kept
     assert facts[0].confidence == 0.9
+    assert ctx not in mm._dirty  # no mutation → not dirty
 
 
 async def test_add_fact_different_facts_both_kept(mm):

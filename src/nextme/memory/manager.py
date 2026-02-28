@@ -202,13 +202,13 @@ class MemoryManager:
                     existing.text = fact.text
                     existing.confidence = fact.confidence
                     existing.updated_at = datetime.now()
-                self._dirty.add(context_id)
+                    self._dirty.add(context_id)
                 return
 
         data.fact_store.facts.append(fact)
 
         # Eviction: drop lowest-confidence facts when over the limit.
-        max_facts: int = getattr(self._settings, "memory_max_facts", 100)
+        max_facts: int = self._settings.memory_max_facts
         if len(data.fact_store.facts) > max_facts:
             data.fact_store.facts.sort(key=lambda f: f.confidence, reverse=True)
             data.fact_store.facts = data.fact_store.facts[:max_facts]
