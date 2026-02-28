@@ -55,6 +55,7 @@ class Settings(BaseModel):
     acp_idle_timeout_seconds: int = 7200
     task_queue_capacity: int = 1024
     memory_debounce_seconds: int = 30
+    memory_max_facts: int = 100
     context_max_bytes: int = 1_000_000
     context_compression: Literal["zlib", "lzma", "brotli"] = "zlib"
     log_level: str = "INFO"

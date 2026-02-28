@@ -13,6 +13,7 @@ class Fact(BaseModel):
     text: str
     confidence: float = 0.9
     created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime | None = None
     source: str = "conversation"
 
 
