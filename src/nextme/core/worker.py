@@ -19,6 +19,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 import time
 from typing import Optional
 
@@ -26,6 +27,7 @@ from ..acp.janitor import ACPRuntimeRegistry
 from ..config.schema import Settings
 from ..config.state_store import StateStore
 from ..memory.manager import MemoryManager
+from ..memory.schema import Fact
 from ..protocol.types import (
     PermissionChoice,
     PermissionRequest,
@@ -53,6 +55,22 @@ def _format_elapsed(seconds: int) -> str:
         return f"{seconds}s"
     m, s = divmod(seconds, 60)
     return f"{m}m {s}s" if s else f"{m}m"
+
+
+_MEMORY_TAG_RE = re.compile(r"<memory([^>]*)>(.*?)</memory>", re.DOTALL)
+
+# Memory facts longer than this are almost certainly misused plan/content blocks.
+# We still record them but keep the content visible in the card output.
+_MAX_MEMORY_FACT_CHARS = 500
+
+
+@dataclasses.dataclass
+class _MemoryOp:
+    """A parsed memory operation from an agent <memory> tag."""
+
+    op: str        # "add" | "replace" | "forget"
+    text: str      # new text (add / replace); empty for forget
+    idx: int = -1  # target index in confidence-sorted facts (replace / forget)
 
 
 class SessionWorker:
@@ -102,6 +120,58 @@ class SessionWorker:
     def _proj(self) -> str:
         """Return a bracketed project name tag for card titles, e.g. '【myproject】'."""
         return f"【{self._session.project_name}】"
+
+    # ------------------------------------------------------------------
+    # Memory helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_and_strip_memory(content: str) -> tuple[list[_MemoryOp], str]:
+        """Parse ``<memory ...>...</memory>`` tags from agent output.
+
+        Returns ``(ops, stripped_content)`` where *ops* is a list of
+        :class:`_MemoryOp` objects and *stripped_content* has all memory
+        tags removed (oversized ADD blocks are kept visible).
+
+        Supported ops:
+        - ``<memory>text</memory>``                       → ADD
+        - ``<memory op="replace" idx="N">text</memory>``  → REPLACE fact N
+        - ``<memory op="forget" idx="N"></memory>``        → FORGET fact N
+        """
+        ops: list[_MemoryOp] = []
+
+        def _collect(m: re.Match) -> str:
+            attr_str: str = m.group(1)
+            text: str = m.group(2).strip()
+            attrs = dict(re.findall(r'(\w+)="([^"]*)"', attr_str))
+            op = attrs.get("op", "add")
+            raw_idx = attrs.get("idx", "")
+            idx = int(raw_idx) if raw_idx.lstrip("-").isdigit() else -1
+
+            if op == "add":
+                if len(text) > _MAX_MEMORY_FACT_CHARS:
+                    logger.warning(
+                        "worker: oversized <memory> block (%d chars) kept in display; "
+                        "use <memory> only for short, discrete facts",
+                        len(text),
+                    )
+                    ops.append(_MemoryOp(op="add", text=text))
+                    return text
+                ops.append(_MemoryOp(op="add", text=text))
+                return ""
+            elif op == "replace" and idx >= 0 and text:
+                ops.append(_MemoryOp(op="replace", text=text, idx=idx))
+                return ""
+            elif op == "forget" and idx >= 0:
+                ops.append(_MemoryOp(op="forget", text="", idx=idx))
+                return ""
+            # Malformed tag — strip it silently.
+            return ""
+
+        stripped = _MEMORY_TAG_RE.sub(_collect, content)
+        # Collapse 3+ consecutive newlines down to 2.
+        stripped = re.sub(r"\n{3,}", "\n\n", stripped).strip()
+        return ops, stripped
 
     # ------------------------------------------------------------------
     # Main loop
@@ -389,6 +459,24 @@ class SessionWorker:
                     self._session.project_name,
                     runtime.actual_id,
                 )
+
+        # Extract <memory> facts written by the agent and strip them from the
+        # displayed output.  Writeback happens regardless of session age so
+        # that the agent can update memory at any point in a conversation.
+        user_id = self._session.context_id.rsplit(":", 1)[-1]
+        memory_ops, final_content = self._extract_and_strip_memory(final_content)
+        if memory_ops and self._memory_manager is not None:
+            for op in memory_ops:
+                if op.op == "add":
+                    self._memory_manager.add_fact(
+                        user_id, Fact(text=op.text, source="agent_output")
+                    )
+                # replace/forget dispatch added in Task 5
+            logger.debug(
+                "SessionWorker[%s]: processed %d memory ops from agent output",
+                self._session.context_id,
+                len(memory_ops),
+            )
 
         # Step 5 — Send final result card.
         self._session.status = TaskStatus.DONE

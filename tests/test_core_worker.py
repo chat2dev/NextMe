@@ -1106,3 +1106,196 @@ async def test_worker_skips_memory_injection_when_no_facts(
     executed_content = mock_runtime.execute.call_args[1]["task"].content
     assert "[用户记忆]" not in executed_content
     assert "plain message" == executed_content
+
+
+# ---------------------------------------------------------------------------
+# memory extraction / writeback
+# ---------------------------------------------------------------------------
+
+
+def test_extract_and_strip_memory_single_fact():
+    """Extracts a single <memory> fact from agent output."""
+    content = "Here is my answer.\n<memory>User prefers dark mode</memory>\nDone."
+    ops, stripped = SessionWorker._extract_and_strip_memory(content)
+    assert len(ops) == 1
+    assert ops[0].op == "add"
+    assert ops[0].text == "User prefers dark mode"
+    assert "<memory>" not in stripped
+    assert "Here is my answer." in stripped
+    assert "Done." in stripped
+
+
+def test_extract_and_strip_memory_multiple_facts():
+    """Extracts multiple <memory> blocks from agent output."""
+    content = (
+        "Answer here.\n"
+        "<memory>User works in Python</memory>\n"
+        "More text.\n"
+        "<memory>User is in Shanghai timezone</memory>"
+    )
+    ops, stripped = SessionWorker._extract_and_strip_memory(content)
+    assert len(ops) == 2
+    assert ops[0].op == "add"
+    assert ops[1].op == "add"
+    assert ops[0].text == "User works in Python"
+    assert ops[1].text == "User is in Shanghai timezone"
+    assert "<memory>" not in stripped
+
+
+def test_extract_and_strip_memory_no_tags():
+    """Returns empty list and original content when no <memory> tags present."""
+    content = "Just a normal answer with no memory tags."
+    ops, stripped = SessionWorker._extract_and_strip_memory(content)
+    assert ops == []
+    assert stripped == content
+
+
+def test_extract_and_strip_memory_strips_blank_lines():
+    """Stripped content does not have extra blank lines where tags were."""
+    content = "Line one.\n\n<memory>Some fact</memory>\n\nLine two."
+    ops, stripped = SessionWorker._extract_and_strip_memory(content)
+    assert ops[0].text == "Some fact"
+    # No more than one consecutive blank line in stripped output
+    assert "\n\n\n" not in stripped
+
+
+async def test_worker_saves_memory_facts_after_task(
+    session, acp_registry, replier, settings, path_lock_registry, memory_manager_mock
+):
+    """Worker calls add_fact() for each <memory> block in agent output."""
+    from nextme.memory.schema import Fact
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = "existing-session"
+    mock_runtime.execute = AsyncMock(
+        return_value="Great answer!\n<memory>User likes concise replies</memory>"
+    )
+    memory_manager_mock.add_fact = MagicMock()
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        memory_manager=memory_manager_mock,
+    )
+    task, _ = make_task("be brief")
+    await worker._execute_task(task)
+    # add_fact should be called once with the extracted fact
+    assert memory_manager_mock.add_fact.call_count == 1
+    call_args = memory_manager_mock.add_fact.call_args
+    assert call_args[0][0] == "ou_user"   # user_id
+    saved_fact = call_args[0][1]
+    assert isinstance(saved_fact, Fact)
+    assert saved_fact.text == "User likes concise replies"
+    assert saved_fact.source == "agent_output"
+
+
+async def test_worker_result_content_excludes_memory_tags(
+    session, acp_registry, replier, settings, path_lock_registry, memory_manager_mock
+):
+    """The content sent to the result card has <memory> tags stripped out."""
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = "existing-session"
+    mock_runtime.execute = AsyncMock(
+        return_value="The answer is 42.\n<memory>User asked about meaning of life</memory>"
+    )
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        memory_manager=memory_manager_mock,
+    )
+    task, _ = make_task("what is the meaning?")
+    await worker._execute_task(task)
+    # build_result_card should be called with stripped content
+    result_card_calls = replier.build_result_card.call_args_list
+    assert result_card_calls, "build_result_card was never called"
+    result_content = result_card_calls[-1][1].get("content", "")
+    assert "<memory>" not in result_content
+    assert "The answer is 42." in result_content
+
+
+async def test_worker_no_memory_writeback_without_memory_manager(
+    session, acp_registry, replier, settings, path_lock_registry
+):
+    """Worker does not crash when memory_manager is None and output has <memory> tags."""
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = "existing-session"
+    mock_runtime.execute = AsyncMock(
+        return_value="Answer.\n<memory>Some fact</memory>"
+    )
+    worker = SessionWorker(session, registry, replier, settings, path_lock_registry)
+    task, _ = make_task("test")
+    # Should complete without error; result content is stripped
+    await worker._execute_task(task)
+    result_card_calls = replier.build_result_card.call_args_list
+    assert result_card_calls
+    result_content = result_card_calls[-1][1].get("content", "")
+    assert "<memory>" not in result_content
+
+
+def test_extract_and_strip_memory_oversized_kept_in_display():
+    """Large <memory> blocks (> 500 chars) are kept visible to prevent content loss."""
+    big_plan = "方案A：" + "x" * 510
+    content = f"Intro.\n<memory>{big_plan}</memory>\n方案B：bbb"
+    ops, stripped = SessionWorker._extract_and_strip_memory(content)
+    # Fact is still recorded
+    assert len(ops) == 1
+    assert ops[0].op == "add"
+    assert ops[0].text == big_plan
+    # Content is kept visible — the display should NOT lose Plan A
+    assert big_plan in stripped
+    assert "方案B：bbb" in stripped
+    assert "<memory>" not in stripped
+
+
+def test_extract_and_strip_memory_short_fact_is_stripped():
+    """Short <memory> blocks (≤ 500 chars) are stripped from the display as intended."""
+    content = "Answer.\n<memory>User prefers dark mode</memory>\nDone."
+    ops, stripped = SessionWorker._extract_and_strip_memory(content)
+    assert len(ops) == 1
+    assert ops[0].op == "add"
+    assert ops[0].text == "User prefers dark mode"
+    # Short fact removed from display
+    assert "User prefers dark mode" not in stripped
+    assert "Answer." in stripped
+    assert "Done." in stripped
+
+
+def test_extract_and_strip_memory_replace_op():
+    content = 'Done.\n<memory op="replace" idx="0">updated fact</memory>'
+    ops, stripped = SessionWorker._extract_and_strip_memory(content)
+    assert len(ops) == 1
+    assert ops[0].op == "replace"
+    assert ops[0].idx == 0
+    assert ops[0].text == "updated fact"
+    assert "<memory" not in stripped
+
+
+def test_extract_and_strip_memory_forget_op():
+    content = 'Done.\n<memory op="forget" idx="2"></memory>'
+    ops, stripped = SessionWorker._extract_and_strip_memory(content)
+    assert len(ops) == 1
+    assert ops[0].op == "forget"
+    assert ops[0].idx == 2
+    assert "<memory" not in stripped
+
+
+def test_extract_and_strip_memory_mixed_ops():
+    content = (
+        '<memory>new fact</memory>\n'
+        '<memory op="replace" idx="1">replacement</memory>\n'
+        '<memory op="forget" idx="3"></memory>'
+    )
+    ops, stripped = SessionWorker._extract_and_strip_memory(content)
+    assert len(ops) == 3
+    assert ops[0].op == "add"
+    assert ops[1].op == "replace" and ops[1].idx == 1
+    assert ops[2].op == "forget" and ops[2].idx == 3
+
+
+def test_extract_and_strip_memory_replace_missing_idx_ignored():
+    content = '<memory op="replace">no idx</memory> text'
+    ops, stripped = SessionWorker._extract_and_strip_memory(content)
+    assert ops == []
+    assert "text" in stripped
+
+
+def test_extract_and_strip_memory_forget_missing_idx_ignored():
+    content = '<memory op="forget"></memory> text'
+    ops, stripped = SessionWorker._extract_and_strip_memory(content)
+    assert ops == []
