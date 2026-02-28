@@ -288,6 +288,7 @@ async def test_send_cancelled_updates_progress_card_in_place(worker, replier):
 # ---------------------------------------------------------------------------
 
 async def test_on_progress_updates_card_when_message_id_exists(worker, replier):
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     worker._progress_message_id = "msg_123"
     worker._last_progress_update = 0.0  # ensure enough time passed
     await worker._on_progress("hello", "")
@@ -300,6 +301,7 @@ async def test_on_progress_debounces_when_not_enough_time_elapsed(worker, replie
         task_queue_capacity=10,
         progress_debounce_seconds=10.0,  # very long debounce
         permission_timeout_seconds=1.0,
+        streaming_enabled=True,
     )
     worker._progress_message_id = "msg_123"
     worker._last_progress_update = time.monotonic()  # just now
@@ -309,6 +311,7 @@ async def test_on_progress_debounces_when_not_enough_time_elapsed(worker, replie
 
 
 async def test_on_progress_sends_new_card_when_no_message_id(worker, replier):
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     worker._progress_message_id = None
     worker._last_progress_update = 0.0
     await worker._on_progress("some delta", "")
@@ -316,6 +319,7 @@ async def test_on_progress_sends_new_card_when_no_message_id(worker, replier):
 
 
 async def test_on_progress_skips_when_delta_empty_and_no_tool(worker, replier):
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     worker._progress_message_id = "msg_123"
     worker._last_progress_update = 0.0
     worker._progress_buffer = []  # empty buffer
@@ -330,6 +334,7 @@ async def test_on_progress_updates_when_tool_name_provided(worker, replier):
         task_queue_capacity=10,
         progress_debounce_seconds=10.0,
         permission_timeout_seconds=1.0,
+        streaming_enabled=True,
     )
     worker._progress_message_id = "msg_123"
     worker._last_progress_update = time.monotonic()  # just now
@@ -339,6 +344,7 @@ async def test_on_progress_updates_when_tool_name_provided(worker, replier):
 
 
 async def test_on_progress_accumulates_buffer(worker, replier):
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     worker._progress_message_id = "msg_123"
     worker._last_progress_update = 0.0
     await worker._on_progress("hello ", "")
@@ -674,6 +680,7 @@ async def test_execute_task_uses_send_card_when_no_message_id(
 
 async def test_on_progress_status_includes_elapsed_time(worker, replier):
     """Progress card status line includes elapsed time when content is present."""
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     worker._progress_message_id = "msg_123"
     worker._last_progress_update = 0.0
     worker._task_start = time.monotonic() - 5  # pretend 5s elapsed
@@ -687,6 +694,7 @@ async def test_on_progress_status_includes_elapsed_time(worker, replier):
 
 async def test_on_progress_status_includes_tool_and_elapsed(worker, replier):
     """When tool_name present, status shows tool + elapsed."""
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     worker._progress_message_id = "msg_123"
     worker._last_progress_update = 0.0
     worker._task_start = time.monotonic() - 10
@@ -810,6 +818,7 @@ async def test_on_progress_streaming_fallback_when_stream_set_content_raises(wor
 
 async def test_on_progress_no_streaming_when_card_id_none(worker, replier):
     """Without card_id, fallback debounce path is used (stream_set_content not called)."""
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     worker._card_id = None
     worker._progress_message_id = "msg_123"
     worker._last_progress_update = 0.0

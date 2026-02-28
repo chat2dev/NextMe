@@ -464,7 +464,12 @@ class SessionWorker:
 
         # ------------------------------------------------------------------
         # Fallback path — debounced full-card PATCH.
+        # When streaming is disabled, skip all intermediate updates so the
+        # user sees only the initial "思考中..." card and the final result.
         # ------------------------------------------------------------------
+        if not self._settings.streaming_enabled:
+            return
+
         now = time.monotonic()
         elapsed = now - self._last_progress_update
 
