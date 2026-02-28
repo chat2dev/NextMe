@@ -1299,3 +1299,95 @@ def test_extract_and_strip_memory_forget_missing_idx_ignored():
     content = '<memory op="forget"></memory> text'
     ops, stripped = SessionWorker._extract_and_strip_memory(content)
     assert ops == []
+
+
+# ---------------------------------------------------------------------------
+# memory ops dispatch (replace / forget) — Task 5
+# ---------------------------------------------------------------------------
+
+
+async def test_worker_dispatches_replace_op_to_memory_manager(
+    session, acp_registry, replier, settings, path_lock_registry, memory_manager_mock
+):
+    """Worker calls replace_fact() when agent outputs a replace tag."""
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = "sess-1"
+    mock_runtime.execute = AsyncMock(
+        return_value='Done.\n<memory op="replace" idx="0">updated fact</memory>'
+    )
+    memory_manager_mock.replace_fact = MagicMock(return_value=True)
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        memory_manager=memory_manager_mock,
+    )
+    task, _ = make_task("update memory")
+    await worker._execute_task(task)
+    memory_manager_mock.replace_fact.assert_called_once_with(
+        "ou_user", 0, "updated fact"
+    )
+
+
+async def test_worker_dispatches_forget_op_to_memory_manager(
+    session, acp_registry, replier, settings, path_lock_registry, memory_manager_mock
+):
+    """Worker calls forget_fact() when agent outputs a forget tag."""
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = "sess-1"
+    mock_runtime.execute = AsyncMock(
+        return_value='Done.\n<memory op="forget" idx="2"></memory>'
+    )
+    memory_manager_mock.forget_fact = MagicMock(return_value=True)
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        memory_manager=memory_manager_mock,
+    )
+    task, _ = make_task("forget memory")
+    await worker._execute_task(task)
+    memory_manager_mock.forget_fact.assert_called_once_with("ou_user", 2)
+
+
+async def test_worker_logs_warning_when_replace_idx_out_of_range(
+    session, acp_registry, replier, settings, path_lock_registry,
+    memory_manager_mock, caplog
+):
+    """Worker logs a warning when replace_fact returns False."""
+    import logging
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = "sess-1"
+    mock_runtime.execute = AsyncMock(
+        return_value='<memory op="replace" idx="99">x</memory>'
+    )
+    memory_manager_mock.replace_fact = MagicMock(return_value=False)
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        memory_manager=memory_manager_mock,
+    )
+    with caplog.at_level(logging.WARNING, logger="nextme.core.worker"):
+        await worker._execute_task(make_task("x")[0])
+    assert "replace_fact" in caplog.text
+
+
+async def test_worker_memory_injection_uses_numbered_format(
+    session, acp_registry, replier, settings, path_lock_registry, memory_manager_mock
+):
+    """New-session injection uses '0. fact' numbered format from template."""
+    from nextme.memory.schema import Fact
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = None   # new session
+
+    captured_task = {}
+
+    async def capture(task, on_progress, on_permission):
+        captured_task["content"] = task.content
+        return "answer"
+
+    mock_runtime.execute = capture
+    memory_manager_mock.get_top_facts = MagicMock(
+        return_value=[Fact(text="use uv")]
+    )
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        memory_manager=memory_manager_mock,
+    )
+    await worker._execute_task(make_task("hello")[0])
+    assert "0. use uv" in captured_task.get("content", "")

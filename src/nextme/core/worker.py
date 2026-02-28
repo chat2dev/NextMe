@@ -39,6 +39,7 @@ from ..protocol.types import (
 from ..feishu.progress_card import RunProgressCard
 from .interfaces import Replier
 from .path_lock import PathLockRegistry
+from .prompt_loader import load_memory_template
 from .session import Session
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,7 @@ class SessionWorker:
         self._path_lock_registry = path_lock_registry
         self._state_store = state_store
         self._memory_manager = memory_manager
+        self._memory_template = load_memory_template()
 
         # State maintained across _on_progress calls for a single task.
         self._progress_message_id: Optional[str] = None
@@ -416,13 +418,16 @@ class SessionWorker:
                     )
                 facts = self._memory_manager.get_top_facts(user_id, n=10)
                 if facts:
-                    fact_lines = "\n".join(f"- {f.text}" for f in facts)
+                    rendered = self._memory_template.render(
+                        count=len(facts),
+                        facts=facts,
+                    )
                     task = dataclasses.replace(
                         task,
-                        content=f"[用户记忆]\n{fact_lines}\n\n[用户消息]\n{task.content}",
+                        content=f"{rendered}\n\n[用户消息]\n{task.content}",
                     )
                     logger.debug(
-                        "SessionWorker[%s]: injected %d memory facts",
+                        "SessionWorker[%s]: injected %d memory facts via template",
                         self._session.context_id,
                         len(facts),
                     )
@@ -471,7 +476,20 @@ class SessionWorker:
                     self._memory_manager.add_fact(
                         user_id, Fact(text=op.text, source="agent_output")
                     )
-                # replace/forget dispatch added in Task 5
+                elif op.op == "replace":
+                    if not self._memory_manager.replace_fact(user_id, op.idx, op.text):
+                        logger.warning(
+                            "SessionWorker[%s]: replace_fact idx=%d out of range",
+                            self._session.context_id,
+                            op.idx,
+                        )
+                elif op.op == "forget":
+                    if not self._memory_manager.forget_fact(user_id, op.idx):
+                        logger.warning(
+                            "SessionWorker[%s]: forget_fact idx=%d out of range",
+                            self._session.context_id,
+                            op.idx,
+                        )
             logger.debug(
                 "SessionWorker[%s]: processed %d memory ops from agent output",
                 self._session.context_id,
