@@ -71,9 +71,10 @@ class Settings(BaseModel):
     click a Feishu card on mobile).  The direct ``claude`` executor blocks
     indefinitely and does **not** need this setting.
     """
-    streaming_enabled: bool = False
+    streaming_enabled: bool = True
     """Enable cardkit streaming mode for real-time typewriter updates.
-    When False (default) the bot uses debounced full-card PATCH updates."""
+    When True (default) the bot uses CardKit PUT /cards/:card_id for live
+    full-card updates; when False it falls back to debounced PATCH updates."""
 
 
 class ProjectState(BaseModel):

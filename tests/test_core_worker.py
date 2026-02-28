@@ -542,11 +542,12 @@ async def test_on_permission_auto_approve_notification_does_not_build_permission
 # ---------------------------------------------------------------------------
 
 async def test_execute_task_sends_initial_progress_card(worker, session, replier, acp_registry):
-    """streaming_enabled=False (default): streaming not attempted, regular card used."""
+    """streaming_enabled=False: streaming not attempted, regular card used."""
     _, mock_runtime = acp_registry
+    worker._settings = worker._settings.model_copy(update={"streaming_enabled": False})
     task, replies = make_task("hello")
     await worker._execute_task(task)
-    # Streaming disabled by default — cardkit path skipped entirely
+    # Streaming explicitly disabled — cardkit path skipped entirely
     replier.build_streaming_progress_card.assert_not_called()
     replier.create_card.assert_not_awaited()
     # Regular card is used
@@ -555,9 +556,8 @@ async def test_execute_task_sends_initial_progress_card(worker, session, replier
 
 
 async def test_execute_task_attempts_streaming_when_enabled(worker, session, replier, acp_registry):
-    """streaming_enabled=True: cardkit path is attempted."""
+    """streaming_enabled=True (default): cardkit path is attempted."""
     _, mock_runtime = acp_registry
-    worker._settings = worker._settings.model_copy(update={"streaming_enabled": True})
     task, _ = make_task("hello")
     await worker._execute_task(task)
     # Streaming attempted via RunProgressCard.build_card() + create_card()
