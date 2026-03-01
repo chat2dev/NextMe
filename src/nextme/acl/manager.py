@@ -37,6 +37,10 @@ class AclManager:
     async def get_user(self, open_id: str) -> AclUser | None:
         return await self._db.get_user(open_id)
 
+    async def get_application(self, app_id: int) -> AclApplication | None:
+        """Fetch a single application by id."""
+        return await self._db.get_application(app_id)
+
     async def add_user(
         self,
         open_id: str,

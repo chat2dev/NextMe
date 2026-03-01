@@ -167,3 +167,84 @@ async def test_handle_acl_reject(manager, replier):
     )
     call_text = replier.send_text.call_args[0][1]
     assert "拒绝" in call_text or "rejected" in call_text.lower()
+
+
+async def test_handle_acl_add_invalid_role(manager, replier):
+    await handle_acl_add(
+        actor_id="ou_admin",
+        actor_role=Role.ADMIN,
+        target_id="ou_new",
+        target_role_str="superuser",
+        acl_manager=manager,
+        replier=replier,
+        chat_id="chat_1",
+    )
+    call_text = replier.send_text.call_args[0][1]
+    assert "superuser" in call_text or "未知角色" in call_text
+
+
+async def test_handle_acl_add_admin_role_denied(manager, replier):
+    await handle_acl_add(
+        actor_id="ou_admin",
+        actor_role=Role.ADMIN,
+        target_id="ou_new",
+        target_role_str="admin",
+        acl_manager=manager,
+        replier=replier,
+        chat_id="chat_1",
+    )
+    call_text = replier.send_text.call_args[0][1]
+    assert "Admin" in call_text or "admin" in call_text.lower()
+
+
+async def test_handle_acl_remove_user_not_found(manager, replier):
+    await handle_acl_remove(
+        actor_id="ou_admin",
+        actor_role=Role.ADMIN,
+        target_id="ou_nonexistent",
+        acl_manager=manager,
+        replier=replier,
+        chat_id="chat_1",
+    )
+    call_text = replier.send_text.call_args[0][1]
+    assert "未找到" in call_text or "not found" in call_text.lower()
+
+
+async def test_handle_acl_approve_not_found(manager, replier):
+    await handle_acl_approve(
+        app_id=9999,
+        reviewer_id="ou_admin",
+        reviewer_role=Role.ADMIN,
+        acl_manager=manager,
+        replier=replier,
+        chat_id="chat_1",
+    )
+    call_text = replier.send_text.call_args[0][1]
+    assert "未找到" in call_text or "not found" in call_text.lower()
+
+
+async def test_handle_acl_approve_insufficient_permission(manager, replier):
+    app_id, _ = await manager.create_application("ou_x", "X", Role.OWNER)
+    await handle_acl_approve(
+        app_id=app_id,
+        reviewer_id="ou_owner",
+        reviewer_role=Role.OWNER,
+        acl_manager=manager,
+        replier=replier,
+        chat_id="chat_1",
+    )
+    call_text = replier.send_text.call_args[0][1]
+    assert "权限不足" in call_text
+
+
+async def test_handle_acl_reject_not_found(manager, replier):
+    await handle_acl_reject(
+        app_id=9999,
+        reviewer_id="ou_admin",
+        reviewer_role=Role.ADMIN,
+        acl_manager=manager,
+        replier=replier,
+        chat_id="chat_1",
+    )
+    call_text = replier.send_text.call_args[0][1]
+    assert "未找到" in call_text or "not found" in call_text.lower()

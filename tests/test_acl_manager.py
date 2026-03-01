@@ -195,3 +195,15 @@ async def test_reject_already_approved_returns_none(manager):
     await manager.approve(app_id, "ou_admin")
     result = await manager.reject(app_id, "ou_admin")
     assert result is None
+
+
+async def test_get_application(manager):
+    app_id, _ = await manager.create_application("ou_x", "X", Role.COLLABORATOR)
+    app = await manager.get_application(app_id)
+    assert app is not None
+    assert app.id == app_id
+
+
+async def test_get_application_not_found(manager):
+    app = await manager.get_application(9999)
+    assert app is None

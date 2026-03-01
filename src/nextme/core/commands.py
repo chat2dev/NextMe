@@ -466,7 +466,7 @@ async def handle_acl_list(
 
 async def handle_acl_add(
     actor_id: str,
-    actor_role: Role,
+    actor_role: "Role",
     target_id: str,
     target_role_str: str,
     acl_manager: AclManager,
@@ -505,30 +505,32 @@ async def handle_acl_add(
 
 async def handle_acl_remove(
     actor_id: str,
-    actor_role: Role,
+    actor_role: "Role",
     target_id: str,
     acl_manager: AclManager,
     replier: Replier,
     chat_id: str,
 ) -> None:
     """Remove a user from the ACL. Enforces role-based permission."""
+    # Check admin guard first — admins have no DB row, so get_user returns None.
+    if target_id in acl_manager.get_admin_ids():
+        await replier.send_text(
+            chat_id, "无法移除管理员，请修改 settings.json 中的 admin_users。"
+        )
+        return
+
     target = await acl_manager.get_user(target_id)
     if target is None:
         await replier.send_text(chat_id, f"未找到用户 `{target_id}`。")
         return
 
     if not acl_manager.can_remove(actor_role, target):
-        if target_id in acl_manager.get_admin_ids():
-            await replier.send_text(
-                chat_id, "无法移除管理员，请修改 settings.json 中的 admin_users。"
-            )
-        else:
-            await replier.send_text(chat_id, "权限不足：您无法移除该用户。")
+        await replier.send_text(chat_id, "权限不足：您无法移除该用户。")
         return
 
     try:
         await acl_manager.remove_user(target_id)
-        await replier.send_text(chat_id, f"已移除用户 `{target_id}`。")
+        await replier.send_text(chat_id, f"✅ 已移除用户 `{target_id}`。")
     except ValueError as e:
         await replier.send_text(chat_id, str(e))
     except Exception:
@@ -537,7 +539,7 @@ async def handle_acl_remove(
 
 
 async def handle_acl_pending(
-    viewer_role: Role,
+    viewer_role: "Role",
     acl_manager: AclManager,
     replier: Replier,
     chat_id: str,
@@ -554,13 +556,13 @@ async def handle_acl_pending(
 async def handle_acl_approve(
     app_id: int,
     reviewer_id: str,
-    reviewer_role: Role,
+    reviewer_role: "Role",
     acl_manager: AclManager,
     replier: Replier,
     chat_id: str,
 ) -> None:
     """Approve a pending application."""
-    app = await acl_manager._db.get_application(app_id)
+    app = await acl_manager.get_application(app_id)
     if app is None:
         await replier.send_text(chat_id, f"未找到申请 #{app_id}。")
         return
@@ -582,13 +584,13 @@ async def handle_acl_approve(
 async def handle_acl_reject(
     app_id: int,
     reviewer_id: str,
-    reviewer_role: Role,
+    reviewer_role: "Role",
     acl_manager: AclManager,
     replier: Replier,
     chat_id: str,
 ) -> None:
     """Reject a pending application."""
-    app = await acl_manager._db.get_application(app_id)
+    app = await acl_manager.get_application(app_id)
     if app is None:
         await replier.send_text(chat_id, f"未找到申请 #{app_id}。")
         return
