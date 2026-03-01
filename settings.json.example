@@ -1,6 +1,9 @@
 {
   "app_id": "cli_xxxxxxxxxxxxxxxx",
   "app_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "admin_users": [
+    "ou_your_open_id_here"
+  ],
   "projects": [
     {
       "name": "my-project",

@@ -328,6 +328,49 @@ NEXTME_ACP_IDLE_TIMEOUT_SECONDS=7200
 
 ---
 
+## 访问控制
+
+NextMe 支持基于角色的访问控制（ACL），限制哪些用户可以与机器人交互。
+
+### 角色
+
+| 角色 | 配置方式 | 权限 |
+|------|---------|------|
+| **Admin（管理员）** | `settings.json` 中的 `admin_users` | 完全访问；审批 Owner 申请 |
+| **Owner（所有者）** | SQLite（`~/.nextme/nextme.db`） | 执行 Bot 任务、切换项目、审批 Collaborator 申请 |
+| **Collaborator（协作者）** | SQLite（`~/.nextme/nextme.db`） | 执行 Bot 任务、状态命令；不能切换项目 |
+
+### 配置
+
+将您的 `open_id` 添加到 `~/.nextme/settings.json` 中的 `admin_users`：
+
+```json
+{
+  "admin_users": ["ou_your_open_id_here"],
+  ...
+}
+```
+
+使用 `/whoami` 查看您的 `open_id`。
+
+### 命令
+
+| 命令 | 说明 | 最低角色 |
+|------|------|----------|
+| `/whoami` | 显示您的 open_id 和角色 | 所有人 |
+| `/acl list` | 列出所有已授权用户 | Collaborator |
+| `/acl add <open_id> [owner\|collaborator]` | 添加用户 | Owner（仅限 collab）/ Admin |
+| `/acl remove <open_id>` | 移除用户 | Owner（仅限 collab）/ Admin |
+| `/acl pending` | 查看待审批申请 | Owner / Admin |
+| `/acl approve <id>` | 批准申请 | Owner / Admin |
+| `/acl reject <id>` | 拒绝申请 | Owner / Admin |
+
+### 申请流程
+
+未授权用户会收到一张包含其 `open_id` 和申请按钮的卡片，可申请 Owner 或 Collaborator 权限。申请通知将以私信方式发送给管理员（Owner 申请）或 Owner + 管理员（Collaborator 申请）。审批人可直接在通知卡片上批准或拒绝申请。
+
+---
+
 ## 自定义 Skills
 
 Skills 从四个层级发现（优先级高的覆盖低的）：

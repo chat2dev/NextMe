@@ -284,6 +284,19 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     logger.info("StateStore: state loaded")
 
     # ------------------------------------------------------------------
+    # Step 4b: AclDb + AclManager
+    # ------------------------------------------------------------------
+    from .acl.db import AclDb
+    from .acl.manager import AclManager
+
+    acl_db = AclDb()
+    await acl_db.open()
+    acl_manager = AclManager(db=acl_db, admin_users=settings.admin_users)
+    logger.info(
+        "AclManager: initialized (admin_users=%d)", len(settings.admin_users)
+    )
+
+    # ------------------------------------------------------------------
     # Step 5: MemoryManager, SkillRegistry, ContextManager
     # ------------------------------------------------------------------
     from .memory.manager import MemoryManager
@@ -352,6 +365,7 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
         state_store=state_store,
         skill_registry=skill_registry,
         memory_manager=memory_manager,
+        acl_manager=acl_manager,
     )
 
     handler = MessageHandler(dedup=dedup, dispatcher=dispatcher)
@@ -448,14 +462,21 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     except Exception:
         logger.exception("Error flushing memory")
 
-    # 5. Stop StateStore (flush + cancel debounce loop).
+    # 5. Close AclDb.
+    try:
+        await acl_db.close()
+        logger.info("AclDb: closed")
+    except Exception:
+        logger.exception("Error closing AclDb")
+
+    # 6. Stop StateStore (flush + cancel debounce loop).
     try:
         await state_store.stop()
         logger.info("StateStore: stopped")
     except Exception:
         logger.exception("Error stopping StateStore")
 
-    # 6. Cancel remaining background asyncio tasks.
+    # 7. Cancel remaining background asyncio tasks.
     for bg_task in (janitor_task,):
         if not bg_task.done():
             bg_task.cancel()

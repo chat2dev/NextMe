@@ -382,6 +382,49 @@ NEXTME_ACP_IDLE_TIMEOUT_SECONDS=7200
 
 ---
 
+## Access Control
+
+NextMe supports role-based access control (ACL) to restrict which users can interact with the bot.
+
+### Roles
+
+| Role | Configuration | Permissions |
+|------|--------------|-------------|
+| **Admin** | `admin_users` in `settings.json` | Full access; approve Owner applications |
+| **Owner** | SQLite (`~/.nextme/nextme.db`) | Bot tasks, project switching, approve Collaborator applications |
+| **Collaborator** | SQLite (`~/.nextme/nextme.db`) | Bot tasks, status commands; cannot switch projects |
+
+### Setup
+
+Add your `open_id` to `admin_users` in `~/.nextme/settings.json`:
+
+```json
+{
+  "admin_users": ["ou_your_open_id_here"],
+  ...
+}
+```
+
+Use `/whoami` to find your `open_id`.
+
+### Commands
+
+| Command | Description | Min Role |
+|---------|-------------|----------|
+| `/whoami` | Show your open_id and role | Everyone |
+| `/acl list` | List all authorized users | Collaborator |
+| `/acl add <open_id> [owner\|collaborator]` | Add a user | Owner (collab only) / Admin |
+| `/acl remove <open_id>` | Remove a user | Owner (collab only) / Admin |
+| `/acl pending` | View pending applications | Owner / Admin |
+| `/acl approve <id>` | Approve an application | Owner / Admin |
+| `/acl reject <id>` | Reject an application | Owner / Admin |
+
+### Application Flow
+
+Unauthorized users receive a card with their `open_id` and buttons to apply for Owner or Collaborator access. Applications are sent as DM notifications to admins (for Owner applications) or owners + admins (for Collaborator applications). Reviewers can approve or reject directly from the notification card.
+
+---
+
 ## Custom Skills
 
 Skills are discovered from four tiers (higher priority overrides lower):
