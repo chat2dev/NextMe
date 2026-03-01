@@ -98,6 +98,9 @@ class TaskDispatcher:
 
         # worker_key (context_id:project_name) -> asyncio.Task (running worker)
         self._worker_tasks: dict[str, asyncio.Task] = {}
+        # app_id -> [message_id, ...] for ACL review notification cards sent to reviewers.
+        # Used to update (disable) those cards once the application is decided.
+        self._review_notification_msgs: dict[int, list[str]] = {}
         # Dynamic chat→project bindings set via /project bind (chat_id → project_name).
         # Populated at startup from state.json and updated by handle_bind.
         self._dynamic_bindings: dict[str, str] = (
@@ -804,7 +807,7 @@ class TaskDispatcher:
             app_id, open_id, requested_role.value,
         )
 
-        # Notify reviewers
+        # Notify reviewers and record message_ids so the card can be updated later.
         reviewer_ids = await self._acl_manager.get_reviewers_for_role(requested_role)
         notification_card = replier.build_acl_review_notification_card(
             app_id=app_id,
@@ -812,13 +815,18 @@ class TaskDispatcher:
             applicant_id=open_id,
             requested_role=requested_role.value,
         )
+        notification_msg_ids: list[str] = []
         for reviewer_id in reviewer_ids:
             try:
-                await replier.send_to_user(reviewer_id, notification_card, "interactive")
+                msg_id = await replier.send_to_user(reviewer_id, notification_card, "interactive")
+                if msg_id:
+                    notification_msg_ids.append(msg_id)
             except Exception:
                 logger.exception(
                     "_handle_acl_apply_action: failed to notify reviewer %r", reviewer_id
                 )
+        if notification_msg_ids:
+            self._review_notification_msgs[app_id] = notification_msg_ids
 
     async def _handle_acl_review_action(self, data: dict, replier: Replier) -> None:
         """Process an acl_review card button click (approve/reject)."""
@@ -853,6 +861,18 @@ class TaskDispatcher:
                 "_handle_acl_review_action: app #%d not pending (status=%s)",
                 app_id, app.status if app else "not found",
             )
+            status_text = app.status if app else "不存在"
+            try:
+                await replier.send_to_user(
+                    operator_id,
+                    f'{{"text":"⚠️ 申请 #{app_id} 无法处理，当前状态：{status_text}。"}}',
+                    "text",
+                )
+            except Exception:
+                logger.exception(
+                    "_handle_acl_review_action: failed to notify operator %r of stale app",
+                    operator_id,
+                )
             return
 
         if not self._acl_manager.can_review(reviewer_role, app.requested_role):
@@ -869,8 +889,21 @@ class TaskDispatcher:
                     "_handle_acl_review_action: approved app #%d for %r",
                     app_id, app.applicant_id,
                 )
+                role_label = "Owner" if result.requested_role.value == "owner" else "Collaborator"
+                done_card = replier.build_acl_review_done_card(
+                    app_id, "approved", app.applicant_id, result.requested_role.value
+                )
+                # Update all reviewer notification cards to show the decision.
+                for msg_id in self._review_notification_msgs.pop(app_id, []):
+                    try:
+                        await replier.update_card(msg_id, done_card)
+                    except Exception:
+                        logger.exception(
+                            "_handle_acl_review_action: failed to update notification card %s",
+                            msg_id,
+                        )
+                # Notify applicant.
                 try:
-                    role_label = "Owner" if result.requested_role.value == "owner" else "Collaborator"
                     await replier.send_to_user(
                         app.applicant_id,
                         '{"text":"✅ 您的权限申请已批准，您现在是 ' + role_label + '。"}',
@@ -881,6 +914,17 @@ class TaskDispatcher:
                         "_handle_acl_review_action: failed to notify applicant %r",
                         app.applicant_id,
                     )
+                # Notify the reviewer who acted.
+                try:
+                    await replier.send_to_user(
+                        operator_id,
+                        f'{{"text":"✅ 已批准申请 #{app_id}，{app.applicant_id} 现在是 {role_label}。"}}',
+                        "text",
+                    )
+                except Exception:
+                    logger.exception(
+                        "_handle_acl_review_action: failed to notify operator %r", operator_id
+                    )
         elif decision == "rejected":
             result = await self._acl_manager.reject(app_id, operator_id)
             if result:
@@ -888,6 +932,19 @@ class TaskDispatcher:
                     "_handle_acl_review_action: rejected app #%d for %r",
                     app_id, app.applicant_id,
                 )
+                done_card = replier.build_acl_review_done_card(
+                    app_id, "rejected", app.applicant_id, result.requested_role.value
+                )
+                # Update all reviewer notification cards.
+                for msg_id in self._review_notification_msgs.pop(app_id, []):
+                    try:
+                        await replier.update_card(msg_id, done_card)
+                    except Exception:
+                        logger.exception(
+                            "_handle_acl_review_action: failed to update notification card %s",
+                            msg_id,
+                        )
+                # Notify applicant.
                 try:
                     await replier.send_to_user(
                         app.applicant_id,
@@ -898,6 +955,17 @@ class TaskDispatcher:
                     logger.exception(
                         "_handle_acl_review_action: failed to notify applicant %r",
                         app.applicant_id,
+                    )
+                # Notify the reviewer who acted.
+                try:
+                    await replier.send_to_user(
+                        operator_id,
+                        f'{{"text":"❌ 已拒绝申请 #{app_id}。"}}',
+                        "text",
+                    )
+                except Exception:
+                    logger.exception(
+                        "_handle_acl_review_action: failed to notify operator %r", operator_id
                     )
         else:
             logger.warning("_handle_acl_review_action: unknown decision %r", decision)

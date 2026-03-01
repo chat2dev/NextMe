@@ -124,6 +124,40 @@ class MessageHandler:
                 resp.toast = CallBackToast()
                 resp.toast.type = "info"
                 resp.toast.content = "已收到"
+
+                # Immediately replace the card with a "processing" state so the
+                # reviewer cannot click the buttons again while the async handler runs.
+                action = value.get("action")
+                app_id_str = value.get("app_id", "")
+                if action == "acl_review":
+                    decision = value.get("decision", "")
+                    decision_label = "批准" if decision == "approved" else "拒绝"
+                    processing_card: dict = {
+                        "schema": "2.0",
+                        "config": {"wide_screen_mode": True},
+                        "header": {
+                            "title": {"tag": "plain_text", "content": f"📋 权限申请 #{app_id_str}"},
+                            "template": "grey",
+                        },
+                        "body": {"elements": [
+                            {"tag": "markdown", "content": f"⏳ 正在{decision_label}，结果将通过私信通知你…"}
+                        ]},
+                    }
+                else:  # acl_apply
+                    processing_card = {
+                        "schema": "2.0",
+                        "config": {"wide_screen_mode": True},
+                        "header": {
+                            "title": {"tag": "plain_text", "content": "🔒 权限申请"},
+                            "template": "grey",
+                        },
+                        "body": {"elements": [
+                            {"tag": "markdown", "content": "⏳ 申请已提交，等待审批通知…"}
+                        ]},
+                    }
+                resp.card = CallBackCard()
+                resp.card.type = "raw"
+                resp.card.data = processing_card
                 return resp
 
             if value.get("action") != "permission_choice":

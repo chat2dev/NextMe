@@ -849,6 +849,35 @@ class FeishuReplier:
         }
         return json.dumps(card, ensure_ascii=False)
 
+    def build_acl_review_done_card(
+        self,
+        app_id: int,
+        decision: str,
+        applicant_id: str,
+        role: str,
+    ) -> str:
+        """Return a finalised review card (no buttons) shown after approve/reject.
+
+        Used to update all reviewer notification cards so they cannot be clicked again.
+        """
+        role_label = "Owner（负责人）" if role == "owner" else "Collaborator（协作者）"
+        if decision == "approved":
+            result_text = f"✅ 已批准：`{applicant_id}` 现在是 {role_label}"
+            template = "green"
+        else:
+            result_text = f"❌ 已拒绝：`{applicant_id}` 的申请"
+            template = "red"
+        card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": f"📋 权限申请 #{app_id}"},
+                "template": template,
+            },
+            "body": {"elements": [{"tag": "markdown", "content": result_text}]},
+        }
+        return json.dumps(card, ensure_ascii=False)
+
     def build_whoami_card(
         self,
         open_id: str,

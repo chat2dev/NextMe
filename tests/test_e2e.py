@@ -6,15 +6,17 @@ SessionWorker — runs as real code.
 
 Tests
 -----
-1. test_normal_message_full_flow                    — normal message → agent executes → result card
-2. test_help_command_no_runtime                     — /help → help card, runtime NOT called
-3. test_new_command_resets_session                  — /new after a normal task → no crash
-4. test_second_task_queued                          — 2 tasks queued → runtime called twice
-5. test_acl_gate_blocks_unauthorized_user           — ACL None → denied card, runtime not called
-6. test_acl_gate_whoami_bypasses_auth               — /whoami with ACL None → no denied card
-7. test_no_project_sends_error                      — default_project=None → error text sent
-8. test_group_chat_unauthorized_gets_dm             — group chat: text prompt in thread + DM, no card in thread
-9. test_acl_apply_by_different_operator_is_ignored  — cross-user apply button click → no application created
+1.  test_normal_message_full_flow                    — normal message → agent executes → result card
+2.  test_help_command_no_runtime                     — /help → help card, runtime NOT called
+3.  test_new_command_resets_session                  — /new after a normal task → no crash
+4.  test_second_task_queued                          — 2 tasks queued → runtime called twice
+5.  test_acl_gate_blocks_unauthorized_user           — ACL None → denied card, runtime not called
+6.  test_acl_gate_whoami_bypasses_auth               — /whoami with ACL None → no denied card
+7.  test_no_project_sends_error                      — default_project=None → error text sent
+8.  test_group_chat_unauthorized_gets_dm             — group chat: text prompt in thread + DM, no card in thread
+9.  test_acl_apply_by_different_operator_is_ignored  — cross-user apply button click → no application created
+10. test_review_card_disabled_after_approve          — approve → update_card called on review notification
+11. test_review_card_disabled_after_reject           — reject → update_card called on review notification
 """
 
 from __future__ import annotations
@@ -26,6 +28,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nextme.acl.db import AclDb
+from nextme.acl.manager import AclManager
+from nextme.acl.schema import Role
 from nextme.acp.janitor import ACPRuntimeRegistry
 from nextme.config.schema import AppConfig, Project, Settings
 from nextme.core.dispatcher import TaskDispatcher
@@ -37,6 +42,15 @@ from nextme.protocol.types import Task
 # ---------------------------------------------------------------------------
 # Module-level fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def acl_db(tmp_path):
+    """Real in-process AclDb backed by a temporary SQLite file."""
+    db = AclDb(db_path=tmp_path / "acl_e2e.db")
+    await db.open()
+    yield db
+    await db.close()
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +120,8 @@ def make_replier() -> MagicMock:
     r.build_help_card = MagicMock(return_value='{"card":"help"}')
     r.build_whoami_card = MagicMock(return_value='{"card":"whoami"}')
     r.build_permission_card = MagicMock(return_value='{"card":"perm"}')
+    r.build_acl_review_notification_card = MagicMock(return_value='{"card":"notify"}')
+    r.build_acl_review_done_card = MagicMock(return_value='{"card":"done"}')
     return r
 
 
@@ -481,3 +497,108 @@ async def test_acl_apply_by_different_operator_is_ignored(tmp_project, settings)
     acl_manager.create_application.assert_not_called()
     # No notification DM sent
     replier.send_to_user.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 10: Review notification card is disabled (update_card) after approve
+# ---------------------------------------------------------------------------
+
+
+async def test_review_card_disabled_after_approve(tmp_project, settings, acl_db):
+    """Full apply → approve flow: the review notification card is updated
+    (buttons removed) via update_card after the admin approves.
+
+    Flow:
+    1. Applicant triggers acl_apply → send_to_user sends notification to admin,
+       returning a message_id that is stored in _review_notification_msgs.
+    2. Admin approves via acl_review → update_card is called on that message_id.
+    """
+    replier = make_replier()
+    # send_to_user returns a notification message_id the first time (reviewer notification)
+    review_notification_msg_id = "om_review_notify_001"
+    replier.send_to_user = AsyncMock(return_value=review_notification_msg_id)
+
+    acl_manager = AclManager(db=acl_db, admin_users=["ou_admin"])
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acl_manager=acl_manager)
+
+    # Step 1: applicant submits an access request
+    await dispatcher.handle_acl_card_action({
+        "action": "acl_apply",
+        "open_id": "ou_applicant",
+        "operator_id": "ou_applicant",
+        "role": "collaborator",
+    })
+
+    # The dispatcher should have stored the review notification message_id
+    assert len(dispatcher._review_notification_msgs) == 1, (
+        "Expected one pending review notification after acl_apply"
+    )
+
+    # Step 2: admin approves the application
+    app_id = next(iter(dispatcher._review_notification_msgs))
+    await dispatcher.handle_acl_card_action({
+        "action": "acl_review",
+        "app_id": str(app_id),
+        "decision": "approved",
+        "operator_id": "ou_admin",
+    })
+
+    # update_card must have been called with the notification message_id
+    replier.update_card.assert_called()
+    updated_ids = [c.args[0] for c in replier.update_card.call_args_list]
+    assert review_notification_msg_id in updated_ids, (
+        f"Expected update_card to be called with {review_notification_msg_id!r}, got {updated_ids}"
+    )
+
+    # The pending entry should have been consumed
+    assert app_id not in dispatcher._review_notification_msgs, (
+        "Expected _review_notification_msgs entry to be removed after approval"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 11: Review notification card is disabled (update_card) after reject
+# ---------------------------------------------------------------------------
+
+
+async def test_review_card_disabled_after_reject(tmp_project, settings, acl_db):
+    """Full apply → reject flow: the review notification card is updated
+    (buttons removed) via update_card after the admin rejects.
+    """
+    replier = make_replier()
+    review_notification_msg_id = "om_review_notify_002"
+    replier.send_to_user = AsyncMock(return_value=review_notification_msg_id)
+
+    acl_manager = AclManager(db=acl_db, admin_users=["ou_admin"])
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acl_manager=acl_manager)
+
+    # Step 1: applicant submits an access request
+    await dispatcher.handle_acl_card_action({
+        "action": "acl_apply",
+        "open_id": "ou_applicant2",
+        "operator_id": "ou_applicant2",
+        "role": "collaborator",
+    })
+
+    assert len(dispatcher._review_notification_msgs) == 1
+
+    # Step 2: admin rejects
+    app_id = next(iter(dispatcher._review_notification_msgs))
+    await dispatcher.handle_acl_card_action({
+        "action": "acl_review",
+        "app_id": str(app_id),
+        "decision": "rejected",
+        "operator_id": "ou_admin",
+    })
+
+    # update_card must have been called with the notification message_id
+    replier.update_card.assert_called()
+    updated_ids = [c.args[0] for c in replier.update_card.call_args_list]
+    assert review_notification_msg_id in updated_ids, (
+        f"Expected update_card to be called with {review_notification_msg_id!r}, got {updated_ids}"
+    )
+
+    # The pending entry should have been consumed
+    assert app_id not in dispatcher._review_notification_msgs

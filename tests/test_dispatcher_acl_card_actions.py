@@ -318,8 +318,8 @@ async def test_review_unauthorized_reviewer_returns_early(acl_manager):
     replier.send_to_user.assert_not_called()
 
 
-async def test_review_app_not_found_returns_early(acl_manager):
-    """Non-existent app_id → returns early without processing."""
+async def test_review_app_not_found_notifies_operator(acl_manager):
+    """Non-existent app_id → returns early and sends a DM to the operator."""
     replier = make_replier()
     d = make_dispatcher(replier, acl_manager=acl_manager)
     await d.handle_acl_card_action({
@@ -328,17 +328,19 @@ async def test_review_app_not_found_returns_early(acl_manager):
         "decision": "approved",
         "operator_id": "ou_admin",
     })
-    replier.send_to_user.assert_not_called()
+    # Operator is notified that the application cannot be processed.
+    replier.send_to_user.assert_called_once()
+    assert replier.send_to_user.call_args.args[0] == "ou_admin"
 
 
-async def test_review_already_processed_app_returns_early(acl_manager):
-    """Application that is already approved/rejected → returns early."""
+async def test_review_already_processed_app_notifies_operator(acl_manager):
+    """Application already approved → returns early and notifies operator."""
     replier = make_replier()
     d = make_dispatcher(replier, acl_manager=acl_manager)
-    # Create and approve application directly
+    # Create and approve application directly.
     app_id, _ = await acl_manager.create_application("ou_applicant", "", Role.COLLABORATOR)
     await acl_manager.approve(app_id, "ou_admin")
-    # Try to review again
+    # Try to review the already-processed application.
     replier.send_to_user.reset_mock()
     await d.handle_acl_card_action({
         "action": "acl_review",
@@ -346,8 +348,9 @@ async def test_review_already_processed_app_returns_early(acl_manager):
         "decision": "rejected",
         "operator_id": "ou_admin",
     })
-    # send_to_user should NOT have been called for the second review
-    replier.send_to_user.assert_not_called()
+    # Operator receives a "already processed" DM; applicant is not re-notified.
+    replier.send_to_user.assert_called_once()
+    assert replier.send_to_user.call_args.args[0] == "ou_admin"
 
 
 async def test_review_cannot_review_same_level_returns_early(acl_manager, db):
@@ -382,10 +385,10 @@ async def test_review_approved_notifies_applicant(acl_manager):
         "decision": "approved",
         "operator_id": "ou_admin",
     })
-    # Applicant should be notified
+    # Both applicant and operator should be notified
     replier.send_to_user.assert_called()
-    call_args = replier.send_to_user.call_args_list[-1]
-    assert call_args[0][0] == "ou_applicant"
+    all_recipients = [c[0][0] for c in replier.send_to_user.call_args_list]
+    assert "ou_applicant" in all_recipients
     # Application should be approved in DB
     app = await acl_manager.get_application(app_id)
     assert app.status == "approved"
@@ -420,9 +423,10 @@ async def test_review_rejected_notifies_applicant(acl_manager):
         "decision": "rejected",
         "operator_id": "ou_admin",
     })
+    # Both applicant and operator should be notified
     replier.send_to_user.assert_called()
-    call_args = replier.send_to_user.call_args_list[-1]
-    assert call_args[0][0] == "ou_applicant"
+    all_recipients = [c[0][0] for c in replier.send_to_user.call_args_list]
+    assert "ou_applicant" in all_recipients
     # Application should be rejected in DB
     app = await acl_manager.get_application(app_id)
     assert app.status == "rejected"
