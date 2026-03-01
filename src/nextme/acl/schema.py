@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -29,11 +29,11 @@ class AclUser(BaseModel):
 class AclApplication(BaseModel):
     """A row from acl_applications table."""
 
-    id: int
+    id: int | None = None
     applicant_id: str
     applicant_name: str = ""
     requested_role: Role
-    status: str  # "pending" | "approved" | "rejected"
+    status: Literal["pending", "approved", "rejected"]
     requested_at: datetime
-    processed_at: Optional[datetime] = None
-    processed_by: Optional[str] = None
+    processed_at: datetime | None = None
+    processed_by: str | None = None

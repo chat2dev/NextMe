@@ -43,6 +43,19 @@ def test_acl_application_model():
     assert app.processed_at is None
 
 
+def test_acl_application_invalid_status():
+    import pytest
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        AclApplication(
+            id=1,
+            applicant_id="ou_xyz",
+            requested_role=Role.COLLABORATOR,
+            status="INVALID",
+            requested_at=datetime(2026, 3, 1, 11, 0, 0),
+        )
+
+
 def test_settings_admin_users_default():
     s = Settings()
     assert s.admin_users == []
