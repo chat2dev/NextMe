@@ -293,11 +293,13 @@ Bot 重启
 
 #### 文件布局
 ```
-~/.nextme/memory/{md5(context_id)}/
+~/.nextme/memory/{md5(user_id)}/    # user_id = context_id.rsplit(":", 1)[-1]
 ├── user_context.json     # 用户偏好、交互风格
 ├── personal.json         # 姓名、时区、角色等
 └── facts.json            # 已学习事实（含置信度）
 ```
+
+> **注意：** key 为 `user_id`（飞书用户 ID）而非 `context_id`，确保同一用户在不同群组中共享同一份记忆。
 
 #### Facts Schema
 ```json
@@ -307,7 +309,8 @@ Bot 重启
       "text": "用户主要使用 Python",
       "confidence": 0.95,
       "created_at": "2025-01-01T12:00:00",
-      "source": "conversation"
+      "updated_at": "2025-01-02T10:00:00",
+      "source": "agent_output"
     }
   ]
 }
@@ -315,7 +318,30 @@ Bot 重启
 
 #### MemoryManager 写入策略
 
-与 StateStore 相同：内存立即更新，文件通过 asyncio 去抖（30s）异步写入，原子 rename。每次 Session 启动时注入 top-15 facts 到 agent system prompt。
+内存立即更新，文件通过 asyncio 去抖（30s）异步写入，原子 rename。
+
+**add_fact 去重：** 新增 Fact 时，与所有已有 Fact 计算 `difflib.SequenceMatcher` 相似度；> 0.85 则合并（置信度较高的文本胜出，仅变更时标记 dirty）。Facts 总数超过 `memory_max_facts`（默认 100）时，按置信度升序淘汰末尾。
+
+#### Agent 主动更新记忆（`<memory>` 标签语法）
+
+非续接新会话时，Worker 将 top-10 Facts 通过 Jinja2 模板注入 task prompt（带编号 + 操作说明）。Agent 在回复末尾写 `<memory>` 标签，Worker 解析后派发对应操作，标签在展示给用户前自动剥离：
+
+| 标签 | 操作 | 调用方法 |
+|------|------|---------|
+| `<memory>text</memory>` | 新增 Fact | `add_fact()` |
+| `<memory op="replace" idx="N">text</memory>` | 替换第 N 条（按置信度降序） | `replace_fact(idx, text)` |
+| `<memory op="forget" idx="N"></memory>` | 删除第 N 条（按置信度降序） | `forget_fact(idx)` |
+
+超过 500 字的 `add` 内容保留在展示中（防止大块内容误用 `<memory>` 标签导致消失）。idx 越界时记录 WARNING 并忽略该操作。
+
+#### Prompt 模板系统
+
+注入格式由 Jinja2 模板控制，加载顺序：
+
+1. `~/.nextme/prompts/memory.md` — 用户自定义（优先）
+2. `src/nextme/prompts/memory.md` — 内置默认（fallback）
+
+可用变量：`{{ count }}`、`{% for fact in facts %}{{ loop.index0 }}. {{ fact.text }}{% endfor %}`。
 
 ---
 
@@ -528,6 +554,7 @@ tools_denylist: []
   "acp_idle_timeout_seconds": 7200,
   "task_queue_capacity": 1024,
   "memory_debounce_seconds": 30,
+  "memory_max_facts": 100,
   "context_max_bytes": 1000000,
   "context_compression": "zlib",
   "log_level": "INFO",

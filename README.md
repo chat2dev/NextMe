@@ -20,7 +20,7 @@ Turn Feishu group chats and direct messages into an interactive Claude Code term
 | Multi-project parallel | Each `(user, project)` pair gets an independent worker; multiple projects run concurrently |
 | Chat binding | Bind a group chat to a specific project (`/project bind <name>`) |
 | Session persistence | Claude session ID survives bot restarts; conversation history seamlessly resumed |
-| Long-term memory | `/remember <text>` saves user-level facts (shared across all chats); injected into new sessions automatically |
+| Long-term memory | Facts stored per user (shared across all chats); injected as a numbered list into new sessions; agent can add / replace / delete facts via `<memory>` tags |
 | Context compression | Oversized contexts auto-compressed with zlib / lzma / brotli |
 | Skills system | Markdown prompt templates; tiered discovery (Built-in / Global / NextMe Global / Project); `/review` `/commit` `/test` etc. |
 | Meta-commands | `/new` `/stop` `/help` `/status` `/project` `/task` `/remember` `/skill` |
@@ -292,6 +292,7 @@ Reply with the corresponding number to continue.
 | `acp_idle_timeout_seconds` | `7200` | Idle timeout before ACPRuntime process is killed |
 | `task_queue_capacity` | `1024` | Per-session task queue capacity |
 | `memory_debounce_seconds` | `30` | State / memory flush debounce interval (s) |
+| `memory_max_facts` | `100` | Maximum facts kept per user; lowest-confidence evicted first |
 | `context_max_bytes` | `1000000` | Context size threshold for compression |
 | `context_compression` | `"zlib"` | Compression algorithm: `zlib` / `lzma` / `brotli` |
 | `progress_debounce_seconds` | `0.5` | Progress card update debounce interval (s) |
@@ -466,23 +467,44 @@ NextMe assigns an independent asyncio worker to each `(user, project)` pair, so 
 
 **Session persistence** — The Claude session ID (`actual_id`) is saved to `~/.nextme/state.json` after each task. On bot restart, NextMe passes `--resume <id>` to the `claude` CLI so conversation history is seamlessly resumed.
 
-**Long-term memory** — Use `/remember <text>` to save facts. Facts are stored at the **user level** and shared across all chats for the same user. On new sessions (not resumed ones), the top-10 highest-confidence facts are prepended to the task prompt automatically:
+**Long-term memory** — Facts are stored at the **user level** (`~/.nextme/memory/{user_hash}/facts.json`) and shared across all chats for the same user. On new sessions (not resumed), the top-10 highest-confidence facts are injected into the task prompt via a Jinja2 template:
 
 ```
-[Memory]
-- I prefer Python over JavaScript
-- Use pytest for tests
+[用户记忆] (共 2 条，可在回复末尾用 <memory> 标签更新)
+0. Prefer Python over JavaScript
+1. Use pytest for tests
 
-[Message]
+记忆操作（仅在有必要时使用）：
+- 新增: <memory>内容</memory>
+- 更新: <memory op="replace" idx="0">新内容</memory>
+- 删除: <memory op="forget" idx="1"></memory>
+
+[用户消息]
 <your message here>
 ```
+
+The agent can actively manage memory by writing `<memory>` tags in its reply:
+
+| Tag | Operation |
+|-----|-----------|
+| `<memory>text</memory>` | Add a new fact |
+| `<memory op="replace" idx="0">new text</memory>` | Replace fact at index 0 |
+| `<memory op="forget" idx="1"></memory>` | Delete fact at index 1 |
+
+Tags are stripped before displaying the response to the user. Facts longer than 500 characters are kept visible and also recorded.
+
+**Deduplication** — When adding a fact, if an existing fact has a similarity ratio > 0.85 (difflib `SequenceMatcher`), the two are merged in-place (higher-confidence text wins). At most `memory_max_facts` facts are kept; the lowest-confidence ones are evicted first.
+
+**Custom template** — Override the injection format by creating `~/.nextme/prompts/memory.md` (Jinja2). Variables: `{{ count }}`, `{% for fact in facts %}{{ loop.index0 }}. {{ fact.text }}{% endfor %}`.
+
+Use `/remember <text>` to add a fact directly from Feishu without waiting for the agent to write a `<memory>` tag.
 
 ---
 
 ## Roadmap
 
 - **Phase 1 ✅** — Feishu WebSocket + agent subprocess + session isolation + streaming progress + permission confirmation
-- **Phase 2 ✅** — Skills system, multi-project parallel, session persistence across restarts, long-term memory (`/remember`), context compression, path lock
+- **Phase 2 ✅** — Skills system, multi-project parallel, session persistence across restarts, long-term memory (`/remember` + agent-driven add/replace/delete), context compression, path lock
 - **Phase 3** — Config hot-reload, Slack / DingTalk adapter, multi-agent orchestration
 
 ---
