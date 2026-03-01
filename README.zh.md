@@ -205,6 +205,90 @@ nextme down
 
 ---
 
+## 安全性
+
+> **在共享或生产环境中运行 NextMe 前，请务必阅读本节。**
+
+### Claude CLI 权限标志
+
+NextMe 的 `DirectClaudeRuntime`（executor `"claude"`）通过以下标志启动本地 `claude` CLI：
+
+```json
+[
+  "--print",
+  "--output-format", "stream-json",
+  "--verbose",
+  "--dangerously-skip-permissions",
+  "--include-partial-messages"
+]
+```
+
+其中 **`--dangerously-skip-permissions`** 是关键标志。它告知 Claude Agent 自动批准每一个工具调用——包括 Bash 命令、文件写入、网络请求——**无需暂停请求确认**。这是机器人环境（无人在终端守候）的必要设计，但也意味着：
+
+- Agent 可以在已配置的项目目录中运行**任意 Shell 命令**。
+- Agent 可以在该目录（以及操作系统用户有权限访问的任意位置）**读写文件**。
+- 除操作系统用户自身权限之外，**没有任何沙箱隔离**。
+
+### Claude Code 权限设置（`~/.claude/settings.json`）
+
+除上述标志外，Claude Code CLI 本身还会读取 `~/.claude/settings.json` 来应用**全局权限策略**。此处的规则由 Claude CLI 强制执行，无论 NextMe 发出何种请求，是重要的第二道防线。
+
+推荐的基础配置（`~/.claude/settings.json`）：
+
+```json
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(rm -fr *)",
+      "Bash(rm *)",
+      "Bash(sudo *)",
+      "Bash(doas *)",
+      "Bash(* --force-with-leases*)",
+      "Bash(* --hard *)",
+      "Bash(chown -R *)",
+      "Bash(find * -delete)",
+      "Bash(find * -exec rm {})"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "Bash(npm publish *)",
+      "Bash(pypi upload *)"
+    ]
+  }
+}
+```
+
+| 设置 | 效果 |
+|------|------|
+| `defaultMode: "bypassPermissions"` | 所有未列出的工具均自动批准——无人值守的机器人环境必须如此，但这意味着需要显式配置 deny 规则 |
+| `deny` 规则 | 即使指定了 `--dangerously-skip-permissions`，这些模式也会被**硬性拦截**——Agent 永远无法执行匹配的命令 |
+| `ask` 规则 | 这些模式会触发确认提示；在机器人环境中，这实际上等同于拦截（无人在终端确认） |
+
+> **安全警告：** 在没有 `deny` 规则的情况下使用 `defaultMode: "bypassPermissions"`，意味着 Agent 可以执行任意 Shell 命令。在共享环境中部署 NextMe 前，务必在 `~/.claude/settings.json` 中配置覆盖破坏性操作的 `deny` 规则。
+
+### 推荐加固措施
+
+| 措施 | 方法 |
+|------|------|
+| **限制可发送消息的用户** | 将您的 `open_id` 加入 `admin_users`，并启用 ACL 功能 |
+| **以专用操作系统用户运行** | 为 NextMe 创建低权限用户；该用户只继承自身的文件权限 |
+| **限制项目路径** | 在 `settings.json` 中将 `path` 设置为较小的目录，而非 `/` 或 `~` |
+| **对敏感目录挂载只读卷** | 以只读方式挂载 NextMe 进程无需写入的敏感目录 |
+| **定期审查 Agent 记忆** | 定期检查 `~/.nextme/memory/`，了解 Agent 已记录的内容 |
+
+### 环境变量处理
+
+NextMe 会从子进程 `claude` 的环境中剥离以下变量，以防止嵌套会话冲突和凭证泄露：
+
+- `CLAUDECODE`、`CLAUDE_CODE_*` — 防止"嵌套会话"错误
+- `ANTHROPIC_AUTH_TOKEN` **不会**以 `ANTHROPIC_API_KEY` 的形式传递；内部 `claude` 使用其自身的 `~/.claude.json` 凭证
+
+子进程将完整继承您的环境变量，包括用于自定义代理端点的 `ANTHROPIC_BASE_URL`。
+
+---
+
 ## 使用说明
 
 ### 对话任务

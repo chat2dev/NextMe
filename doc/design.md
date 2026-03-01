@@ -68,6 +68,10 @@ nextme/
     ├── context/
     │   ├── manager.py           # ContextManager: thread file I/O
     │   └── compression.py       # zlib/lzma/brotli compression strategies
+    ├── acl/
+    │   ├── schema.py            # Role enum (Admin / Owner / Collaborator), AclEntry model
+    │   ├── db.py                # AclDb: SQLite CRUD (sqlite3 async wrapper)
+    │   └── manager.py           # AclManager: role lookup, user management, apply/review workflow
     ├── skills/
     │   ├── registry.py          # SkillRegistry: scan + load markdown
     │   ├── loader.py            # YAML frontmatter parsing
@@ -194,6 +198,8 @@ claude --print --output-format stream-json --verbose \
 **Session resumption**: The `result` event carries `session_id`, stored in `_actual_id`; the next call appends `--resume <session_id>`.
 
 **Environment isolation** (critical): The subprocess env must filter out `CLAUDECODE` and `CLAUDE_CODE_*` prefix variables to avoid "nested session" errors (when NextMe itself is launched inside a Claude Code terminal).
+
+**Claude Code permission policy** (`~/.claude/settings.json`): The Claude CLI reads this file at startup and applies a global permission policy on top of `--dangerously-skip-permissions`. The `deny` list hard-blocks matching commands regardless of the flag. Recommended: deny destructive shell patterns (`rm`, `sudo`, `--force`, etc.) and set `ask` for publishing operations (`git push`, etc.).
 
 ### ACPRuntime (alternative, `acp/runtime.py`)
 
@@ -510,6 +516,77 @@ tools_denylist: []
 | `/explain` | Explain code |
 | `/test` | Generate unit tests |
 | `/debug` | Systematic debugging |
+
+---
+
+## Access Control (ACL)
+
+### Role Model
+
+| Role | Source | Capabilities |
+|------|--------|-------------|
+| **Admin** | `admin_users` in `~/.nextme/settings.json` | Full access; approve Owner applications; reload via SIGHUP |
+| **Owner** | SQLite (`~/.nextme/nextme.db`) | Run tasks, switch projects, approve Collaborator applications |
+| **Collaborator** | SQLite (`~/.nextme/nextme.db`) | Run tasks, status commands; cannot switch projects |
+
+When no ACL manager is configured (`admin_users` empty), all users are allowed (open mode).
+
+### Module Layout (`acl/`)
+
+| File | Responsibility |
+|------|---------------|
+| `schema.py` | `Role` enum, `AclEntry` dataclass |
+| `db.py` | `AclDb`: SQLite CRUD; table `acl_entries (open_id, role, created_at)` + `acl_applications (id, open_id, requested_role, status, ...)` |
+| `manager.py` | `AclManager`: `get_role()`, `add_user()`, `remove_user()`, `submit_application()`, `approve/reject_application()`, `get_admin_ids()`, `reload_admin_users()` |
+
+### ACL Gate (dispatcher.py)
+
+```
+dispatch(task)
+  → extract user_id from session_id
+  → acl_manager.get_role(user_id) → None | Role
+  → if None and command not in whitelist (/whoami, /help):
+       send access-denied card with apply button
+       return
+  → proceed to command routing / task execution
+```
+
+ACL bypass commands (always allowed, even for unauthorized users): `/whoami`, `/help`.
+
+### Apply / Review Workflow
+
+```
+Unauthorized user clicks "Apply" on access-denied card
+  → _handle_acl_apply_action(action_data)
+      - validate open_id, role
+      - check if already authorized
+      - check for duplicate pending application
+      - acl_manager.submit_application()
+      - notify admins (Owner application) or owners+admins (Collaborator application) via DM
+
+Admin/Owner clicks "Approve" or "Reject" on notification card
+  → _handle_acl_review_action(action_data)
+      - validate reviewer role
+      - fetch application; verify status=pending
+      - acl_manager.approve/reject_application()
+      - notify applicant of result via DM
+```
+
+### ACL Commands
+
+| Command | Minimum Role |
+|---------|-------------|
+| `/whoami` | Everyone (ACL bypass) |
+| `/acl list` | Collaborator |
+| `/acl add <open_id> [owner\|collaborator]` | Owner (collab only) / Admin |
+| `/acl remove <open_id>` | Owner (collab only) / Admin |
+| `/acl pending` | Owner / Admin |
+| `/acl approve <id>` | Owner / Admin |
+| `/acl reject <id>` | Owner / Admin |
+
+### Admin Reload (SIGHUP)
+
+`main.py` registers a `SIGHUP` handler that reloads `~/.nextme/settings.json` and propagates the new `admin_users` list to `AclManager.reload_admin_users()`. No restart required to add/remove admins.
 
 ---
 

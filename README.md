@@ -257,6 +257,45 @@ NextMe strips the following variables from the child `claude` process to prevent
 
 The child process inherits your full environment otherwise, including `ANTHROPIC_BASE_URL` for custom proxy endpoints.
 
+### Claude Code permission settings (`~/.claude/settings.json`)
+
+Beyond the `--dangerously-skip-permissions` flag above, the Claude Code CLI itself reads `~/.claude/settings.json` to apply a **global permission policy**. Rules here are enforced by the CLI regardless of what NextMe requests, making this a critical second line of defense.
+
+Recommended baseline (`~/.claude/settings.json`):
+
+```json
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(rm -fr *)",
+      "Bash(rm *)",
+      "Bash(sudo *)",
+      "Bash(doas *)",
+      "Bash(* --force-with-leases*)",
+      "Bash(* --hard *)",
+      "Bash(chown -R *)",
+      "Bash(find * -delete)",
+      "Bash(find * -exec rm {})"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "Bash(npm publish *)",
+      "Bash(pypi upload *)"
+    ]
+  }
+}
+```
+
+| Setting | Effect |
+|---------|--------|
+| `defaultMode: "bypassPermissions"` | All unlisted tools are auto-approved — required for unattended bot use, but means you must explicitly list what to deny |
+| `deny` rules | These patterns are **hard-blocked** even with `--dangerously-skip-permissions` — the agent can never execute matching commands |
+| `ask` rules | These patterns surface a confirmation prompt; in a bot environment this effectively blocks them (no one watches the terminal) |
+
+> **Security warning:** `defaultMode: "bypassPermissions"` with no `deny` rules means the agent can run arbitrary shell commands. Always populate the `deny` list with destructive-operation patterns before deploying NextMe in a shared environment.
+
 ---
 
 ## Usage
@@ -567,16 +606,16 @@ NextMe assigns an independent asyncio worker to each `(user, project)` pair, so 
 **Long-term memory** — Facts are stored at the **user level** (`~/.nextme/memory/{user_hash}/facts.json`) and shared across all chats for the same user. On new sessions (not resumed), the top-10 highest-confidence facts are injected into the task prompt via a Jinja2 template:
 
 ```
-[用户记忆] (共 2 条，可在回复末尾用 <memory> 标签更新)
+[User Memory] (2 facts; append <memory> tags to update)
 0. Prefer Python over JavaScript
 1. Use pytest for tests
 
-记忆操作（仅在有必要时使用）：
-- 新增: <memory>内容</memory>
-- 更新: <memory op="replace" idx="0">新内容</memory>
-- 删除: <memory op="forget" idx="1"></memory>
+Memory operations (use only when necessary):
+- Add:    <memory>content</memory>
+- Update: <memory op="replace" idx="0">new content</memory>
+- Delete: <memory op="forget" idx="1"></memory>
 
-[用户消息]
+[User Message]
 <your message here>
 ```
 
