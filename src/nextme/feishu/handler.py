@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 class _Dispatcher(Protocol):
     async def dispatch(self, task: Task) -> None: ...
     def handle_card_action(self, session_id: str, index: int, project_name: str = "") -> None: ...
+    async def handle_acl_card_action(self, action_data: dict) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +99,33 @@ class MessageHandler:
                 return resp
 
             value: dict = event.action.value or {}
+
+            if value.get("action") in ("acl_apply", "acl_review"):
+                action_data = dict(value)
+                # Inject operator open_id from card event
+                operator_id = ""
+                try:
+                    if data.event and hasattr(data.event, "operator"):
+                        operator_id = getattr(data.event.operator, "open_id", "") or ""
+                except Exception:
+                    pass
+                action_data["operator_id"] = operator_id
+
+                loop = self._loop
+                if loop is not None and loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self._dispatcher.handle_acl_card_action(action_data), loop
+                    )
+                else:
+                    logger.warning(
+                        "_on_card_action: no running loop for acl action %r",
+                        value.get("action"),
+                    )
+                resp.toast = CallBackToast()
+                resp.toast.type = "info"
+                resp.toast.content = "已收到"
+                return resp
+
             if value.get("action") != "permission_choice":
                 return resp
 

@@ -19,7 +19,11 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from ..acl.manager import AclManager
+    from ..acl.schema import Role
 
 from ..acp.janitor import ACPRuntimeRegistry
 from ..config.schema import AppConfig, Settings
@@ -79,6 +83,7 @@ class TaskDispatcher:
         state_store: Optional[StateStore] = None,
         skill_registry: Optional[SkillRegistry] = None,
         memory_manager: Optional[MemoryManager] = None,
+        acl_manager: Optional["AclManager"] = None,
     ) -> None:
         self._config = config
         self._settings = settings
@@ -89,6 +94,7 @@ class TaskDispatcher:
         self._state_store = state_store
         self._skill_registry: SkillRegistry = skill_registry or SkillRegistry()
         self._memory_manager = memory_manager
+        self._acl_manager = acl_manager
 
         # worker_key (context_id:project_name) -> asyncio.Task (running worker)
         self._worker_tasks: dict[str, asyncio.Task] = {}
@@ -152,6 +158,45 @@ class TaskDispatcher:
 
         task.reply_fn = reply_fn
 
+        text = task.content.strip()
+
+        # ------------------------------------------------------------------
+        # ACL gate: /whoami and /help are always allowed without authorization.
+        # For open commands we skip ACL check entirely and go straight to the
+        # meta-command handler (which does not require a session).
+        # For all other content: deny if user is not authorized.
+        # ------------------------------------------------------------------
+        if self._acl_manager is not None:
+            _open_cmds = ("/whoami", "/help")
+            is_open_cmd = any(text.lower().startswith(c) for c in _open_cmds)
+            if is_open_cmd:
+                # Bypass ACL — route directly to meta-command handler.
+                user_ctx = self._session_registry.get_or_create(context_id)
+                await self._handle_meta_command(task, user_ctx)
+                return
+            # Not an open command — check authorization.
+            user_id = self._get_user_id(context_id)
+            role = await self._acl_manager.get_role(user_id)
+            if role is None:
+                logger.info(
+                    "TaskDispatcher: unauthorized user %r denied (task %s)",
+                    user_id,
+                    task.id,
+                )
+                try:
+                    denied_card = replier.build_access_denied_card(user_id)
+                    if task.message_id:
+                        await replier.reply_card(
+                            task.message_id, denied_card, in_thread=in_thread
+                        )
+                    else:
+                        await replier.send_card(chat_id, denied_card)
+                except Exception:
+                    logger.exception(
+                        "TaskDispatcher: failed to send denied card to %r", chat_id
+                    )
+                return
+
         # ------------------------------------------------------------------
         # Resolve user context and ensure an active session.
         #
@@ -197,8 +242,6 @@ class TaskDispatcher:
             session = user_ctx.get_active_session()
 
         assert session is not None  # guaranteed by the blocks above
-
-        text = task.content.strip()
 
         # ------------------------------------------------------------------
         # 1. Meta-commands
@@ -343,6 +386,14 @@ class TaskDispatcher:
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         session = user_ctx.get_active_session()
+
+        # Resolve caller role for permission-gated commands.
+        from ..acl.schema import Role as _Role
+        caller_role: Optional[_Role] = None
+        if self._acl_manager is not None:
+            caller_role = await self._acl_manager.get_role(
+                self._get_user_id(context_id)
+            )
 
         if command == "/help":
             await handle_help(replier, chat_id)
@@ -523,6 +574,29 @@ class TaskDispatcher:
             user_id = self._get_user_id(context_id)
             await handle_remember(user_id, arg, self._memory_manager, replier, chat_id)
 
+        elif command == "/whoami":
+            if self._acl_manager is not None:
+                from .commands import handle_whoami
+                await handle_whoami(
+                    self._get_user_id(context_id),
+                    self._acl_manager,
+                    replier,
+                    chat_id,
+                )
+            else:
+                uid = self._get_user_id(context_id)
+                await replier.send_text(chat_id, f"open_id: `{uid}`\n角色: (未启用 ACL)")
+
+        elif command == "/acl":
+            if self._acl_manager is None:
+                await replier.send_text(chat_id, "ACL 功能未启用。")
+            elif caller_role not in (_Role.ADMIN, _Role.OWNER, _Role.COLLABORATOR):
+                await replier.send_text(chat_id, "权限不足。")
+            else:
+                await self._handle_acl_command(
+                    arg, caller_role, self._get_user_id(context_id), replier, chat_id
+                )
+
         else:
             logger.debug(
                 "TaskDispatcher: unknown command %r from context_id=%r",
@@ -531,8 +605,285 @@ class TaskDispatcher:
             )
             await handle_help(replier, chat_id)
 
+    async def _handle_acl_command(
+        self,
+        arg: str,
+        caller_role: "Role",
+        caller_id: str,
+        replier: Replier,
+        chat_id: str,
+    ) -> None:
+        """Dispatch /acl sub-commands."""
+        from .commands import (
+            handle_acl_add,
+            handle_acl_approve,
+            handle_acl_list,
+            handle_acl_pending,
+            handle_acl_reject,
+            handle_acl_remove,
+        )
+        from ..acl.schema import Role as _Role
+
+        parts = arg.split(maxsplit=2) if arg else []
+        sub = parts[0].lower() if parts else ""
+
+        if not sub or sub == "list":
+            await handle_acl_list(self._acl_manager, replier, chat_id)
+
+        elif sub == "add":
+            if len(parts) < 2:
+                await replier.send_text(
+                    chat_id, "用法: `/acl add <open_id> [owner|collaborator]`"
+                )
+                return
+            target_id = parts[1]
+            target_role_str = parts[2] if len(parts) > 2 else "collaborator"
+            await handle_acl_add(
+                actor_id=caller_id,
+                actor_role=caller_role,
+                target_id=target_id,
+                target_role_str=target_role_str,
+                acl_manager=self._acl_manager,
+                replier=replier,
+                chat_id=chat_id,
+            )
+
+        elif sub == "remove":
+            if len(parts) < 2:
+                await replier.send_text(chat_id, "用法: `/acl remove <open_id>`")
+                return
+            await handle_acl_remove(
+                actor_id=caller_id,
+                actor_role=caller_role,
+                target_id=parts[1],
+                acl_manager=self._acl_manager,
+                replier=replier,
+                chat_id=chat_id,
+            )
+
+        elif sub == "pending":
+            if caller_role not in (_Role.ADMIN, _Role.OWNER):
+                await replier.send_text(chat_id, "权限不足：需要 Owner 或 Admin 权限。")
+                return
+            await handle_acl_pending(
+                viewer_role=caller_role,
+                acl_manager=self._acl_manager,
+                replier=replier,
+                chat_id=chat_id,
+            )
+
+        elif sub in ("approve", "reject"):
+            if caller_role not in (_Role.ADMIN, _Role.OWNER):
+                await replier.send_text(chat_id, "权限不足：需要 Owner 或 Admin 权限。")
+                return
+            if len(parts) < 2:
+                await replier.send_text(
+                    chat_id, f"用法: `/acl {sub} <申请ID>`"
+                )
+                return
+            try:
+                app_id = int(parts[1])
+            except ValueError:
+                await replier.send_text(chat_id, "申请ID 必须是数字。")
+                return
+            if sub == "approve":
+                await handle_acl_approve(
+                    app_id=app_id,
+                    reviewer_id=caller_id,
+                    reviewer_role=caller_role,
+                    acl_manager=self._acl_manager,
+                    replier=replier,
+                    chat_id=chat_id,
+                )
+            else:
+                await handle_acl_reject(
+                    app_id=app_id,
+                    reviewer_id=caller_id,
+                    reviewer_role=caller_role,
+                    acl_manager=self._acl_manager,
+                    replier=replier,
+                    chat_id=chat_id,
+                )
+        else:
+            await replier.send_text(
+                chat_id,
+                "未知子命令。可用: `list` `add` `remove` `pending` `approve` `reject`",
+            )
+
     # ------------------------------------------------------------------
-    # Public: card action handling
+    # Public: ACL card action handling
+    # ------------------------------------------------------------------
+
+    async def handle_acl_card_action(self, action_data: dict) -> None:
+        """Dispatch an ACL-related card button action.
+
+        Called from the Feishu card action handler when action is
+        ``acl_apply`` or ``acl_review``.
+
+        Args:
+            action_data: Parsed action value dict from the card event,
+                with an ``operator_id`` key injected by the handler.
+        """
+        if self._acl_manager is None:
+            logger.warning("handle_acl_card_action: no ACL manager configured")
+            return
+
+        action = action_data.get("action")
+        replier = self._feishu_client.get_replier()
+
+        if action == "acl_apply":
+            await self._handle_acl_apply_action(action_data, replier)
+        elif action == "acl_review":
+            await self._handle_acl_review_action(action_data, replier)
+        else:
+            logger.warning("handle_acl_card_action: unknown action %r", action)
+
+    async def _handle_acl_apply_action(self, data: dict, replier: Replier) -> None:
+        """Process an acl_apply card button click."""
+        from ..acl.schema import Role as _Role
+
+        open_id: str = data.get("open_id", "")
+        role_str: str = data.get("role", "collaborator")
+
+        if not open_id:
+            logger.warning("_handle_acl_apply_action: missing open_id")
+            return
+
+        try:
+            requested_role = _Role(role_str)
+        except ValueError:
+            logger.warning("_handle_acl_apply_action: invalid role %r", role_str)
+            return
+
+        if requested_role == _Role.ADMIN:
+            logger.warning("_handle_acl_apply_action: attempt to apply as admin denied")
+            return
+
+        # Check if already authorized
+        existing_role = await self._acl_manager.get_role(open_id)
+        if existing_role is not None:
+            logger.info(
+                "_handle_acl_apply_action: %r already has role %s, skipping",
+                open_id, existing_role.value,
+            )
+            return
+
+        app_id, existing_app = await self._acl_manager.create_application(
+            open_id, "", requested_role
+        )
+
+        if existing_app is not None:
+            logger.info(
+                "_handle_acl_apply_action: duplicate pending app #%d for %r",
+                existing_app.id, open_id,
+            )
+            return
+
+        logger.info(
+            "_handle_acl_apply_action: created application #%d for %r role=%s",
+            app_id, open_id, requested_role.value,
+        )
+
+        # Notify reviewers
+        reviewer_ids = await self._acl_manager.get_reviewers_for_role(requested_role)
+        notification_card = replier.build_acl_review_notification_card(
+            app_id=app_id,
+            applicant_name="",
+            applicant_id=open_id,
+            requested_role=requested_role.value,
+        )
+        for reviewer_id in reviewer_ids:
+            try:
+                await replier.send_to_user(reviewer_id, notification_card, "interactive")
+            except Exception:
+                logger.exception(
+                    "_handle_acl_apply_action: failed to notify reviewer %r", reviewer_id
+                )
+
+    async def _handle_acl_review_action(self, data: dict, replier: Replier) -> None:
+        """Process an acl_review card button click (approve/reject)."""
+        app_id_str: str = data.get("app_id", "")
+        decision: str = data.get("decision", "")
+        operator_id: str = data.get("operator_id", "")
+
+        if not app_id_str or not decision or not operator_id:
+            logger.warning(
+                "_handle_acl_review_action: missing fields app_id=%r decision=%r operator=%r",
+                app_id_str, decision, operator_id,
+            )
+            return
+
+        try:
+            app_id = int(app_id_str)
+        except ValueError:
+            logger.warning("_handle_acl_review_action: invalid app_id %r", app_id_str)
+            return
+
+        # Verify reviewer still has permission
+        reviewer_role = await self._acl_manager.get_role(operator_id)
+        if reviewer_role is None:
+            logger.warning(
+                "_handle_acl_review_action: reviewer %r no longer authorized", operator_id
+            )
+            return
+
+        app = await self._acl_manager.get_application(app_id)
+        if app is None or app.status != "pending":
+            logger.info(
+                "_handle_acl_review_action: app #%d not pending (status=%s)",
+                app_id, app.status if app else "not found",
+            )
+            return
+
+        if not self._acl_manager.can_review(reviewer_role, app.requested_role):
+            logger.warning(
+                "_handle_acl_review_action: reviewer %r (role=%s) cannot review %s app",
+                operator_id, reviewer_role.value, app.requested_role.value,
+            )
+            return
+
+        if decision == "approved":
+            result = await self._acl_manager.approve(app_id, operator_id)
+            if result:
+                logger.info(
+                    "_handle_acl_review_action: approved app #%d for %r",
+                    app_id, app.applicant_id,
+                )
+                try:
+                    role_label = "Owner" if result.requested_role.value == "owner" else "Collaborator"
+                    await replier.send_to_user(
+                        app.applicant_id,
+                        '{"text":"✅ 您的权限申请已批准，您现在是 ' + role_label + '。"}',
+                        "text",
+                    )
+                except Exception:
+                    logger.exception(
+                        "_handle_acl_review_action: failed to notify applicant %r",
+                        app.applicant_id,
+                    )
+        elif decision == "rejected":
+            result = await self._acl_manager.reject(app_id, operator_id)
+            if result:
+                logger.info(
+                    "_handle_acl_review_action: rejected app #%d for %r",
+                    app_id, app.applicant_id,
+                )
+                try:
+                    await replier.send_to_user(
+                        app.applicant_id,
+                        '{"text":"❌ 您的权限申请已被拒绝。如有疑问请联系管理员。"}',
+                        "text",
+                    )
+                except Exception:
+                    logger.exception(
+                        "_handle_acl_review_action: failed to notify applicant %r",
+                        app.applicant_id,
+                    )
+        else:
+            logger.warning("_handle_acl_review_action: unknown decision %r", decision)
+
+    # ------------------------------------------------------------------
+    # Public: permission card action handling
     # ------------------------------------------------------------------
 
     def handle_card_action(
