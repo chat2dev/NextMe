@@ -76,6 +76,9 @@ class Settings(BaseModel):
     """Enable cardkit streaming mode for real-time typewriter updates.
     When True (default) the bot uses CardKit PUT /cards/:card_id for live
     full-card updates; when False it falls back to debounced PATCH updates."""
+    admin_users: list[str] = Field(default_factory=list)
+    """Feishu open_ids of super-admins. Static — requires bot restart to take effect.
+    These users bypass all ACL checks and can approve owner applications."""
 
 
 class ProjectState(BaseModel):
