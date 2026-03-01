@@ -111,3 +111,54 @@ async def test_no_acl_manager_allows_all(dispatcher):
     with patch.object(d, '_handle_meta_command', new=AsyncMock()):
         await d.dispatch(task)
     replier.build_access_denied_card.assert_not_called()
+
+
+async def test_unauthorized_group_chat_sends_prompt_and_dm(dispatcher):
+    """Group chat: unauthorized user gets a text prompt in thread + apply card via DM."""
+    d, replier, acl_manager = dispatcher
+    replier.reply_text = AsyncMock()
+    replier.send_to_user = AsyncMock()
+    acl_manager.get_role.return_value = None
+
+    task = Task(
+        id=str(uuid.uuid4()),
+        content="hello",
+        session_id="oc_group:ou_stranger",
+        reply_fn=AsyncMock(),
+        message_id="msg_grp",
+        chat_type="group",
+    )
+    await d.dispatch(task)
+
+    # Thread gets a plain text prompt (no apply button)
+    replier.reply_text.assert_called_once()
+    args = replier.reply_text.call_args
+    assert args.kwargs.get("in_thread") is True
+    assert "私信" in args.args[1]
+
+    # Apply card sent as DM to the user
+    replier.send_to_user.assert_called_once()
+    assert replier.send_to_user.call_args.args[0] == "ou_stranger"
+
+    # No card posted to the group thread
+    replier.reply_card.assert_not_called()
+
+
+async def test_apply_by_different_operator_is_ignored(dispatcher):
+    """A group member clicking someone else's apply button is silently ignored."""
+    d, replier, acl_manager = dispatcher
+    # data contains open_id of the applicant but operator_id of a different user
+    action_data = {
+        "action": "acl_apply",
+        "open_id": "ou_applicant",
+        "operator_id": "ou_other_person",
+        "role": "collaborator",
+    }
+    replier.send_to_user = AsyncMock()
+    acl_manager.create_application = AsyncMock(return_value=(1, None))
+
+    await d.handle_acl_card_action(action_data)
+
+    # Application must NOT be created
+    acl_manager.create_application.assert_not_called()
+    replier.send_to_user.assert_not_called()

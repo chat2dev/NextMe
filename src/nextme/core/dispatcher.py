@@ -185,9 +185,19 @@ class TaskDispatcher:
                 )
                 try:
                     denied_card = replier.build_access_denied_card(user_id)
-                    if task.message_id:
+                    if in_thread:
+                        # Group chat: post a plain prompt in the thread so other
+                        # members are not presented with clickable apply buttons;
+                        # send the actual apply card as a DM to the requester only.
+                        await replier.reply_text(
+                            task.message_id,
+                            "🔒 你没有权限使用此机器人，已向你私信发送申请入口。",
+                            in_thread=True,
+                        )
+                        await replier.send_to_user(user_id, denied_card, "interactive")
+                    elif task.message_id:
                         await replier.reply_card(
-                            task.message_id, denied_card, in_thread=in_thread
+                            task.message_id, denied_card, in_thread=False
                         )
                     else:
                         await replier.send_card(chat_id, denied_card)
@@ -743,10 +753,20 @@ class TaskDispatcher:
         from ..acl.schema import Role as _Role
 
         open_id: str = data.get("open_id", "")
+        operator_id: str = data.get("operator_id", "")
         role_str: str = data.get("role", "collaborator")
 
         if not open_id:
             logger.warning("_handle_acl_apply_action: missing open_id")
+            return
+
+        # Reject clicks made by someone other than the card's intended recipient.
+        if operator_id and operator_id != open_id:
+            logger.warning(
+                "_handle_acl_apply_action: operator %r tried to apply on behalf of %r — ignored",
+                operator_id,
+                open_id,
+            )
             return
 
         try:
