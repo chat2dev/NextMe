@@ -77,7 +77,7 @@ class Settings(BaseModel):
     When True (default) the bot uses CardKit PUT /cards/:card_id for live
     full-card updates; when False it falls back to debounced PATCH updates."""
     admin_users: list[str] = Field(default_factory=list)
-    """Feishu open_ids of super-admins. Static — requires bot restart to take effect.
+    """Feishu open_ids of super-admins. Hot-reloadable via ./reload.sh (SIGHUP).
     These users bypass all ACL checks and can approve owner applications."""
 
 

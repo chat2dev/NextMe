@@ -27,6 +27,20 @@ _PID_FILE = _NEXTME_HOME / "nextme.pid"
 # Maximum seconds to wait for in-flight tasks to drain on shutdown.
 _SHUTDOWN_DRAIN_TIMEOUT = 30
 
+# Settings fields that can be reloaded at runtime via SIGHUP (./reload.sh).
+# Fields NOT listed here (app_id, app_secret, projects, bindings) require restart.
+_RELOADABLE_SETTINGS: frozenset[str] = frozenset(
+    {
+        "log_level",
+        "progress_debounce_seconds",
+        "memory_debounce_seconds",
+        "memory_max_facts",
+        "permission_auto_approve",
+        "streaming_enabled",
+        "admin_users",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -91,6 +105,73 @@ def _install_signal_handlers(
         except (NotImplementedError, RuntimeError):
             # Windows / non-main-thread fallback: use signal.signal instead.
             signal.signal(sig, lambda s, f: _signal_handler(s))
+
+
+# ---------------------------------------------------------------------------
+# Hot-reload helpers (SIGHUP)
+# ---------------------------------------------------------------------------
+
+
+def _update_log_level(log_level: str) -> None:
+    """Apply *log_level* to the root logger and all its handlers immediately."""
+    numeric_level = getattr(logging, log_level.upper(), logging.INFO)
+    root = logging.getLogger()
+    root.setLevel(numeric_level)
+    for handler in root.handlers:
+        handler.setLevel(numeric_level)
+
+
+async def _reload_settings_async(settings: object) -> None:
+    """Re-read settings.json and hot-update reloadable fields in *settings* in-place."""
+    from .config.loader import ConfigLoader
+
+    try:
+        fresh = ConfigLoader.load_settings()
+    except Exception:
+        logger.exception("SIGHUP: failed to reload settings; keeping current values")
+        return
+
+    changed: list[str] = []
+    for field in _RELOADABLE_SETTINGS:
+        old_val = getattr(settings, field, None)
+        new_val = getattr(fresh, field, None)
+        if old_val != new_val:
+            setattr(settings, field, new_val)
+            changed.append(f"{field}: {old_val!r} → {new_val!r}")
+
+    if changed:
+        logger.info("SIGHUP: settings reloaded — %s", "; ".join(changed))
+        if any(c.startswith("log_level:") for c in changed):
+            _update_log_level(getattr(settings, "log_level", "INFO"))
+    else:
+        logger.info("SIGHUP: settings reloaded — no changes detected")
+
+
+def _install_sighup_handler(
+    loop: asyncio.AbstractEventLoop,
+    settings: object,
+) -> None:
+    """Register a SIGHUP handler that hot-reloads settings.json in-place.
+
+    Reloadable fields: log_level, progress_debounce_seconds,
+    memory_debounce_seconds, memory_max_facts, permission_auto_approve,
+    streaming_enabled, admin_users.
+
+    Fields requiring restart: app_id, app_secret, projects, bindings.
+    """
+
+    def _on_sighup() -> None:
+        logger.info(
+            "Received SIGHUP — reloading hot settings from %s",
+            _NEXTME_HOME / "settings.json",
+        )
+        loop.create_task(_reload_settings_async(settings), name="sighup-reload")
+
+    try:
+        loop.add_signal_handler(signal.SIGHUP, _on_sighup)
+    except (NotImplementedError, AttributeError):
+        # SIGHUP is not available on Windows.
+        logger.debug("SIGHUP not supported on this platform; hot-reload via signal disabled")
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +376,7 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     # ------------------------------------------------------------------
     shutdown_event = asyncio.Event()
     _install_signal_handlers(loop, shutdown_event)
+    _install_sighup_handler(loop, settings)
 
     # ------------------------------------------------------------------
     # Step 11: Start the Feishu WebSocket — blocks until shutdown
