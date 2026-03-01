@@ -114,3 +114,13 @@ async def test_list_pending_applications_by_role(db):
     collab_pending = await db.list_pending_applications(Role.COLLABORATOR)
     assert len(collab_pending) == 1
     assert collab_pending[0].applicant_id == "ou_a"
+
+
+async def test_add_user_updates_existing(db):
+    await db.add_user("ou_bob", Role.COLLABORATOR, "Bob", "ou_admin")
+    await db.add_user("ou_bob", Role.OWNER, "Bob Updated", "ou_admin2")
+    user = await db.get_user("ou_bob")
+    assert user is not None
+    assert user.role == Role.OWNER
+    assert user.display_name == "Bob Updated"
+    assert user.added_by == "ou_admin2"

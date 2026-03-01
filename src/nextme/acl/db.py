@@ -5,7 +5,7 @@ import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Literal
 
 import aiosqlite
 
@@ -35,9 +35,14 @@ CREATE TABLE IF NOT EXISTS acl_applications (
                         CHECK(status IN ('pending', 'approved', 'rejected')),
     requested_at    TEXT NOT NULL DEFAULT (datetime('now')),
     processed_at    TEXT,
-    processed_by    TEXT,
-    UNIQUE(applicant_id, status)
+    processed_by    TEXT
 )
+"""
+
+_CREATE_PENDING_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS uq_one_pending_per_applicant
+    ON acl_applications(applicant_id)
+    WHERE status = 'pending'
 """
 
 
@@ -69,7 +74,7 @@ class AclDb:
 
     def __init__(self, db_path: Path = _DEFAULT_DB_PATH) -> None:
         self._db_path = db_path
-        self._conn: Optional[aiosqlite.Connection] = None
+        self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
 
     async def open(self) -> None:
@@ -80,6 +85,7 @@ class AclDb:
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute(_CREATE_ACL_USERS)
         await self._conn.execute(_CREATE_ACL_APPLICATIONS)
+        await self._conn.execute(_CREATE_PENDING_INDEX)
         await self._conn.commit()
         logger.debug("AclDb: opened %s", self._db_path)
 
@@ -93,8 +99,9 @@ class AclDb:
     # Users
     # ------------------------------------------------------------------
 
-    async def get_user(self, open_id: str) -> Optional[AclUser]:
-        assert self._conn is not None
+    async def get_user(self, open_id: str) -> AclUser | None:
+        if self._conn is None:
+            raise RuntimeError("AclDb.open() must be called before use")
         async with self._lock:
             async with self._conn.execute(
                 "SELECT * FROM acl_users WHERE open_id = ?", (open_id,)
@@ -105,7 +112,8 @@ class AclDb:
     async def add_user(
         self, open_id: str, role: Role, display_name: str, added_by: str
     ) -> None:
-        assert self._conn is not None
+        if self._conn is None:
+            raise RuntimeError("AclDb.open() must be called before use")
         async with self._lock:
             await self._conn.execute(
                 "INSERT OR REPLACE INTO acl_users (open_id, role, display_name, added_by) "
@@ -115,7 +123,8 @@ class AclDb:
             await self._conn.commit()
 
     async def remove_user(self, open_id: str) -> bool:
-        assert self._conn is not None
+        if self._conn is None:
+            raise RuntimeError("AclDb.open() must be called before use")
         async with self._lock:
             cur = await self._conn.execute(
                 "DELETE FROM acl_users WHERE open_id = ?", (open_id,)
@@ -123,8 +132,9 @@ class AclDb:
             await self._conn.commit()
         return cur.rowcount > 0
 
-    async def list_users(self, role: Optional[Role] = None) -> list[AclUser]:
-        assert self._conn is not None
+    async def list_users(self, role: Role | None = None) -> list[AclUser]:
+        if self._conn is None:
+            raise RuntimeError("AclDb.open() must be called before use")
         async with self._lock:
             if role is None:
                 async with self._conn.execute(
@@ -145,13 +155,14 @@ class AclDb:
 
     async def create_application(
         self, applicant_id: str, applicant_name: str, requested_role: Role
-    ) -> Optional[int]:
+    ) -> int | None:
         """Insert a new pending application.
 
         Returns the new row id, or ``None`` if a pending application already
         exists for this ``applicant_id`` (UNIQUE constraint on (applicant_id, status='pending')).
         """
-        assert self._conn is not None
+        if self._conn is None:
+            raise RuntimeError("AclDb.open() must be called before use")
         async with self._lock:
             # Check for existing pending application first
             async with self._conn.execute(
@@ -169,8 +180,9 @@ class AclDb:
             await self._conn.commit()
             return cur.lastrowid
 
-    async def get_application(self, app_id: int) -> Optional[AclApplication]:
-        assert self._conn is not None
+    async def get_application(self, app_id: int) -> AclApplication | None:
+        if self._conn is None:
+            raise RuntimeError("AclDb.open() must be called before use")
         async with self._lock:
             async with self._conn.execute(
                 "SELECT * FROM acl_applications WHERE id = ?", (app_id,)
@@ -178,8 +190,9 @@ class AclDb:
                 row = await cur.fetchone()
         return _row_to_application(row) if row else None
 
-    async def get_pending_application(self, applicant_id: str) -> Optional[AclApplication]:
-        assert self._conn is not None
+    async def get_pending_application(self, applicant_id: str) -> AclApplication | None:
+        if self._conn is None:
+            raise RuntimeError("AclDb.open() must be called before use")
         async with self._lock:
             async with self._conn.execute(
                 "SELECT * FROM acl_applications WHERE applicant_id = ? AND status = 'pending'",
@@ -189,9 +202,10 @@ class AclDb:
         return _row_to_application(row) if row else None
 
     async def list_pending_applications(
-        self, role: Optional[Role] = None
+        self, role: Role | None = None
     ) -> list[AclApplication]:
-        assert self._conn is not None
+        if self._conn is None:
+            raise RuntimeError("AclDb.open() must be called before use")
         async with self._lock:
             if role is None:
                 async with self._conn.execute(
@@ -208,14 +222,15 @@ class AclDb:
         return [_row_to_application(r) for r in rows]
 
     async def update_application_status(
-        self, app_id: int, status: str, processed_by: str
+        self, app_id: int, status: Literal["approved", "rejected"], processed_by: str
     ) -> bool:
         """Update status of a *pending* application.
 
         Returns ``True`` if a row was updated (i.e. the application was pending),
         ``False`` if the application was already processed or doesn't exist.
         """
-        assert self._conn is not None
+        if self._conn is None:
+            raise RuntimeError("AclDb.open() must be called before use")
         async with self._lock:
             cur = await self._conn.execute(
                 "UPDATE acl_applications SET status = ?, processed_by = ?, "
