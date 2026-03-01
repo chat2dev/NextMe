@@ -18,6 +18,8 @@ from .interfaces import AgentRuntime, Replier
 from .session import Session, UserContext
 
 if TYPE_CHECKING:
+    from ..acl.manager import AclManager
+    from ..acl.schema import Role
     from ..memory.manager import MemoryManager
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 HELP_COMMANDS: list[tuple[str, str]] = [
+    ("/whoami", "查看我的 open_id 和角色"),
     ("/new", "开启新对话（清除当前对话历史）"),
     ("/stop", "取消当前执行中的任务"),
     ("/help", "显示帮助"),
@@ -40,6 +43,12 @@ HELP_COMMANDS: list[tuple[str, str]] = [
     ("/project bind <name>", "将当前群聊绑定到指定项目"),
     ("/project unbind", "解除当前群聊的项目绑定"),
     ("/remember <text>", "记住一条信息（长期记忆）"),
+    ("/acl list", "查看访问控制列表"),
+    ("/acl add <open_id> [owner|collaborator]", "添加用户（owner/admin 可用）"),
+    ("/acl remove <open_id>", "移除用户（owner/admin 可用）"),
+    ("/acl pending", "查看待审批申请（owner/admin 可用）"),
+    ("/acl approve <id>", "批准申请（owner/admin 可用）"),
+    ("/acl reject <id>", "拒绝申请（owner/admin 可用）"),
 ]
 
 
@@ -414,3 +423,184 @@ async def handle_project(
         logger.exception(
             "handle_project: failed to send confirmation to chat %r", chat_id
         )
+
+
+async def handle_whoami(
+    user_id: str,
+    acl_manager: AclManager,
+    replier: Replier,
+    chat_id: str,
+) -> None:
+    """Show the caller's own open_id, role, and join info."""
+    from ..acl.schema import Role as _Role
+
+    role = await acl_manager.get_role(user_id)
+    user = None
+    if role not in (None, _Role.ADMIN):
+        user = await acl_manager.get_user(user_id)
+
+    card = replier.build_whoami_card(user_id, role, user)
+    try:
+        await replier.send_card(chat_id, card)
+    except Exception:
+        logger.exception("handle_whoami: failed to send card to %r", chat_id)
+
+
+async def handle_acl_list(
+    acl_manager: AclManager,
+    replier: Replier,
+    chat_id: str,
+) -> None:
+    """Send the ACL list card (admins, owners, collaborators)."""
+    from ..acl.schema import Role as _Role
+
+    admin_ids = acl_manager.get_admin_ids()
+    owners = await acl_manager.list_users(_Role.OWNER)
+    collaborators = await acl_manager.list_users(_Role.COLLABORATOR)
+    card = replier.build_acl_list_card(admin_ids, owners, collaborators)
+    try:
+        await replier.send_card(chat_id, card)
+    except Exception:
+        logger.exception("handle_acl_list: failed to send card to %r", chat_id)
+
+
+async def handle_acl_add(
+    actor_id: str,
+    actor_role: Role,
+    target_id: str,
+    target_role_str: str,
+    acl_manager: AclManager,
+    replier: Replier,
+    chat_id: str,
+) -> None:
+    """Add a user to the ACL. Enforces role-based permission."""
+    from ..acl.schema import Role as _Role
+
+    try:
+        target_role = _Role(target_role_str.lower()) if target_role_str else _Role.COLLABORATOR
+    except ValueError:
+        await replier.send_text(
+            chat_id, f"未知角色 `{target_role_str}`，可选值: owner / collaborator"
+        )
+        return
+
+    if target_role == _Role.ADMIN:
+        await replier.send_text(chat_id, "无法通过命令添加 Admin，请修改 settings.json。")
+        return
+
+    if not acl_manager.can_add(actor_role, target_role):
+        await replier.send_text(chat_id, "权限不足：您无法添加该角色。")
+        return
+
+    role_label = "Owner（负责人）" if target_role == _Role.OWNER else "Collaborator（协作者）"
+    try:
+        await acl_manager.add_user(target_id, target_role, added_by=actor_id)
+        await replier.send_text(
+            chat_id, f"已将 `{target_id}` 添加为 {role_label}。"
+        )
+    except Exception:
+        logger.exception("handle_acl_add: failed to add user %r", target_id)
+        await replier.send_text(chat_id, "添加失败，请检查日志。")
+
+
+async def handle_acl_remove(
+    actor_id: str,
+    actor_role: Role,
+    target_id: str,
+    acl_manager: AclManager,
+    replier: Replier,
+    chat_id: str,
+) -> None:
+    """Remove a user from the ACL. Enforces role-based permission."""
+    target = await acl_manager.get_user(target_id)
+    if target is None:
+        await replier.send_text(chat_id, f"未找到用户 `{target_id}`。")
+        return
+
+    if not acl_manager.can_remove(actor_role, target):
+        if target_id in acl_manager.get_admin_ids():
+            await replier.send_text(
+                chat_id, "无法移除管理员，请修改 settings.json 中的 admin_users。"
+            )
+        else:
+            await replier.send_text(chat_id, "权限不足：您无法移除该用户。")
+        return
+
+    try:
+        await acl_manager.remove_user(target_id)
+        await replier.send_text(chat_id, f"已移除用户 `{target_id}`。")
+    except ValueError as e:
+        await replier.send_text(chat_id, str(e))
+    except Exception:
+        logger.exception("handle_acl_remove: failed to remove user %r", target_id)
+        await replier.send_text(chat_id, "移除失败，请检查日志。")
+
+
+async def handle_acl_pending(
+    viewer_role: Role,
+    acl_manager: AclManager,
+    replier: Replier,
+    chat_id: str,
+) -> None:
+    """Show pending applications the viewer is allowed to review."""
+    applications = await acl_manager.list_pending(viewer_role)
+    card = replier.build_acl_pending_card(applications, viewer_role)
+    try:
+        await replier.send_card(chat_id, card)
+    except Exception:
+        logger.exception("handle_acl_pending: failed to send card to %r", chat_id)
+
+
+async def handle_acl_approve(
+    app_id: int,
+    reviewer_id: str,
+    reviewer_role: Role,
+    acl_manager: AclManager,
+    replier: Replier,
+    chat_id: str,
+) -> None:
+    """Approve a pending application."""
+    app = await acl_manager._db.get_application(app_id)
+    if app is None:
+        await replier.send_text(chat_id, f"未找到申请 #{app_id}。")
+        return
+    if not acl_manager.can_review(reviewer_role, app.requested_role):
+        await replier.send_text(chat_id, "权限不足：您无法审批该申请。")
+        return
+
+    result = await acl_manager.approve(app_id, reviewer_id)
+    if result is None:
+        await replier.send_text(chat_id, f"申请 #{app_id} 已处理或不存在。")
+        return
+    role_label = "Owner" if result.requested_role.value == "owner" else "Collaborator"
+    await replier.send_text(
+        chat_id,
+        f"已批准申请 #{app_id}，{result.applicant_name or result.applicant_id} 现在是 {role_label}。",
+    )
+
+
+async def handle_acl_reject(
+    app_id: int,
+    reviewer_id: str,
+    reviewer_role: Role,
+    acl_manager: AclManager,
+    replier: Replier,
+    chat_id: str,
+) -> None:
+    """Reject a pending application."""
+    app = await acl_manager._db.get_application(app_id)
+    if app is None:
+        await replier.send_text(chat_id, f"未找到申请 #{app_id}。")
+        return
+    if not acl_manager.can_review(reviewer_role, app.requested_role):
+        await replier.send_text(chat_id, "权限不足：您无法审批该申请。")
+        return
+
+    result = await acl_manager.reject(app_id, reviewer_id)
+    if result is None:
+        await replier.send_text(chat_id, f"申请 #{app_id} 已处理或不存在。")
+        return
+    await replier.send_text(
+        chat_id,
+        f"已拒绝申请 #{app_id}（{result.applicant_name or result.applicant_id}）。",
+    )

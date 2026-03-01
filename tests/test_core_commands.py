@@ -57,7 +57,7 @@ def replier():
 
 def test_help_commands_is_list_of_tuples():
     assert isinstance(HELP_COMMANDS, list)
-    assert len(HELP_COMMANDS) == 12
+    assert len(HELP_COMMANDS) == 19
 
 
 def test_help_commands_each_item_has_two_strings():
