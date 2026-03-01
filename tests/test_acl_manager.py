@@ -134,3 +134,64 @@ async def test_get_reviewers_for_collaborator_role(manager, db):
     reviewers = await manager.get_reviewers_for_role(Role.COLLABORATOR)
     assert "ou_admin" in reviewers
     assert "ou_owner1" in reviewers
+
+
+def test_can_add_admin_can_add_owner_and_collab():
+    mgr = AclManager(db=None, admin_users=[])  # type: ignore
+    assert mgr.can_add(Role.ADMIN, Role.OWNER) is True
+    assert mgr.can_add(Role.ADMIN, Role.COLLABORATOR) is True
+
+
+def test_can_add_owner_can_add_collab_only():
+    mgr = AclManager(db=None, admin_users=[])  # type: ignore
+    assert mgr.can_add(Role.OWNER, Role.COLLABORATOR) is True
+    assert mgr.can_add(Role.OWNER, Role.OWNER) is False
+
+
+def test_can_add_collaborator_cannot_add():
+    mgr = AclManager(db=None, admin_users=[])  # type: ignore
+    assert mgr.can_add(Role.COLLABORATOR, Role.COLLABORATOR) is False
+
+
+async def test_can_remove_admin_cannot_remove_admin_users(manager):
+    mgr = AclManager(db=manager._db, admin_users=["ou_admin"])
+    from nextme.acl.schema import AclUser
+    from datetime import datetime
+    admin_user = AclUser(open_id="ou_admin", role=Role.ADMIN, added_by="sys", added_at=datetime.now())
+    assert mgr.can_remove(Role.ADMIN, admin_user) is False
+
+
+async def test_can_remove_admin_can_remove_owner(manager, db):
+    await db.add_user("ou_o", Role.OWNER, "O", "ou_admin")
+    user = await db.get_user("ou_o")
+    assert manager.can_remove(Role.ADMIN, user) is True
+
+
+async def test_can_remove_owner_can_remove_collab(manager, db):
+    await db.add_user("ou_c", Role.COLLABORATOR, "C", "ou_admin")
+    user = await db.get_user("ou_c")
+    assert manager.can_remove(Role.OWNER, user) is True
+
+
+async def test_can_remove_owner_cannot_remove_owner(manager, db):
+    await db.add_user("ou_o", Role.OWNER, "O", "ou_admin")
+    user = await db.get_user("ou_o")
+    assert manager.can_remove(Role.OWNER, user) is False
+
+
+async def test_list_pending_as_collaborator(manager):
+    await manager.create_application("ou_a", "A", Role.COLLABORATOR)
+    pending = await manager.list_pending(Role.COLLABORATOR)
+    assert pending == []
+
+
+async def test_approve_nonexistent_returns_none(manager):
+    result = await manager.approve(9999, "ou_admin")
+    assert result is None
+
+
+async def test_reject_already_approved_returns_none(manager):
+    app_id, _ = await manager.create_application("ou_x", "X", Role.COLLABORATOR)
+    await manager.approve(app_id, "ou_admin")
+    result = await manager.reject(app_id, "ou_admin")
+    assert result is None

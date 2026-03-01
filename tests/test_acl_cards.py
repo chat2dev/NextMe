@@ -112,4 +112,51 @@ def test_build_acl_pending_card_empty(replier):
     card_json = replier.build_acl_pending_card([], Role.ADMIN)
     card = json.loads(card_json)
     body_text = json.dumps(card["body"], ensure_ascii=False)
-    assert "pending" in body_text.lower() or "待审批" in body_text or "no" in body_text.lower()
+    assert "待审批" in body_text
+
+
+def test_build_acl_pending_card_admin_sees_buttons(replier):
+    """ADMIN viewer should see approve/reject buttons for all applications."""
+    app = AclApplication(
+        id=5,
+        applicant_id="ou_x",
+        applicant_name="X",
+        requested_role=Role.OWNER,
+        status="pending",
+        requested_at=datetime(2026, 3, 1, 10, 0),
+    )
+    card_json = replier.build_acl_pending_card([app], Role.ADMIN)
+    card = json.loads(card_json)
+    buttons = [e for e in card["body"]["elements"] if e.get("tag") == "button"]
+    assert len(buttons) == 2
+    decisions = {b["value"]["decision"] for b in buttons}
+    assert "approved" in decisions
+    assert "rejected" in decisions
+
+
+def test_build_acl_pending_card_owner_sees_collab_buttons_only(replier):
+    """OWNER viewer should see buttons for COLLABORATOR apps but NOT OWNER apps."""
+    collab_app = AclApplication(
+        id=1,
+        applicant_id="ou_c",
+        applicant_name="C",
+        requested_role=Role.COLLABORATOR,
+        status="pending",
+        requested_at=datetime(2026, 3, 1, 10, 0),
+    )
+    owner_app = AclApplication(
+        id=2,
+        applicant_id="ou_o",
+        applicant_name="O",
+        requested_role=Role.OWNER,
+        status="pending",
+        requested_at=datetime(2026, 3, 1, 11, 0),
+    )
+    card_json = replier.build_acl_pending_card([collab_app, owner_app], Role.OWNER)
+    card = json.loads(card_json)
+    buttons = [e for e in card["body"]["elements"] if e.get("tag") == "button"]
+    # Should have buttons for collab_app (id=1) but not for owner_app (id=2)
+    assert len(buttons) == 2
+    app_ids = {b["value"]["app_id"] for b in buttons}
+    assert "1" in app_ids
+    assert "2" not in app_ids

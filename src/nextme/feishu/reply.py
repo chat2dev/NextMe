@@ -789,7 +789,7 @@ class FeishuReplier:
         ]
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "enable_forward": True},
             "header": {
                 "title": {"tag": "plain_text", "content": "⛔ 无访问权限"},
                 "template": "red",
@@ -840,7 +840,7 @@ class FeishuReplier:
         ]
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "enable_forward": True},
             "header": {
                 "title": {"tag": "plain_text", "content": f"📋 权限申请 #{app_id}"},
                 "template": "orange",
@@ -901,7 +901,7 @@ class FeishuReplier:
 
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "enable_forward": True},
             "header": {
                 "title": {"tag": "plain_text", "content": "👤 我的信息"},
                 "template": template,
@@ -937,7 +937,7 @@ class FeishuReplier:
 
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "enable_forward": True},
             "header": {
                 "title": {"tag": "plain_text", "content": "🔐 访问控制列表"},
                 "template": "blue",
@@ -1004,7 +1004,7 @@ class FeishuReplier:
 
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "enable_forward": True},
             "header": {
                 "title": {
                     "tag": "plain_text",

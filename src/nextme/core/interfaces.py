@@ -146,6 +146,8 @@ class Replier(Protocol):
         reasoning: str = "",
         session_id: str = "",
         elapsed: str = "",
+        executor: str = "",
+        tool_count: int = 0,
     ) -> str:
         """Return a card JSON string for the final result."""
         ...
@@ -155,6 +157,9 @@ class Replier(Protocol):
         description: str,
         options: list[PermOption],
         session_id: str = "",
+        project_name: str = "",
+        executor: str = "",
+        display_id: str = "",
     ) -> str:
         """Return a card JSON string for a permission request."""
         ...
