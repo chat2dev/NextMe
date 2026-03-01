@@ -248,7 +248,7 @@ class SessionWorker:
         """Execute *task* end-to-end with progress and permission handling.
 
         Steps:
-        1. Send an initial "思考中..." progress card.
+        1. Check path lock contention; send appropriate initial card.
         2. Acquire path lock for the project directory.
         3. Ensure the ACP runtime is ready.
         4. Execute via ACP, streaming progress and handling permissions.
@@ -277,94 +277,129 @@ class SessionWorker:
 
         # group → thread reply; p2p → quote reply; no message_id → top-level.
         in_thread = self._active_in_thread
-
-        # Step 1 — Try cardkit-first (true streaming) then fall back to a
-        # regular im/v1 card with debounced full-card updates.
-        #
-        # streaming_mode: true is included in the card JSON at creation time
-        # (cardkit accepts it; the IM renderer only sees a card_id reference,
-        # never the raw JSON, so there is no 200621 parse error).
         chat_id = self._session.context_id.split(":")[0]
-        card_id = ""
-        if self._settings.streaming_enabled:
-            try:
-                self._run_card = RunProgressCard()
-                initial_card_json = json.dumps(
-                    self._run_card.build_card("running", self._proj), ensure_ascii=False
-                )
-                card_id = await self._replier.create_card(initial_card_json)
-            except Exception:
-                card_id = ""
 
-        streaming_ok = False
-        if card_id:
-            # Cardkit-first: reference the cardkit card_id from im/v1.
-            self._card_id = card_id
-            try:
-                if task.message_id:
-                    sent_id = await self._replier.reply_card_by_id(
-                        task.message_id, card_id, in_thread=in_thread
-                    )
-                else:
-                    sent_id = await self._replier.send_card_by_id(chat_id, card_id)
-            except Exception:
-                logger.exception(
-                    "SessionWorker[%s]: failed to send streaming progress card",
-                    self._session.context_id,
-                )
-                sent_id = ""
+        # Step 1 — Check path lock contention BEFORE sending any progress card.
+        #
+        # When two users share the same project path, the second user's worker
+        # reaches this point while the first still holds the lock.  Without this
+        # check the second user would receive an initial "思考中..." card that
+        # never updates — because the worker immediately blocks on the lock and
+        # cannot send further progress.  Instead we detect contention eagerly and
+        # show a "候补中" (queued) card so the user knows their task is waiting.
+        path_lock = self._path_lock_registry.get(self._session.project_path)
+        lock_contended = path_lock.locked()
 
-            if sent_id:
-                self._progress_message_id = sent_id
-                streaming_ok = True
-                logger.debug(
-                    "SessionWorker[%s]: streaming card card_id=%s message_id=%s",
-                    self._session.context_id,
-                    card_id,
-                    sent_id,
-                )
-            else:
-                # Feishu rejected the card_id reference (e.g. 230099) —
-                # clear streaming mode and fall through to the regular card path.
-                logger.warning(
-                    "SessionWorker[%s]: streaming card send returned empty "
-                    "(card_id=%s), falling back to regular card",
-                    self._session.context_id,
-                    card_id,
-                )
-                self._card_id = None
-
-        if not streaming_ok:
-            # Fallback: regular im/v1 card with debounced full-card PATCH.
-            self._card_id = None
-            initial_card = self._replier.build_progress_card(
+        if lock_contended:
+            # Another session holds the path lock.  Show a waiting card and set
+            # the correct status before blocking on the lock.
+            self._session.status = TaskStatus.WAITING_LOCK
+            waiting_card = self._replier.build_progress_card(
                 status="",
-                content="思考中...",
-                title=f"思考中... {self._proj}",
+                content="候补中，等待当前任务完成后自动执行...",
+                title=f"⏳ 候补中... {self._proj}",
             )
             try:
                 if task.message_id:
                     self._progress_message_id = await self._replier.reply_card(
-                        task.message_id, initial_card, in_thread=in_thread
+                        task.message_id, waiting_card, in_thread=in_thread
                     )
                 else:
                     self._progress_message_id = await self._replier.send_card(
-                        chat_id, initial_card
+                        chat_id, waiting_card
                     )
                 logger.debug(
-                    "SessionWorker[%s]: sent initial progress card message_id=%s",
+                    "SessionWorker[%s]: sent waiting card (lock contended) message_id=%s",
                     self._session.context_id,
                     self._progress_message_id,
                 )
             except Exception:
                 logger.exception(
-                    "SessionWorker[%s]: failed to send initial progress card",
+                    "SessionWorker[%s]: failed to send waiting card",
                     self._session.context_id,
                 )
+        else:
+            # No contention: send the initial "思考中..." card now so the user
+            # gets immediate feedback.  Try cardkit streaming first, fall back to
+            # a regular im/v1 card.
+            card_id = ""
+            if self._settings.streaming_enabled:
+                try:
+                    self._run_card = RunProgressCard()
+                    initial_card_json = json.dumps(
+                        self._run_card.build_card("running", self._proj), ensure_ascii=False
+                    )
+                    card_id = await self._replier.create_card(initial_card_json)
+                except Exception:
+                    card_id = ""
 
-        # Step 2 — Acquire path lock.
-        path_lock = self._path_lock_registry.get(self._session.project_path)
-        self._session.status = TaskStatus.WAITING_LOCK
+            streaming_ok = False
+            if card_id:
+                # Cardkit-first: reference the cardkit card_id from im/v1.
+                self._card_id = card_id
+                try:
+                    if task.message_id:
+                        sent_id = await self._replier.reply_card_by_id(
+                            task.message_id, card_id, in_thread=in_thread
+                        )
+                    else:
+                        sent_id = await self._replier.send_card_by_id(chat_id, card_id)
+                except Exception:
+                    logger.exception(
+                        "SessionWorker[%s]: failed to send streaming progress card",
+                        self._session.context_id,
+                    )
+                    sent_id = ""
+
+                if sent_id:
+                    self._progress_message_id = sent_id
+                    streaming_ok = True
+                    logger.debug(
+                        "SessionWorker[%s]: streaming card card_id=%s message_id=%s",
+                        self._session.context_id,
+                        card_id,
+                        sent_id,
+                    )
+                else:
+                    # Feishu rejected the card_id reference (e.g. 230099) —
+                    # clear streaming mode and fall through to the regular card path.
+                    logger.warning(
+                        "SessionWorker[%s]: streaming card send returned empty "
+                        "(card_id=%s), falling back to regular card",
+                        self._session.context_id,
+                        card_id,
+                    )
+                    self._card_id = None
+
+            if not streaming_ok:
+                # Fallback: regular im/v1 card with debounced full-card PATCH.
+                self._card_id = None
+                initial_card = self._replier.build_progress_card(
+                    status="",
+                    content="思考中...",
+                    title=f"思考中... {self._proj}",
+                )
+                try:
+                    if task.message_id:
+                        self._progress_message_id = await self._replier.reply_card(
+                            task.message_id, initial_card, in_thread=in_thread
+                        )
+                    else:
+                        self._progress_message_id = await self._replier.send_card(
+                            chat_id, initial_card
+                        )
+                    logger.debug(
+                        "SessionWorker[%s]: sent initial progress card message_id=%s",
+                        self._session.context_id,
+                        self._progress_message_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "SessionWorker[%s]: failed to send initial progress card",
+                        self._session.context_id,
+                    )
+
+        # Step 2 — Acquire path lock (blocks if another session is executing).
         logger.debug(
             "SessionWorker[%s]: acquiring path lock for %s",
             self._session.context_id,
@@ -372,6 +407,27 @@ class SessionWorker:
         )
         async with path_lock:
             self._session.status = TaskStatus.EXECUTING
+
+            # If we showed a "候补中" card while waiting, update it to "思考中..."
+            # now that we hold the lock and are about to start real work.
+            if lock_contended and self._progress_message_id:
+                thinking_card = self._replier.build_progress_card(
+                    status="",
+                    content="思考中...",
+                    title=f"思考中... {self._proj}",
+                )
+                try:
+                    await self._replier.update_card(self._progress_message_id, thinking_card)
+                    logger.debug(
+                        "SessionWorker[%s]: updated waiting card to thinking message_id=%s",
+                        self._session.context_id,
+                        self._progress_message_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "SessionWorker[%s]: failed to update waiting card to thinking",
+                        self._session.context_id,
+                    )
 
             # Step 3 — Obtain and ready the ACP runtime.
             runtime = self._acp_registry.get_or_create(

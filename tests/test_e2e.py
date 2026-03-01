@@ -17,6 +17,7 @@ Tests
 9.  test_acl_apply_by_different_operator_is_ignored  — cross-user apply button click → no application created
 10. test_review_card_disabled_after_approve          — approve → update_card called on review notification
 11. test_review_card_disabled_after_reject           — reject → update_card called on review notification
+12. test_path_lock_contention_shows_waiting_card     — 2nd user on same project sees "候补中" then "思考中"
 """
 
 from __future__ import annotations
@@ -602,3 +603,150 @@ async def test_review_card_disabled_after_reject(tmp_project, settings, acl_db):
 
     # The pending entry should have been consumed
     assert app_id not in dispatcher._review_notification_msgs
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Path lock contention shows "候补中" card, then updates to "思考中"
+# ---------------------------------------------------------------------------
+
+
+async def test_path_lock_contention_shows_waiting_card(tmp_project, settings):
+    """When two users on the same project send tasks concurrently, the second
+    user must see a "候补中" (waiting) card while the first is executing,
+    and the card must update to "思考中" once the second user acquires the lock.
+
+    This tests the fix for the bug where both users would see "思考中" cards
+    but only one would receive updates — because the second worker sent its
+    initial card before blocking on the path lock.
+    """
+    # User A: slow runtime so the lock is held long enough for User B to observe contention.
+    lock_acquired = asyncio.Event()
+    lock_release = asyncio.Event()
+
+    async def slow_execute_a(task, on_progress, on_permission):
+        lock_acquired.set()        # signal that user A has the lock
+        await lock_release.wait()  # hold until we say so
+        return "done by A"
+
+    runtime_a = AsyncMock()
+    runtime_a.actual_id = ""
+    runtime_a.is_running = True
+    runtime_a.ensure_ready = AsyncMock()
+    runtime_a.execute = slow_execute_a
+    runtime_a.stop = AsyncMock()
+    runtime_a.restore_session = AsyncMock()
+
+    async def instant_execute_b(task, on_progress, on_permission):
+        return "done by B"
+
+    runtime_b = AsyncMock()
+    runtime_b.actual_id = ""
+    runtime_b.is_running = True
+    runtime_b.ensure_ready = AsyncMock()
+    runtime_b.execute = instant_execute_b
+    runtime_b.stop = AsyncMock()
+    runtime_b.restore_session = AsyncMock()
+
+    replier_a = make_replier()
+    replier_a.reply_card = AsyncMock(return_value="msg_a_progress")
+    replier_b = make_replier()
+    replier_b.reply_card = AsyncMock(return_value="msg_b_waiting")
+    # build_progress_card must include the real content so we can assert on it.
+    replier_b.build_progress_card = MagicMock(
+        side_effect=lambda status, content, title="": f'{{"content":"{content}","title":"{title}"}}'
+    )
+
+    # get_replier() is called once per dispatch; return A's replier first, then B's.
+    replier_sequence = [replier_a, replier_b]
+    replier_index = [0]
+
+    def get_replier_side_effect():
+        r = replier_sequence[replier_index[0]]
+        replier_index[0] = min(replier_index[0] + 1, len(replier_sequence) - 1)
+        return r
+
+    feishu_client = MagicMock()
+    feishu_client.get_replier = MagicMock(side_effect=get_replier_side_effect)
+
+    acp_registry = ACPRuntimeRegistry()
+
+    def get_or_create_side_effect(**kwargs):
+        session_id = kwargs.get("session_id", "")
+        return runtime_a if "ou_user_a" in session_id else runtime_b
+
+    acp_registry.get_or_create = MagicMock(side_effect=get_or_create_side_effect)
+
+    config = AppConfig(projects=[tmp_project])
+    SessionRegistry._instance = None
+    session_registry = SessionRegistry.get_instance()
+
+    dispatcher = TaskDispatcher(
+        config=config,
+        settings=settings,
+        session_registry=session_registry,
+        acp_registry=acp_registry,
+        path_lock_registry=PathLockRegistry(),
+        feishu_client=feishu_client,
+    )
+
+    task_a = Task(
+        id=str(uuid.uuid4()),
+        content="task from A",
+        session_id=f"oc_group:ou_user_a",
+        reply_fn=AsyncMock(),
+        message_id="om_msg_a",
+        chat_type="p2p",
+        timeout=timedelta(seconds=10),
+    )
+    task_b = Task(
+        id=str(uuid.uuid4()),
+        content="task from B",
+        session_id=f"oc_group:ou_user_b",
+        reply_fn=AsyncMock(),
+        message_id="om_msg_b",
+        chat_type="p2p",
+        timeout=timedelta(seconds=10),
+    )
+
+    # Dispatch A first, wait until A has the path lock, then dispatch B.
+    await dispatcher.dispatch(task_a)
+    await asyncio.wait_for(lock_acquired.wait(), timeout=5.0)
+
+    # User A holds the lock.  Dispatch User B.
+    await dispatcher.dispatch(task_b)
+
+    # Give User B's worker time to detect contention and send the waiting card.
+    await asyncio.sleep(0.15)
+
+    # User B must have received a "候补中" card.
+    replier_b.reply_card.assert_called_once()
+    waiting_card_json: str = replier_b.reply_card.call_args.args[1]
+    assert "候补中" in waiting_card_json, (
+        f"Expected '候补中' in waiting card JSON, got: {waiting_card_json!r}"
+    )
+
+    # Release User A — let the lock go so User B can proceed.
+    lock_release.set()
+
+    # Wait for User B to complete.
+    session_b_ctx = session_registry.get(task_b.session_id)
+    assert session_b_ctx is not None
+    active_b = session_b_ctx.get_active_session()
+    assert active_b is not None
+    try:
+        await asyncio.wait_for(active_b.task_queue.join(), timeout=5.0)
+    except asyncio.TimeoutError:
+        pytest.fail("User B's task did not complete within timeout")
+    finally:
+        for worker_task in list(dispatcher._worker_tasks.values()):
+            if not worker_task.done():
+                worker_task.cancel()
+                await asyncio.gather(worker_task, return_exceptions=True)
+
+    # After acquiring the lock, User B's worker must have updated the waiting
+    # card to "思考中..." to reflect that execution has started.
+    replier_b.update_card.assert_called()
+    updated_card_json: str = replier_b.update_card.call_args_list[0].args[1]
+    assert "思考中" in updated_card_json, (
+        f"Expected '思考中' in updated card JSON, got: {updated_card_json!r}"
+    )
