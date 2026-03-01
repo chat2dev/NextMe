@@ -478,7 +478,7 @@ class FeishuReplier:
         self,
         status: str,
         content: str,
-        title: str = "思考中...",
+        title: str = "⏳ 思考中...",
     ) -> str:
         """Return a card JSON string for in-progress status updates (fallback path).
 
@@ -492,7 +492,7 @@ class FeishuReplier:
             elements.append({"tag": "markdown", "content": f"_{status}_"})
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "enable_forward": True},
             "header": {
                 "title": {"tag": "plain_text", "content": title},
                 "template": "yellow",
@@ -504,7 +504,7 @@ class FeishuReplier:
     def build_streaming_progress_card(
         self,
         content: str = "思考中...",
-        title: str = "思考中...",
+        title: str = "⏳ 思考中...",
     ) -> str:
         """Return a card JSON for cardkit creation with element IDs for streaming.
 
@@ -516,7 +516,7 @@ class FeishuReplier:
         """
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True, "streaming_mode": True},
+            "config": {"wide_screen_mode": True, "enable_forward": True, "streaming_mode": True},
             "header": {
                 "title": {"tag": "plain_text", "content": title},
                 "template": "yellow",
@@ -532,12 +532,13 @@ class FeishuReplier:
     def build_result_card(
         self,
         content: str,
-        title: str = "完成",
+        title: str = "✅ 完成",
         template: str = "blue",
         reasoning: str = "",
         session_id: str = "",
         elapsed: str = "",
         executor: str = "",
+        tool_count: int = 0,
     ) -> str:
         """Return a card JSON string for the final result."""
         elements: list[dict] = [
@@ -558,6 +559,8 @@ class FeishuReplier:
                     ],
                 }
             )
+        if tool_count > 0:
+            elements.append({"tag": "markdown", "content": f"🔧 工具调用 **{tool_count}** 次"})
         footer_parts: list[str] = []
         if session_id:
             footer_parts.append(f"🆔 {session_id}")
@@ -572,7 +575,7 @@ class FeishuReplier:
             )
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "enable_forward": True},
             "header": {
                 "title": {"tag": "plain_text", "content": title},
                 "template": template,
@@ -643,7 +646,7 @@ class FeishuReplier:
 
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "enable_forward": True},
             "header": {
                 "title": {"tag": "plain_text", "content": "需要授权"},
                 "template": "orange",
@@ -652,11 +655,11 @@ class FeishuReplier:
         }
         return json.dumps(card, ensure_ascii=False)
 
-    def build_error_card(self, error: str, title: str = "出错了") -> str:
+    def build_error_card(self, error: str, title: str = "❌ 出错了") -> str:
         """Return a card JSON string for an error message."""
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "enable_forward": True},
             "header": {
                 "title": {"tag": "plain_text", "content": title},
                 "template": "red",
@@ -681,14 +684,34 @@ class FeishuReplier:
 
         card = {
             "schema": "2.0",
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "enable_forward": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "帮助"},
+                "title": {"tag": "plain_text", "content": "📖 帮助"},
                 "template": "green",
             },
             "body": {
                 "elements": [
                     {"tag": "markdown", "content": table_md},
+                ]
+            },
+        }
+        return json.dumps(card, ensure_ascii=False)
+
+    def build_info_card(self, title: str, content: str, template: str = "blue") -> str:
+        """Return a card JSON string for informational messages.
+
+        Used by /whoami, /status, /acl commands.
+        """
+        card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True, "enable_forward": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+                "template": template,
+            },
+            "body": {
+                "elements": [
+                    {"tag": "markdown", "content": content},
                 ]
             },
         }

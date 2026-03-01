@@ -45,7 +45,7 @@ class TestBuildProgressCard:
     def test_default_title(self):
         replier, _ = make_replier()
         parsed = json.loads(replier.build_progress_card("", "content"))
-        assert parsed["header"]["title"]["content"] == "思考中..."
+        assert "思考中..." in parsed["header"]["title"]["content"]
 
     def test_custom_title(self):
         replier, _ = make_replier()
@@ -119,7 +119,7 @@ class TestBuildResultCard:
     def test_default_title_is_complete(self):
         replier, _ = make_replier()
         parsed = json.loads(replier.build_result_card("content"))
-        assert parsed["header"]["title"]["content"] == "完成"
+        assert "完成" in parsed["header"]["title"]["content"]
 
     def test_custom_title(self):
         replier, _ = make_replier()
@@ -498,7 +498,7 @@ class TestBuildErrorCard:
     def test_header_title_content(self):
         replier, _ = make_replier()
         parsed = json.loads(replier.build_error_card("error"))
-        assert parsed["header"]["title"]["content"] == "出错了"
+        assert "出错了" in parsed["header"]["title"]["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -1068,7 +1068,7 @@ class TestBuildStreamingProgressCard:
     def test_default_title(self):
         replier, _ = make_replier()
         parsed = json.loads(replier.build_streaming_progress_card())
-        assert parsed["header"]["title"]["content"] == "思考中..."
+        assert "思考中..." in parsed["header"]["title"]["content"]
 
     def test_custom_title(self):
         replier, _ = make_replier()

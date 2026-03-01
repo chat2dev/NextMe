@@ -203,6 +203,60 @@ Stop:
 nextme down
 ```
 
+**Convenience scripts** (project root):
+
+```bash
+./start.sh           # wraps nextme up with checks and colored output
+./stop.sh            # wraps nextme down
+```
+
+---
+
+## Security
+
+> **Read this before running NextMe in a shared or production environment.**
+
+### Claude CLI permission flags
+
+NextMe's `DirectClaudeRuntime` (executor `"claude"`) launches the local `claude` CLI with these flags:
+
+```json
+[
+  "--print",
+  "--output-format", "stream-json",
+  "--verbose",
+  "--dangerously-skip-permissions",
+  "--include-partial-messages"
+]
+```
+
+The critical flag is **`--dangerously-skip-permissions`**. It tells the Claude agent to auto-approve every tool call — Bash commands, file writes, network requests — **without pausing to ask for confirmation**. This is intentional for a bot environment (no human at the terminal), but it means:
+
+- The agent can run **any shell command** in the configured project directory.
+- The agent can **read and write files** within that directory (and anywhere the OS user has access).
+- There is **no sandboxing** beyond the OS user's own permissions.
+
+### Recommended hardening measures
+
+Evaluate and apply what's appropriate for your environment:
+
+| Measure | How |
+|---------|-----|
+| **Restrict who can send messages** | Add your own `open_id` to `admin_users` and enable the ACL feature (Phase 3) |
+| **Run as a dedicated OS user** | Create a low-privilege user for NextMe; it inherits only that user's file permissions |
+| **Limit project path** | Set `path` in `settings.json` to a narrow directory, not `/` or `~` |
+| **Read-only volumes for sensitive dirs** | Mount sensitive directories as read-only for the NextMe process |
+| **Review agent memory** | Periodically check `~/.nextme/memory/` to see what facts the agent has recorded |
+
+### Environment variable handling
+
+NextMe strips the following variables from the child `claude` process to prevent nested-session conflicts and credential leakage:
+
+- `CLAUDECODE`, `CLAUDE_CODE_*` — prevents "nested session" errors
+- `ANTHROPIC_AUTH_TOKEN` is **not** passed as `ANTHROPIC_API_KEY`; the inner `claude` uses its own `~/.claude.json` credentials
+
+The child process inherits your full environment otherwise, including `ANTHROPIC_BASE_URL` for custom proxy endpoints.
+
 ---
 
 ## Usage
@@ -498,6 +552,104 @@ Tags are stripped before displaying the response to the user. Facts longer than 
 **Custom template** — Override the injection format by creating `~/.nextme/prompts/memory.md` (Jinja2). Variables: `{{ count }}`, `{% for fact in facts %}{{ loop.index0 }}. {{ fact.text }}{% endfor %}`.
 
 Use `/remember <text>` to add a fact directly from Feishu without waiting for the agent to write a `<memory>` tag.
+
+---
+
+## Stability & Auto-Recovery
+
+NextMe is a long-running daemon. Below are recommended approaches to keep it online and self-healing.
+
+### Option A — macOS launchd (recommended for Mac)
+
+Create `~/Library/LaunchAgents/com.nextme.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>              <string>com.nextme</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd /path/to/NextMe &amp;&amp; uv run nextme up</string>
+  </array>
+  <key>KeepAlive</key>          <true/>          <!-- auto-restart on crash -->
+  <key>RunAtLoad</key>          <true/>          <!-- start on login -->
+  <key>StandardOutPath</key>    <string>/tmp/nextme.out</string>
+  <key>StandardErrorPath</key>  <string>/tmp/nextme.err</string>
+  <key>ThrottleInterval</key>   <integer>10</integer>  <!-- min 10s between restarts -->
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.nextme.plist   # start
+launchctl unload ~/Library/LaunchAgents/com.nextme.plist # stop
+```
+
+### Option B — Linux systemd (recommended for servers)
+
+Create `/etc/systemd/system/nextme.service`:
+
+```ini
+[Unit]
+Description=NextMe Feishu Agent Bot
+After=network.target
+
+[Service]
+Type=simple
+User=nextme                          # dedicated low-privilege user
+WorkingDirectory=/path/to/NextMe
+ExecStart=/usr/local/bin/uv run nextme up
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=60
+StartLimitBurst=5                    # max 5 restarts per minute
+StandardOutput=journal
+StandardError=journal
+Environment=HOME=/home/nextme
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now nextme   # start + enable on boot
+sudo systemctl status nextme
+sudo journalctl -u nextme -f         # follow logs
+```
+
+### Option C — Supervisor (cross-platform)
+
+```ini
+[program:nextme]
+command=uv run nextme up
+directory=/path/to/NextMe
+autostart=true
+autorestart=true
+startretries=5
+startsecs=5
+stderr_logfile=/var/log/nextme.err.log
+stdout_logfile=/var/log/nextme.out.log
+```
+
+```bash
+supervisorctl reread && supervisorctl update
+supervisorctl status nextme
+```
+
+### Built-in resilience features
+
+| Feature | Behaviour |
+|---------|-----------|
+| WebSocket auto-reconnect | lark-oapi reconnects automatically on connection drop |
+| Graceful shutdown | SIGTERM drains in-flight tasks before exit |
+| PID file | `~/.nextme/nextme.pid` — `nextme down` uses it for clean stop |
+| State persistence | Session IDs and bindings survive restarts via `state.json` |
 
 ---
 
