@@ -448,6 +448,119 @@ class TestCmdDown:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Tests: _reload_settings_async
+# ---------------------------------------------------------------------------
+
+
+class TestReloadSettingsAsync:
+    async def test_propagates_admin_users_change_to_acl_manager(self):
+        """When admin_users changes, reload_admin_users is called on AclManager."""
+        from unittest.mock import MagicMock
+        from nextme.main import _reload_settings_async
+        from nextme.acl.manager import AclManager
+
+        current = MagicMock()
+        current.admin_users = ["ou_old"]
+        current.log_level = "INFO"
+        current.progress_debounce_seconds = 0.5
+        current.memory_debounce_seconds = 30
+        current.memory_max_facts = 100
+        current.permission_auto_approve = False
+        current.streaming_enabled = True
+
+        fresh = MagicMock()
+        fresh.admin_users = ["ou_new"]
+        fresh.log_level = "INFO"
+        fresh.progress_debounce_seconds = 0.5
+        fresh.memory_debounce_seconds = 30
+        fresh.memory_max_facts = 100
+        fresh.permission_auto_approve = False
+        fresh.streaming_enabled = True
+
+        acl_manager = MagicMock(spec=AclManager)
+
+        with patch("nextme.config.loader.ConfigLoader.load_settings", return_value=fresh):
+            await _reload_settings_async(current, acl_manager)
+
+        acl_manager.reload_admin_users.assert_called_once_with(["ou_new"])
+
+    async def test_no_admin_users_change_skips_acl_reload(self):
+        """When admin_users is unchanged, reload_admin_users is NOT called."""
+        from unittest.mock import MagicMock
+        from nextme.main import _reload_settings_async
+        from nextme.acl.manager import AclManager
+
+        current = MagicMock()
+        current.admin_users = ["ou_same"]
+        current.log_level = "INFO"
+        current.progress_debounce_seconds = 0.5
+        current.memory_debounce_seconds = 30
+        current.memory_max_facts = 100
+        current.permission_auto_approve = False
+        current.streaming_enabled = True
+
+        fresh = MagicMock()
+        fresh.admin_users = ["ou_same"]
+        fresh.log_level = "INFO"
+        fresh.progress_debounce_seconds = 0.5
+        fresh.memory_debounce_seconds = 30
+        fresh.memory_max_facts = 100
+        fresh.permission_auto_approve = False
+        fresh.streaming_enabled = True
+
+        acl_manager = MagicMock(spec=AclManager)
+
+        with patch("nextme.config.loader.ConfigLoader.load_settings", return_value=fresh):
+            await _reload_settings_async(current, acl_manager)
+
+        acl_manager.reload_admin_users.assert_not_called()
+
+    async def test_no_acl_manager_does_not_raise(self):
+        """_reload_settings_async without acl_manager works normally."""
+        from unittest.mock import MagicMock
+        from nextme.main import _reload_settings_async
+
+        current = MagicMock()
+        current.admin_users = ["ou_old"]
+        current.log_level = "INFO"
+        current.progress_debounce_seconds = 0.5
+        current.memory_debounce_seconds = 30
+        current.memory_max_facts = 100
+        current.permission_auto_approve = False
+        current.streaming_enabled = True
+
+        fresh = MagicMock()
+        fresh.admin_users = ["ou_new"]
+        fresh.log_level = "INFO"
+        fresh.progress_debounce_seconds = 0.5
+        fresh.memory_debounce_seconds = 30
+        fresh.memory_max_facts = 100
+        fresh.permission_auto_approve = False
+        fresh.streaming_enabled = True
+
+        with patch("nextme.config.loader.ConfigLoader.load_settings", return_value=fresh):
+            await _reload_settings_async(current, acl_manager=None)  # must not raise
+
+    async def test_load_failure_is_swallowed(self):
+        """When ConfigLoader.load_settings raises, _reload_settings_async logs and returns."""
+        from unittest.mock import MagicMock
+        from nextme.main import _reload_settings_async
+
+        current = MagicMock()
+
+        with patch(
+            "nextme.config.loader.ConfigLoader.load_settings",
+            side_effect=OSError("disk error"),
+        ):
+            await _reload_settings_async(current)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Tests: main() CLI — nextme down subcommand
+# ---------------------------------------------------------------------------
+
+
 class TestMainDown:
     def test_main_down_calls_cmd_down_with_default_timeout(self):
         """main() with 'down' invokes _cmd_down(10)."""
