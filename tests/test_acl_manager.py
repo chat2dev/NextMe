@@ -207,3 +207,13 @@ async def test_get_application(manager):
 async def test_get_application_not_found(manager):
     app = await manager.get_application(9999)
     assert app is None
+
+
+async def test_reload_admin_users(db):
+    """reload_admin_users replaces the in-memory admin set."""
+    manager = AclManager(db=db, admin_users=["ou_old_admin"])
+    assert await manager.get_role("ou_old_admin") == Role.ADMIN
+
+    manager.reload_admin_users(["ou_new_admin"])
+    assert await manager.get_role("ou_new_admin") == Role.ADMIN
+    assert await manager.get_role("ou_old_admin") is None

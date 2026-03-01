@@ -121,7 +121,7 @@ def _update_log_level(log_level: str) -> None:
         handler.setLevel(numeric_level)
 
 
-async def _reload_settings_async(settings: object) -> None:
+async def _reload_settings_async(settings: object, acl_manager: object | None = None) -> None:
     """Re-read settings.json and hot-update reloadable fields in *settings* in-place."""
     from .config.loader import ConfigLoader
 
@@ -143,6 +143,11 @@ async def _reload_settings_async(settings: object) -> None:
         logger.info("SIGHUP: settings reloaded — %s", "; ".join(changed))
         if any(c.startswith("log_level:") for c in changed):
             _update_log_level(getattr(settings, "log_level", "INFO"))
+        if acl_manager is not None and any(c.startswith("admin_users:") for c in changed):
+            from .acl.manager import AclManager as _AclManager
+            if isinstance(acl_manager, _AclManager):
+                acl_manager.reload_admin_users(getattr(settings, "admin_users", []))
+                logger.info("SIGHUP: AclManager admin_users reloaded")
     else:
         logger.info("SIGHUP: settings reloaded — no changes detected")
 
@@ -150,6 +155,7 @@ async def _reload_settings_async(settings: object) -> None:
 def _install_sighup_handler(
     loop: asyncio.AbstractEventLoop,
     settings: object,
+    acl_manager: object | None = None,
 ) -> None:
     """Register a SIGHUP handler that hot-reloads settings.json in-place.
 
@@ -165,7 +171,7 @@ def _install_sighup_handler(
             "Received SIGHUP — reloading hot settings from %s",
             _NEXTME_HOME / "settings.json",
         )
-        loop.create_task(_reload_settings_async(settings), name="sighup-reload")
+        loop.create_task(_reload_settings_async(settings, acl_manager), name="sighup-reload")
 
     try:
         loop.add_signal_handler(signal.SIGHUP, _on_sighup)
@@ -390,7 +396,7 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     # ------------------------------------------------------------------
     shutdown_event = asyncio.Event()
     _install_signal_handlers(loop, shutdown_event)
-    _install_sighup_handler(loop, settings)
+    _install_sighup_handler(loop, settings, acl_manager)
 
     # ------------------------------------------------------------------
     # Step 11: Start the Feishu WebSocket — blocks until shutdown

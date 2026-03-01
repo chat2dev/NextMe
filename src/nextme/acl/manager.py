@@ -19,6 +19,10 @@ class AclManager:
     def get_admin_ids(self) -> list[str]:
         return list(self._admin_users)
 
+    def reload_admin_users(self, admin_users: list[str]) -> None:
+        """Hot-reload admin users from settings without restarting."""
+        self._admin_users = set(admin_users)
+
     # ------------------------------------------------------------------
     # Role resolution
     # ------------------------------------------------------------------
