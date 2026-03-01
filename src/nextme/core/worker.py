@@ -829,6 +829,8 @@ class SessionWorker:
         elapsed_s = int(time.monotonic() - self._task_start)
         elapsed_str = _format_elapsed(elapsed_s)
 
+        tool_count = self._run_card.tool_count if self._run_card is not None else 0
+
         if self._card_id:
             # Streaming mode — replace the full card (header + body) via
             # PUT /cards/:card_id so the execution-log card transitions to the
@@ -840,6 +842,7 @@ class SessionWorker:
                 session_id=self._session.actual_id or "",
                 elapsed=elapsed_str,
                 executor=self._session.executor,
+                tool_count=tool_count,
             )
             self._sequence += 1
             try:
@@ -865,6 +868,7 @@ class SessionWorker:
             session_id=self._session.actual_id or "",
             elapsed=elapsed_str,
             executor=self._session.executor,
+            tool_count=tool_count,
         )
         await self._update_or_reply(task, result_card)
 

@@ -1265,3 +1265,199 @@ class TestReplyCardById:
         result = await replier.reply_card_by_id("om_src", "card_id", in_thread=False)
 
         assert result == "om_quote"
+
+
+# ---------------------------------------------------------------------------
+# enable_forward feature
+# ---------------------------------------------------------------------------
+
+
+class TestEnableForward:
+    """All card builders must include enable_forward: True in config."""
+
+    def test_progress_card_has_enable_forward(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_progress_card("", "content"))
+        assert parsed["config"].get("enable_forward") is True
+
+    def test_streaming_progress_card_has_enable_forward(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card())
+        assert parsed["config"].get("enable_forward") is True
+
+    def test_streaming_progress_card_retains_streaming_mode(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card())
+        assert parsed["config"].get("streaming_mode") is True
+
+    def test_result_card_has_enable_forward(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_result_card("content"))
+        assert parsed["config"].get("enable_forward") is True
+
+    def test_permission_card_has_enable_forward(self):
+        from nextme.protocol.types import PermOption
+        replier, _ = make_replier()
+        opts = [PermOption(index=1, label="Allow")]
+        parsed = json.loads(replier.build_permission_card("desc", opts))
+        assert parsed["config"].get("enable_forward") is True
+
+    def test_error_card_has_enable_forward(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_error_card("error"))
+        assert parsed["config"].get("enable_forward") is True
+
+    def test_help_card_has_enable_forward(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_help_card([]))
+        assert parsed["config"].get("enable_forward") is True
+
+
+# ---------------------------------------------------------------------------
+# build_result_card tool_count parameter
+# ---------------------------------------------------------------------------
+
+
+class TestBuildResultCardToolCount:
+    def test_no_tool_count_markdown_when_zero(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_result_card("content", tool_count=0))
+        elements = parsed["body"]["elements"]
+        tool_elements = [
+            e for e in elements
+            if e.get("tag") == "markdown" and "工具调用" in e.get("content", "")
+        ]
+        assert len(tool_elements) == 0
+
+    def test_tool_count_markdown_appears_when_positive(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_result_card("content", tool_count=5))
+        elements = parsed["body"]["elements"]
+        tool_elements = [
+            e for e in elements
+            if e.get("tag") == "markdown" and "工具调用" in e.get("content", "")
+        ]
+        assert len(tool_elements) == 1
+        assert "5" in tool_elements[0]["content"]
+        assert "🔧" in tool_elements[0]["content"]
+
+    def test_tool_count_placed_before_footer(self):
+        replier, _ = make_replier()
+        parsed = json.loads(
+            replier.build_result_card("content", tool_count=3, session_id="s1")
+        )
+        elements = parsed["body"]["elements"]
+        tool_idx = next(
+            i for i, e in enumerate(elements)
+            if e.get("tag") == "markdown" and "工具调用" in e.get("content", "")
+        )
+        footer_idx = next(
+            i for i, e in enumerate(elements)
+            if e.get("tag") == "markdown" and "s1" in e.get("content", "")
+        )
+        assert tool_idx < footer_idx
+
+    def test_tool_count_placed_after_reasoning(self):
+        replier, _ = make_replier()
+        parsed = json.loads(
+            replier.build_result_card("content", reasoning="think", tool_count=2)
+        )
+        elements = parsed["body"]["elements"]
+        tags = [e.get("tag") for e in elements]
+        collapsible_idx = tags.index("collapsible_panel")
+        tool_idx = next(
+            i for i, e in enumerate(elements)
+            if e.get("tag") == "markdown" and "工具调用" in e.get("content", "")
+        )
+        assert tool_idx > collapsible_idx
+
+
+# ---------------------------------------------------------------------------
+# build_info_card
+# ---------------------------------------------------------------------------
+
+
+class TestBuildInfoCard:
+    def test_returns_valid_json_string(self):
+        replier, _ = make_replier()
+        result = replier.build_info_card("标题", "正文内容")
+        assert isinstance(json.loads(result), dict)
+
+    def test_schema_is_2_0(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_info_card("标题", "内容"))
+        assert parsed["schema"] == "2.0"
+
+    def test_title_in_header(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_info_card("My Title", "body"))
+        assert parsed["header"]["title"]["content"] == "My Title"
+
+    def test_content_in_markdown_element(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_info_card("title", "some content here"))
+        elements = parsed["body"]["elements"]
+        md_elements = [e for e in elements if e.get("tag") == "markdown"]
+        assert len(md_elements) >= 1
+        assert md_elements[0]["content"] == "some content here"
+
+    def test_default_template_is_blue(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_info_card("title", "content"))
+        assert parsed["header"]["template"] == "blue"
+
+    def test_custom_template(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_info_card("title", "content", template="green"))
+        assert parsed["header"]["template"] == "green"
+
+    def test_has_enable_forward(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_info_card("title", "content"))
+        assert parsed["config"].get("enable_forward") is True
+
+    def test_wide_screen_mode_true(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_info_card("title", "content"))
+        assert parsed["config"]["wide_screen_mode"] is True
+
+    def test_non_ascii_content_preserved(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_info_card("标题", "中文内容"))
+        elements = parsed["body"]["elements"]
+        md_elements = [e for e in elements if e.get("tag") == "markdown"]
+        assert md_elements[0]["content"] == "中文内容"
+
+
+# ---------------------------------------------------------------------------
+# Emoji titles in card builders
+# ---------------------------------------------------------------------------
+
+
+class TestEmojiTitles:
+    """Default titles should contain emoji prefixes for visual clarity."""
+
+    def test_progress_card_default_title_has_emoji(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_progress_card("", "content"))
+        assert parsed["header"]["title"]["content"] == "⏳ 思考中..."
+
+    def test_streaming_progress_card_default_title_has_emoji(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_streaming_progress_card())
+        assert parsed["header"]["title"]["content"] == "⏳ 思考中..."
+
+    def test_result_card_default_title_has_emoji(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_result_card("content"))
+        assert parsed["header"]["title"]["content"] == "✅ 完成"
+
+    def test_error_card_default_title_has_emoji(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_error_card("error"))
+        assert parsed["header"]["title"]["content"] == "❌ 出错了"
+
+    def test_help_card_title_has_emoji(self):
+        replier, _ = make_replier()
+        parsed = json.loads(replier.build_help_card([]))
+        assert parsed["header"]["title"]["content"] == "📖 帮助"
