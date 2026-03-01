@@ -43,6 +43,10 @@ from nextme.protocol.types import PermOption
 
 logger = logging.getLogger(__name__)
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from nextme.acl.schema import AclApplication, AclUser, Role as AclRole
+
 
 class FeishuReplier:
     """High-level helper for sending messages and interactive cards to Feishu."""
@@ -105,6 +109,39 @@ class FeishuReplier:
             return ""
         message_id: str = response.data.message_id  # type: ignore[union-attr]
         logger.debug("send_card -> message_id=%s", message_id)
+        return message_id
+
+    async def send_to_user(
+        self, open_id: str, content: str, msg_type: str = "interactive"
+    ) -> str:
+        """Send a message directly to a user by open_id (DM push for notifications).
+
+        Uses ``receive_id_type=open_id`` so no pre-existing chat is required.
+        Returns the message_id, or ``""`` on failure.
+        """
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("open_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(open_id)
+                .msg_type(msg_type)
+                .content(content)
+                .build()
+            )
+            .build()
+        )
+        response = await self._client.im.v1.message.acreate(request)
+        if not response.success():
+            logger.error(
+                "send_to_user failed: open_id=%s code=%s msg=%s",
+                open_id,
+                response.code,
+                response.msg,
+            )
+            return ""
+        message_id: str = response.data.message_id  # type: ignore[union-attr]
+        logger.debug("send_to_user -> message_id=%s", message_id)
         return message_id
 
     async def update_card(self, message_id: str, card_json: str) -> None:
@@ -714,5 +751,267 @@ class FeishuReplier:
                     {"tag": "markdown", "content": content},
                 ]
             },
+        }
+        return json.dumps(card, ensure_ascii=False)
+
+    def build_access_denied_card(self, open_id: str) -> str:
+        """Return a card for unauthorized users showing their open_id and apply buttons."""
+        elements: list[dict] = [
+            {
+                "tag": "markdown",
+                "content": (
+                    "您没有权限使用此 Bot。\n\n"
+                    f"您的 open_id: `{open_id}`\n\n"
+                    "如需访问权限，请向管理员申请，或点击下方按钮提交申请："
+                ),
+            },
+            {"tag": "hr"},
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "申请成为 Owner（负责人）"},
+                "type": "primary",
+                "value": {
+                    "action": "acl_apply",
+                    "open_id": open_id,
+                    "role": "owner",
+                },
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "申请成为 Collaborator（协作者）"},
+                "type": "default",
+                "value": {
+                    "action": "acl_apply",
+                    "open_id": open_id,
+                    "role": "collaborator",
+                },
+            },
+        ]
+        card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "⛔ 无访问权限"},
+                "template": "red",
+            },
+            "body": {"elements": elements},
+        }
+        return json.dumps(card, ensure_ascii=False)
+
+    def build_acl_review_notification_card(
+        self,
+        app_id: int,
+        applicant_name: str,
+        applicant_id: str,
+        requested_role: str,
+    ) -> str:
+        """Return a DM notification card sent to reviewers for a new application."""
+        role_label = "Owner（负责人）" if requested_role == "owner" else "Collaborator（协作者）"
+        elements: list[dict] = [
+            {
+                "tag": "markdown",
+                "content": (
+                    f"**申请人:** {applicant_name or applicant_id} (`{applicant_id}`)\n"
+                    f"**申请角色:** {role_label}\n"
+                    f"**申请编号:** #{app_id}"
+                ),
+            },
+            {"tag": "hr"},
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "✅ 批准"},
+                "type": "primary",
+                "value": {
+                    "action": "acl_review",
+                    "app_id": str(app_id),
+                    "decision": "approved",
+                },
+            },
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "❌ 拒绝"},
+                "type": "danger",
+                "value": {
+                    "action": "acl_review",
+                    "app_id": str(app_id),
+                    "decision": "rejected",
+                },
+            },
+        ]
+        card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": f"📋 权限申请 #{app_id}"},
+                "template": "orange",
+            },
+            "body": {"elements": elements},
+        }
+        return json.dumps(card, ensure_ascii=False)
+
+    def build_whoami_card(
+        self,
+        open_id: str,
+        role: AclRole | None,
+        user: AclUser | None,
+    ) -> str:
+        """Return a card showing the user's own info and role."""
+        from nextme.acl.schema import Role as _Role
+
+        if role is None:
+            elements: list[dict] = [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**open_id:** `{open_id}`\n"
+                        "**角色:** 无权限\n\n"
+                        "点击下方按钮申请访问权限："
+                    ),
+                },
+                {"tag": "hr"},
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "申请成为 Owner（负责人）"},
+                    "type": "primary",
+                    "value": {"action": "acl_apply", "open_id": open_id, "role": "owner"},
+                },
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "申请成为 Collaborator（协作者）"},
+                    "type": "default",
+                    "value": {"action": "acl_apply", "open_id": open_id, "role": "collaborator"},
+                },
+            ]
+            template = "red"
+        else:
+            role_labels = {
+                _Role.ADMIN: "Admin（超级管理员）",
+                _Role.OWNER: "Owner（负责人）",
+                _Role.COLLABORATOR: "Collaborator（协作者）",
+            }
+            lines = [
+                f"**open_id:** `{open_id}`",
+                f"**角色:** {role_labels.get(role, role.value)}",
+            ]
+            if user is not None:
+                lines.append(f"**加入时间:** {user.added_at.strftime('%Y-%m-%d')}")
+                lines.append(f"**添加者:** `{user.added_by}`")
+            elements = [{"tag": "markdown", "content": "\n".join(lines)}]
+            template = "blue"
+
+        card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "👤 我的信息"},
+                "template": template,
+            },
+            "body": {"elements": elements},
+        }
+        return json.dumps(card, ensure_ascii=False)
+
+    def build_acl_list_card(
+        self,
+        admin_ids: list[str],
+        owners: list[AclUser],
+        collaborators: list[AclUser],
+    ) -> str:
+        """Return an ACL list card grouped by role."""
+        lines: list[str] = []
+        if admin_ids:
+            lines.append("**Admin（超级管理员）**")
+            for oid in admin_ids:
+                lines.append(f"  • `{oid}`")
+        if owners:
+            lines.append("**Owner（负责人）**")
+            for u in owners:
+                name = u.display_name or u.open_id
+                lines.append(f"  • {name}  `{u.open_id}`  ({u.added_at.strftime('%Y-%m-%d')})")
+        if collaborators:
+            lines.append("**Collaborator（协作者）**")
+            for u in collaborators:
+                name = u.display_name or u.open_id
+                lines.append(f"  • {name}  `{u.open_id}`  ({u.added_at.strftime('%Y-%m-%d')})")
+        if not lines:
+            lines.append("当前没有已授权用户。")
+
+        card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"tag": "plain_text", "content": "🔐 访问控制列表"},
+                "template": "blue",
+            },
+            "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)}]},
+        }
+        return json.dumps(card, ensure_ascii=False)
+
+    def build_acl_pending_card(
+        self,
+        applications: list[AclApplication],
+        viewer_role: AclRole,
+    ) -> str:
+        """Return a card listing pending applications with approve/reject buttons."""
+        from nextme.acl.schema import Role as _Role
+
+        elements: list[dict] = []
+        if not applications:
+            elements.append({"tag": "markdown", "content": "当前没有待审批申请。"})
+        else:
+            for app in applications:
+                role_label = (
+                    "Owner（负责人）"
+                    if app.requested_role.value == "owner"
+                    else "Collaborator（协作者）"
+                )
+                name = app.applicant_name or app.applicant_id
+                info = (
+                    f"**#{app.id}** {name} (`{app.applicant_id}`)\n"
+                    f"申请角色: {role_label}  |  "
+                    f"时间: {app.requested_at.strftime('%Y-%m-%d %H:%M')}"
+                )
+                elements.append({"tag": "markdown", "content": info})
+                can_approve = viewer_role == _Role.ADMIN or (
+                    viewer_role == _Role.OWNER
+                    and app.requested_role.value == "collaborator"
+                )
+                if can_approve:
+                    elements.append(
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": f"✅ 批准 #{app.id}"},
+                            "type": "primary",
+                            "value": {
+                                "action": "acl_review",
+                                "app_id": str(app.id),
+                                "decision": "approved",
+                            },
+                        }
+                    )
+                    elements.append(
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": f"❌ 拒绝 #{app.id}"},
+                            "type": "danger",
+                            "value": {
+                                "action": "acl_review",
+                                "app_id": str(app.id),
+                                "decision": "rejected",
+                            },
+                        }
+                    )
+                elements.append({"tag": "hr"})
+
+        card = {
+            "schema": "2.0",
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": f"📋 待审批申请（{len(applications)}）",
+                },
+                "template": "orange" if applications else "grey",
+            },
+            "body": {"elements": elements},
         }
         return json.dumps(card, ensure_ascii=False)

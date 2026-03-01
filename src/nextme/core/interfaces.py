@@ -66,6 +66,12 @@ class Replier(Protocol):
         """Reply to an existing message with an interactive card.  Returns the new message_id."""
         ...
 
+    async def send_to_user(
+        self, open_id: str, content: str, msg_type: str = "interactive"
+    ) -> str:
+        """Send a message directly to a user by open_id (for DM notifications)."""
+        ...
+
     async def create_card(self, card_json: str) -> str:
         """Create a card via cardkit. Returns card_id, or '' on failure."""
         ...
