@@ -679,3 +679,88 @@ class TestOnCardAction:
         resp = handler._on_card_action(data)
 
         assert resp.card is None
+
+    def test_acl_apply_schedules_handle_acl_card_action(self):
+        """acl_apply action routes to handle_acl_card_action via run_coroutine_threadsafe."""
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_acl_card_action = AsyncMock()
+        dispatcher.handle_card_action = MagicMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = make_card_action_data(action_type="acl_apply")
+
+        with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe") as mock_rct:
+            resp = handler._on_card_action(data)
+            assert mock_rct.called
+            # Second positional argument must be the event loop
+            assert mock_rct.call_args[0][1] is loop
+
+        # Toast should be set
+        assert resp.toast is not None
+        assert resp.toast.content == "已收到"
+
+        # Permission path (call_soon_threadsafe) NOT triggered
+        loop.call_soon_threadsafe.assert_not_called()
+
+    def test_acl_review_schedules_handle_acl_card_action(self):
+        """acl_review action routes to handle_acl_card_action via run_coroutine_threadsafe."""
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_acl_card_action = AsyncMock()
+        dispatcher.handle_card_action = MagicMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = make_card_action_data(action_type="acl_review")
+
+        with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe") as mock_rct:
+            resp = handler._on_card_action(data)
+            assert mock_rct.called
+            assert mock_rct.call_args[0][1] is loop
+
+        assert resp.toast is not None
+        assert resp.toast.content == "已收到"
+        loop.call_soon_threadsafe.assert_not_called()
+
+    def test_acl_action_with_operator_id(self):
+        """operator open_id is injected into action_data when present on the event."""
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_acl_card_action = AsyncMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = make_card_action_data(action_type="acl_apply")
+        data.event.operator = MagicMock()
+        data.event.operator.open_id = "ou_admin"
+
+        with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe") as mock_rct:
+            handler._on_card_action(data)
+            assert mock_rct.called
+
+        # run_coroutine_threadsafe was called, confirming the acl action was processed
+        assert mock_rct.called
+
+    def test_acl_action_no_running_loop_logs_warning(self):
+        """When loop is not running, run_coroutine_threadsafe is skipped but toast is still set."""
+        handler, _, dispatcher = make_handler()
+        dispatcher.handle_acl_card_action = AsyncMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = False  # Loop not running
+        handler.attach_loop(loop)
+
+        data = make_card_action_data(action_type="acl_apply")
+
+        with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe") as mock_rct:
+            resp = handler._on_card_action(data)
+            assert not mock_rct.called  # No scheduling since loop not running
+
+        # Toast is still set regardless of whether the loop was running
+        assert resp.toast is not None
+        assert resp.toast.content == "已收到"

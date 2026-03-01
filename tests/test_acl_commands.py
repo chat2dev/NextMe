@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime
 
 from nextme.acl.db import AclDb
@@ -16,7 +16,10 @@ from nextme.core.commands import (
     handle_acl_pending,
     handle_acl_approve,
     handle_acl_reject,
+    handle_status,
 )
+from nextme.core.session import UserContext
+from nextme.config.schema import Project, Settings
 
 
 @pytest.fixture
@@ -248,3 +251,71 @@ async def test_handle_acl_reject_not_found(manager, replier):
     )
     call_text = replier.send_text.call_args[0][1]
     assert "未找到" in call_text or "not found" in call_text.lower()
+
+
+def _make_user_ctx_with_session(tmp_path):
+    project = Project(name="p", path=str(tmp_path), executor="mock")
+    settings = Settings(task_queue_capacity=5, progress_debounce_seconds=0.0)
+    ctx = UserContext("oc_chat:ou_user")
+    ctx.get_or_create_session(project, settings)
+    return ctx
+
+
+async def test_handle_status_send_card_raises(replier, tmp_path):
+    """handle_status must not re-raise when send_card fails."""
+    replier.send_card = AsyncMock(side_effect=Exception("network error"))
+    user_ctx = _make_user_ctx_with_session(tmp_path)
+    # Should not raise even though send_card raises.
+    await handle_status(user_ctx, replier, "chat_1")
+    replier.send_card.assert_called_once()
+
+
+async def test_handle_whoami_send_card_raises(manager, replier):
+    """handle_whoami must not re-raise when send_card fails."""
+    replier.send_card = AsyncMock(side_effect=Exception("network error"))
+    # ou_nobody has no role (returns None), so it won't try to get_user.
+    await handle_whoami("ou_nobody", manager, replier, "chat_1")
+    replier.send_card.assert_called_once()
+
+
+async def test_handle_acl_add_db_error(manager, replier):
+    """handle_acl_add sends failure message when add_user raises."""
+    with patch.object(manager, "add_user", new=AsyncMock(side_effect=Exception("DB error"))):
+        await handle_acl_add(
+            actor_id="ou_admin",
+            actor_role=Role.ADMIN,
+            target_id="ou_new",
+            target_role_str="collaborator",
+            acl_manager=manager,
+            replier=replier,
+            chat_id="chat_1",
+        )
+    call_text = replier.send_text.call_args[0][1]
+    assert "失败" in call_text or "error" in call_text.lower()
+
+
+async def test_handle_acl_remove_permission_denied(manager, db, replier):
+    """A Collaborator cannot remove another user — permission denied."""
+    await db.add_user("ou_victim", Role.COLLABORATOR, "Victim", "ou_admin")
+    await handle_acl_remove(
+        actor_id="ou_collab",
+        actor_role=Role.COLLABORATOR,
+        target_id="ou_victim",
+        acl_manager=manager,
+        replier=replier,
+        chat_id="chat_1",
+    )
+    call_text = replier.send_text.call_args[0][1]
+    assert "权限不足" in call_text
+
+
+async def test_handle_acl_pending_raises(manager, replier):
+    """handle_acl_pending must not re-raise when send_card fails."""
+    replier.send_card = AsyncMock(side_effect=Exception("network error"))
+    await handle_acl_pending(
+        viewer_role=Role.ADMIN,
+        acl_manager=manager,
+        replier=replier,
+        chat_id="chat_1",
+    )
+    replier.send_card.assert_called_once()
