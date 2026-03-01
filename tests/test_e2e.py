@@ -6,13 +6,15 @@ SessionWorker — runs as real code.
 
 Tests
 -----
-1. test_normal_message_full_flow          — normal message → agent executes → result card
-2. test_help_command_no_runtime           — /help → help card, runtime NOT called
-3. test_new_command_resets_session        — /new after a normal task → no crash
-4. test_second_task_queued               — 2 tasks queued → runtime called twice
-5. test_acl_gate_blocks_unauthorized_user — ACL None → denied card, runtime not called
-6. test_acl_gate_whoami_bypasses_auth    — /whoami with ACL None → no denied card
-7. test_no_project_sends_error           — default_project=None → error text sent
+1. test_normal_message_full_flow                    — normal message → agent executes → result card
+2. test_help_command_no_runtime                     — /help → help card, runtime NOT called
+3. test_new_command_resets_session                  — /new after a normal task → no crash
+4. test_second_task_queued                          — 2 tasks queued → runtime called twice
+5. test_acl_gate_blocks_unauthorized_user           — ACL None → denied card, runtime not called
+6. test_acl_gate_whoami_bypasses_auth               — /whoami with ACL None → no denied card
+7. test_no_project_sends_error                      — default_project=None → error text sent
+8. test_group_chat_unauthorized_gets_dm             — group chat: text prompt in thread + DM, no card in thread
+9. test_acl_apply_by_different_operator_is_ignored  — cross-user apply button click → no application created
 """
 
 from __future__ import annotations
@@ -84,6 +86,7 @@ def make_replier() -> MagicMock:
     # Async send methods
     r.send_text = AsyncMock()
     r.send_card = AsyncMock(return_value="card_msg_id")
+    r.send_to_user = AsyncMock()
     r.send_reaction = AsyncMock()  # dispatcher calls this on every normal task
     r.reply_text = AsyncMock(return_value="thread_msg_id")
     r.reply_card = AsyncMock(return_value="progress_msg_id")
@@ -403,3 +406,78 @@ async def test_no_project_sends_error(settings):
     error_call_args = replier.send_text.call_args
     # The error message should mention configuration.
     assert error_call_args is not None, "send_text should have been called with an error"
+
+
+# ---------------------------------------------------------------------------
+# Test 8: Group chat – unauthorized user gets text prompt in thread + DM
+# ---------------------------------------------------------------------------
+
+
+async def test_group_chat_unauthorized_gets_dm(tmp_project, settings):
+    """Group chat: unauthorized user receives a plain text thread-reply and the
+    apply card is sent as a private DM — no interactive card is posted to the
+    group thread so other members cannot click apply on the user's behalf.
+    """
+    replier = make_replier()
+
+    acl_manager = MagicMock()
+    acl_manager.get_role = AsyncMock(return_value=None)  # everyone denied
+
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acl_manager=acl_manager)
+
+    task = Task(
+        id=str(uuid.uuid4()),
+        content="do something",
+        session_id="oc_group_abc:ou_stranger",
+        reply_fn=AsyncMock(),
+        message_id="om_group_msg",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+    )
+    await dispatcher.dispatch(task)
+
+    # 1. Thread gets a plain-text prompt (no interactive card with buttons)
+    replier.reply_text.assert_called_once()
+    text_args = replier.reply_text.call_args
+    assert text_args.kwargs.get("in_thread") is True, "prompt must be posted in thread"
+    assert "私信" in text_args.args[1], "prompt must mention DM"
+
+    # 2. Apply card sent as DM directly to the unauthorized user
+    replier.send_to_user.assert_called_once()
+    assert replier.send_to_user.call_args.args[0] == "ou_stranger"
+
+    # 3. No card was posted to the group thread
+    replier.reply_card.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 9: handle_acl_card_action – cross-user apply is rejected end-to-end
+# ---------------------------------------------------------------------------
+
+
+async def test_acl_apply_by_different_operator_is_ignored(tmp_project, settings):
+    """handle_acl_card_action: when operator_id differs from open_id (i.e. someone
+    clicked another user's apply button), no application is created and no DM is sent.
+    """
+    replier = make_replier()
+
+    acl_manager = MagicMock()
+    acl_manager.get_role = AsyncMock(return_value=None)
+    acl_manager.create_application = AsyncMock(return_value=(1, None))
+
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acl_manager=acl_manager)
+
+    action_data = {
+        "action": "acl_apply",
+        "open_id": "ou_applicant",      # the card's intended recipient
+        "operator_id": "ou_clicker",    # a different group member who clicked
+        "role": "collaborator",
+    }
+    await dispatcher.handle_acl_card_action(action_data)
+
+    # No application must be created for the card's open_id
+    acl_manager.create_application.assert_not_called()
+    # No notification DM sent
+    replier.send_to_user.assert_not_called()
