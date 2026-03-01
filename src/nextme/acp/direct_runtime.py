@@ -231,7 +231,7 @@ class DirectClaudeRuntime:
             stderr=asyncio.subprocess.PIPE,
             cwd=self._cwd,
             env=env,
-            limit=16 * 1024 * 1024,  # 16 MB — prevent LimitExceededError on large JSON lines
+            limit=64 * 1024 * 1024,  # 64 MB — prevent LimitOverrunError on large JSON lines
         )
         self._current_proc = proc
 
@@ -283,7 +283,23 @@ class DirectClaudeRuntime:
             assert proc.stdout is not None
             deadline = time.monotonic() + timeout_secs
 
-            async for raw_line in proc.stdout:
+            _stdout_iter = proc.stdout.__aiter__()
+            while True:
+                try:
+                    raw_line = await _stdout_iter.__anext__()
+                except StopAsyncIteration:
+                    break
+                except ValueError:
+                    # asyncio wraps LimitOverrunError as ValueError when a
+                    # stdout line exceeds the StreamReader buffer limit.  The
+                    # oversized data is already discarded by the reader; log a
+                    # warning and continue processing subsequent lines.
+                    logger.warning(
+                        "DirectClaudeRuntime[%s]: stdout line exceeded buffer"
+                        " limit — skipping oversized chunk",
+                        self._session_id,
+                    )
+                    continue
                 if self._cancel_flag:
                     logger.info(
                         "DirectClaudeRuntime[%s]: cancelled mid-stream", self._session_id

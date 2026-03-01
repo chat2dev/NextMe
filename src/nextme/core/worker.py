@@ -268,6 +268,13 @@ class SessionWorker:
         self._run_card = None
         self._last_streaming_update = 0.0
 
+        # ── DEBUG ① 用户原始输入 ──────────────────────────────────────────
+        logger.debug(
+            "SessionWorker[%s]: ━━━ [USER-INPUT] ━━━\n%s",
+            self._session.context_id,
+            task.content,
+        )
+
         # group → thread reply; p2p → quote reply; no message_id → top-level.
         in_thread = self._active_in_thread
 
@@ -422,17 +429,25 @@ class SessionWorker:
                         count=len(facts),
                         facts=facts,
                     )
+                    # ── DEBUG ④ 注入的长期 memory ──────────────────────────
+                    logger.debug(
+                        "SessionWorker[%s]: ━━━ [MEMORY-INJECT] %d facts ━━━\n%s",
+                        self._session.context_id,
+                        len(facts),
+                        rendered,
+                    )
                     task = dataclasses.replace(
                         task,
                         content=f"{rendered}\n\n[用户消息]\n{task.content}",
                     )
-                    logger.debug(
-                        "SessionWorker[%s]: injected %d memory facts via template",
-                        self._session.context_id,
-                        len(facts),
-                    )
 
             # Step 4 — Execute.
+            # ── DEBUG ② 发给 Executor(Agent) 的原始输入 ─────────────────
+            logger.debug(
+                "SessionWorker[%s]: ━━━ [AGENT-INPUT] ━━━\n%s",
+                self._session.context_id,
+                task.content,
+            )
             try:
                 final_content = await runtime.execute(
                     task=task,
@@ -453,6 +468,13 @@ class SessionWorker:
                 await self._send_error(task, str(exc))
                 return
 
+            # ── DEBUG ③ Executor(Agent) 返回的原始消息 ──────────────────
+            logger.debug(
+                "SessionWorker[%s]: ━━━ [AGENT-OUTPUT] ━━━\n%s",
+                self._session.context_id,
+                final_content,
+            )
+
             # Sync actual_id back to session after execute.
             if runtime.actual_id:
                 self._session.actual_id = runtime.actual_id
@@ -470,6 +492,17 @@ class SessionWorker:
         # that the agent can update memory at any point in a conversation.
         user_id = self._session.context_id.rsplit(":", 1)[-1]
         memory_ops, final_content = self._extract_and_strip_memory(final_content)
+        # ── DEBUG ⑤ Agent 返回的 memory 操作 ────────────────────────────
+        if memory_ops:
+            logger.debug(
+                "SessionWorker[%s]: ━━━ [MEMORY-OPS] %d op(s) ━━━\n%s",
+                self._session.context_id,
+                len(memory_ops),
+                "\n".join(
+                    f"  [{i}] op={op.op} idx={op.idx} text={op.text!r}"
+                    for i, op in enumerate(memory_ops)
+                ),
+            )
         if memory_ops and self._memory_manager is not None:
             for op in memory_ops:
                 if op.op == "add":
