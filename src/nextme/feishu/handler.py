@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Protocol
@@ -26,6 +27,11 @@ from nextme.feishu.dedup import MessageDedup
 from nextme.protocol.types import Reply, Task
 
 logger = logging.getLogger(__name__)
+
+# Feishu group-chat text messages encode @mentions as "@_user_1", "@_user_2", …
+# at the beginning of the text field.  Strip them so commands like /help are
+# recognised regardless of whether the user typed "@Bot /help" or just "/help".
+_MENTION_PREFIX_RE = re.compile(r"^(?:@_user_\d+\s*)+")
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +343,10 @@ class MessageHandler:
             return ""
 
         if msg_type == "text":
-            return str(content_obj.get("text", "")).strip()
+            text = str(content_obj.get("text", "")).strip()
+            # Strip leading @mention placeholders inserted by Feishu for group chats.
+            text = _MENTION_PREFIX_RE.sub("", text).strip()
+            return text
 
         if msg_type == "post":
             # Rich-text (post) structure:

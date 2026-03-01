@@ -196,6 +196,46 @@ class TestExtractTextFromMessage:
         result = handler._extract_text_from_message(msg)
         assert result == ""
 
+    def test_text_type_strips_single_mention_prefix(self):
+        """Group chat: '@_user_1 /help' → '/help'."""
+        handler, _, _ = make_handler()
+        msg = make_message_obj(
+            message_type="text",
+            content_json=json.dumps({"text": "@_user_1 /help", "mentions": []}),
+        )
+        result = handler._extract_text_from_message(msg)
+        assert result == "/help"
+
+    def test_text_type_strips_multiple_mention_prefixes(self):
+        """Group chat with multiple leading @mentions."""
+        handler, _, _ = make_handler()
+        msg = make_message_obj(
+            message_type="text",
+            content_json=json.dumps({"text": "@_user_1 @_user_2 /status"}),
+        )
+        result = handler._extract_text_from_message(msg)
+        assert result == "/status"
+
+    def test_text_type_mid_mention_preserved(self):
+        """@mentions that appear in the middle of the text are NOT stripped."""
+        handler, _, _ = make_handler()
+        msg = make_message_obj(
+            message_type="text",
+            content_json=json.dumps({"text": "@_user_1 explain @_user_2's code"}),
+        )
+        result = handler._extract_text_from_message(msg)
+        assert result == "explain @_user_2's code"
+
+    def test_text_type_mention_only_returns_empty(self):
+        """@mention with no trailing text → empty string (nothing to dispatch)."""
+        handler, _, _ = make_handler()
+        msg = make_message_obj(
+            message_type="text",
+            content_json=json.dumps({"text": "@_user_1 "}),
+        )
+        result = handler._extract_text_from_message(msg)
+        assert result == ""
+
 
 # ---------------------------------------------------------------------------
 # _extract_text convenience shim (legacy dict-based)
