@@ -37,7 +37,7 @@ from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
 from ..config.schema import Settings
-from ..protocol.types import PermissionChoice, PermissionRequest, Task
+from ..protocol.types import PermissionChoice, PermissionRequest, Task, TaskTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -281,7 +281,9 @@ class DirectClaudeRuntime:
 
         try:
             assert proc.stdout is not None
-            deadline = time.monotonic() + timeout_secs
+            deadline: Optional[float] = (
+                time.monotonic() + timeout_secs if timeout_secs > 0 else None
+            )
 
             _stdout_iter = proc.stdout.__aiter__()
             while True:
@@ -307,9 +309,9 @@ class DirectClaudeRuntime:
                     proc.terminate()
                     return "".join(accumulated)
 
-                if time.monotonic() > deadline:
+                if deadline is not None and time.monotonic() > deadline:
                     proc.terminate()
-                    raise RuntimeError(
+                    raise TaskTimeoutError(
                         f"DirectClaudeRuntime[{self._session_id}]: timed out after {task.timeout}"
                     )
 

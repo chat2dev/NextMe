@@ -34,6 +34,7 @@ from ..protocol.types import (
     PermissionRequest,
     PermOption,
     Task,
+    TaskTimeoutError,
 )
 from .client import ACPClient
 from .protocol import (
@@ -395,20 +396,34 @@ class ACPRuntime:
                     )
 
         timeout_secs = task.timeout.total_seconds()
+        # Use a wall-clock deadline so the total execution time is bounded,
+        # not just the time between consecutive messages.
+        deadline = time.monotonic() + timeout_secs if timeout_secs > 0 else None
 
         while True:
             if task.canceled:
                 await self.cancel()
                 return "".join(accumulated)
 
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    await self.cancel()
+                    raise TaskTimeoutError(
+                        f"ACPRuntime[{self._session_id}]: timed out after {task.timeout}"
+                    )
+            else:
+                remaining = None
+
             try:
                 msg = await asyncio.wait_for(
-                    self._msg_queue.get(), timeout=timeout_secs
+                    self._msg_queue.get(),
+                    timeout=remaining,
                 )
             except asyncio.TimeoutError:
-                raise RuntimeError(
-                    f"ACPRuntime[{self._session_id}]: timed out waiting for "
-                    f"prompt response after {task.timeout}"
+                await self.cancel()
+                raise TaskTimeoutError(
+                    f"ACPRuntime[{self._session_id}]: timed out after {task.timeout}"
                 )
 
             if isinstance(msg, Exception):

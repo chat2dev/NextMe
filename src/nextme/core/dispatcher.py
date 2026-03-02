@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import timedelta
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -273,6 +274,11 @@ class TaskDispatcher:
         # ------------------------------------------------------------------
         # 3. Normal task — enqueue and ensure worker is running.
         # ------------------------------------------------------------------
+        # Override task timeout from the resolved project config.
+        project = self._config.get_project(session.project_name)
+        if project is not None and project.task_timeout_seconds > 0:
+            task.timeout = timedelta(seconds=project.task_timeout_seconds)
+
         try:
             session.task_queue.put_nowait(task)
             session.pending_tasks.append(task)

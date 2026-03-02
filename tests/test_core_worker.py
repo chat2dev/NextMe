@@ -1391,3 +1391,68 @@ async def test_worker_memory_injection_uses_numbered_format(
     )
     await worker._execute_task(make_task("hello")[0])
     assert "0. use uv" in captured_task.get("content", "")
+
+
+# ---------------------------------------------------------------------------
+# Task timeout tests
+# ---------------------------------------------------------------------------
+
+async def test_worker_task_timeout_sends_timeout_card(
+    session, acp_registry, replier, settings, path_lock_registry
+):
+    """When runtime raises TaskTimeoutError, worker sends a timeout card."""
+    from nextme.protocol.types import TaskTimeoutError
+    registry, mock_runtime = acp_registry
+    mock_runtime.execute = AsyncMock(side_effect=TaskTimeoutError("timed out after 0:00:05"))
+
+    worker = SessionWorker(session, registry, replier, settings, path_lock_registry)
+    task, _ = make_task("slow task")
+    await worker._execute_task(task)
+
+    # Error card should be sent with timeout wording
+    replier.build_error_card.assert_called_once()
+    call_args = replier.build_error_card.call_args
+    assert "超时" in call_args[0][0] or "超时" in call_args[1].get("title", "")
+    assert "⏰" in call_args[1].get("title", "")
+
+
+async def test_worker_task_timeout_preserves_session(
+    session, acp_registry, replier, settings, path_lock_registry
+):
+    """After TaskTimeoutError the session is not reset — context is preserved."""
+    from nextme.protocol.types import TaskTimeoutError
+    registry, mock_runtime = acp_registry
+    mock_runtime.actual_id = "sess-timeout"
+    mock_runtime.execute = AsyncMock(side_effect=TaskTimeoutError("timed out"))
+
+    worker = SessionWorker(session, registry, replier, settings, path_lock_registry)
+    # Mark session with an actual_id before executing
+    session.actual_id = "sess-timeout"
+    task, _ = make_task("heavy work")
+    await worker._execute_task(task)
+
+    # Session actual_id must be preserved (not reset)
+    assert session.actual_id == "sess-timeout"
+    # Status ends as DONE (not CANCELED, not re-raised)
+    assert session.status == TaskStatus.DONE
+
+
+async def test_worker_send_timeout_includes_elapsed(
+    session, acp_registry, replier, settings, path_lock_registry
+):
+    """The timeout card message includes the elapsed time."""
+    from nextme.protocol.types import TaskTimeoutError
+    registry, mock_runtime = acp_registry
+
+    async def slow_execute(task, on_progress, on_permission):
+        raise TaskTimeoutError("timed out")
+
+    mock_runtime.execute = slow_execute
+    worker = SessionWorker(session, registry, replier, settings, path_lock_registry)
+    task, _ = make_task("work")
+    await worker._execute_task(task)
+
+    call_args = replier.build_error_card.call_args
+    error_msg = call_args[0][0]
+    # Must mention elapsed time (e.g. "0s", "1s", ...)
+    assert "s" in error_msg  # _format_elapsed always ends in 's'

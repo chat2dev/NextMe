@@ -35,6 +35,7 @@ from ..protocol.types import (
     ReplyType,
     Task,
     TaskStatus,
+    TaskTimeoutError,
 )
 from ..feishu.progress_card import RunProgressCard
 from .interfaces import Replier
@@ -514,6 +515,16 @@ class SessionWorker:
                 self._session.status = TaskStatus.CANCELED
                 await self._send_cancelled(task)
                 raise
+            except TaskTimeoutError:
+                logger.warning(
+                    "SessionWorker[%s]: task %s timed out after %.0fs",
+                    self._session.context_id,
+                    task.id,
+                    time.monotonic() - self._task_start,
+                )
+                self._session.status = TaskStatus.DONE
+                await self._send_timeout(task)
+                return
             except Exception as exc:
                 logger.error(
                     "SessionWorker[%s]: ACPRuntime.execute failed: %s",
@@ -927,6 +938,27 @@ class SessionWorker:
             tool_count=tool_count,
         )
         await self._update_or_reply(task, result_card)
+
+    async def _send_timeout(self, task: Task) -> None:
+        """Update the progress card to show a task-timeout notice.
+
+        The session and ACP runtime are intentionally *not* reset so the user
+        can continue the conversation in the same context after the timeout.
+        """
+        elapsed_s = int(time.monotonic() - self._task_start)
+        elapsed_str = _format_elapsed(elapsed_s)
+        timeout_card = self._replier.build_error_card(
+            f"任务执行超时（已运行 {elapsed_str}），会话上下文已保留，可继续发消息。",
+            title=f"⏰ 超时 {self._proj}",
+        )
+        try:
+            await self._update_or_reply(task, timeout_card)
+        except Exception:
+            logger.exception(
+                "SessionWorker[%s]: failed to send timeout reply for task %s",
+                self._session.context_id,
+                task.id,
+            )
 
     async def _send_error(self, task: Task, error: str) -> None:
         """Update the progress card to show an error."""

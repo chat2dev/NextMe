@@ -400,3 +400,59 @@ async def test_acl_reject_routes_to_handler(tmp_path):
         mock_reject.assert_called_once()
         kwargs = mock_reject.call_args.kwargs
         assert kwargs["app_id"] == 42
+
+
+# ---------------------------------------------------------------------------
+# task_timeout_seconds injection
+# ---------------------------------------------------------------------------
+
+async def test_dispatcher_injects_project_task_timeout(tmp_path):
+    """Dispatcher overrides task.timeout from the project's task_timeout_seconds."""
+    replier = make_replier()
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    project = Project(
+        name="test", path=str(project_dir), executor="mock",
+        task_timeout_seconds=600,   # 10 minutes
+    )
+    config = AppConfig(projects=[project])
+    settings = Settings(task_queue_capacity=10, progress_debounce_seconds=0.0)
+    feishu_client = MagicMock()
+    feishu_client.get_replier = MagicMock(return_value=replier)
+    d = TaskDispatcher(
+        config=config, settings=settings,
+        session_registry=SessionRegistry(), acp_registry=ACPRuntimeRegistry(),
+        path_lock_registry=PathLockRegistry(), feishu_client=feishu_client,
+    )
+
+    task = make_task("hello")
+    await d.dispatch(task)
+
+    assert task.timeout == timedelta(seconds=600)
+
+
+async def test_dispatcher_zero_task_timeout_keeps_task_default(tmp_path):
+    """task_timeout_seconds=0 means no override — task keeps its default timeout."""
+    replier = make_replier()
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    project = Project(
+        name="test", path=str(project_dir), executor="mock",
+        task_timeout_seconds=0,     # disabled
+    )
+    config = AppConfig(projects=[project])
+    settings = Settings(task_queue_capacity=10, progress_debounce_seconds=0.0)
+    feishu_client = MagicMock()
+    feishu_client.get_replier = MagicMock(return_value=replier)
+    d = TaskDispatcher(
+        config=config, settings=settings,
+        session_registry=SessionRegistry(), acp_registry=ACPRuntimeRegistry(),
+        path_lock_registry=PathLockRegistry(), feishu_client=feishu_client,
+    )
+
+    original_timeout = timedelta(seconds=10)
+    task = make_task("hello")
+    task.timeout = original_timeout
+    await d.dispatch(task)
+
+    assert task.timeout == original_timeout

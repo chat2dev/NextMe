@@ -9,6 +9,10 @@ from enum import Enum
 from typing import Callable, Optional
 
 
+class TaskTimeoutError(Exception):
+    """Raised when a task exceeds its configured wall-clock execution time limit."""
+
+
 class TaskStatus(str, Enum):
     IDLE = "idle"
     QUEUED = "queued"

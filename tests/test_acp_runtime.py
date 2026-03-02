@@ -16,7 +16,7 @@ from nextme.acp.runtime import (
 )
 from nextme.acp.protocol import PermissionOption
 from nextme.config.schema import Settings
-from nextme.protocol.types import Task, PermissionChoice, PermOption, PermissionRequest
+from nextme.protocol.types import Task, PermissionChoice, PermOption, PermissionRequest, TaskTimeoutError
 
 
 # ---------------------------------------------------------------------------
@@ -630,7 +630,7 @@ async def test_execute_timeout_raises(runtime):
     # Only session/new response; prompt response never arrives
     await queue.put({"jsonrpc": "2.0", "id": 1, "result": {"sessionId": "s1"}})
 
-    with pytest.raises(RuntimeError, match="timed out"):
+    with pytest.raises(TaskTimeoutError, match="timed out"):
         await runtime.execute(task, on_progress, on_permission)
 
 

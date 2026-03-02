@@ -8,7 +8,8 @@
     {
       "name": "my-project",
       "path": "/absolute/path/to/your/project",
-      "executor": "claude"
+      "executor": "claude",
+      "task_timeout_seconds": 28800
     }
   ]
 }
