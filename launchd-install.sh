@@ -94,6 +94,12 @@ if launchctl list | grep -q "$LABEL" 2>/dev/null; then
     launchctl unload "$PLIST_PATH" 2>/dev/null || true
 fi
 
+# 构建 launchd PATH：确保 claude CLI 等工具可被找到
+LAUNCH_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+[[ -d "$HOME/.local/bin" ]] && LAUNCH_PATH="$HOME/.local/bin:$LAUNCH_PATH"
+[[ -d "/opt/homebrew/bin" ]] && LAUNCH_PATH="/opt/homebrew/bin:/opt/homebrew/sbin:$LAUNCH_PATH"
+echo -e "${GREEN}✓  launchd PATH：$LAUNCH_PATH${NC}"
+
 # 创建日志目录
 mkdir -p "$LOG_DIR"
 echo -e "${GREEN}✓  日志目录：$LOG_DIR${NC}"
@@ -121,9 +127,11 @@ cat > "$PLIST_PATH" << EOF
         <string>up</string>
     </array>
 
-    <!-- 禁用代理，避免 Lark SDK 走系统 SOCKS 代理 -->
+    <!-- 补全 PATH，确保 claude CLI 可被找到；禁用代理避免 SOCKS 错误 -->
     <key>EnvironmentVariables</key>
     <dict>
+        <key>PATH</key>
+        <string>${LAUNCH_PATH}</string>
         <key>ALL_PROXY</key>
         <string></string>
         <key>HTTPS_PROXY</key>
