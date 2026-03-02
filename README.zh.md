@@ -203,6 +203,70 @@ nextme up --directory /path/to/project   # 覆盖项目目录
 nextme down
 ```
 
+**快捷脚本**（项目根目录）：
+
+```bash
+./start.sh           # 封装 nextme up，带检查和彩色输出
+./stop.sh            # 封装 nextme down
+```
+
+### 作为系统服务运行
+
+使用 `nohup &` 或在终端会话中启动 NextMe，一旦系统休眠或会话结束服务就会停止。建议将其注册为后台系统服务。
+
+#### macOS — launchd（推荐）
+
+```bash
+./launchd-install.sh            # 安装并立即启动
+./launchd-install.sh --uninstall
+```
+
+plist 文件写入 `~/Library/LaunchAgents/com.nextme.bot.plist`。
+NextMe 在登录后自动启动，崩溃后自动重启（冷却 10 秒），锁屏期间保持网络连接。
+
+```bash
+tail -f ~/.nextme/logs/nextme.log          # 查看日志
+launchctl list | grep nextme               # 检查状态
+launchctl stop  com.nextme.bot             # 停止
+launchctl start com.nextme.bot             # 启动
+```
+
+#### Linux — systemd 用户服务
+
+```bash
+./systemd-install.sh            # 安装并立即启动
+./systemd-install.sh --uninstall
+```
+
+unit 文件写入 `~/.config/systemd/user/nextme.service`。
+脚本会自动执行 `loginctl enable-linger`，使服务在注销后也能持续运行（若需要 sudo 权限会有提示）。
+
+```bash
+tail -f ~/.nextme/logs/nextme.log          # 查看日志
+systemctl --user status nextme             # 检查状态
+systemctl --user stop   nextme             # 停止
+systemctl --user start  nextme             # 启动
+```
+
+#### Windows — 计划任务
+
+在**管理员权限**的 PowerShell 中运行：
+
+```powershell
+.\windows-service-install.ps1            # 安装并立即启动
+.\windows-service-install.ps1 -Uninstall
+```
+
+注册名为 **"NextMe Bot"** 的计划任务，登录后自动启动，崩溃后自动重启（冷却 30 秒）。
+同时生成包装脚本 `nextme-wrapper.ps1`，将输出重定向到日志文件。
+
+```powershell
+Get-Content "$env:USERPROFILE\.nextme\logs\nextme.log" -Wait -Tail 50   # 查看日志
+Get-ScheduledTask  -TaskName "NextMe Bot"      # 检查状态
+Stop-ScheduledTask -TaskName "NextMe Bot"      # 停止
+Start-ScheduledTask -TaskName "NextMe Bot"     # 启动
+```
+
 ---
 
 ## 安全性

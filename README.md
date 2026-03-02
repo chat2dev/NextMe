@@ -210,6 +210,63 @@ nextme down
 ./stop.sh            # wraps nextme down
 ```
 
+### Running as a system service
+
+Running NextMe with `nohup &` or inside a terminal session means it stops when the machine sleeps or the session ends. Register it as a proper background service instead.
+
+#### macOS — launchd (recommended)
+
+```bash
+./launchd-install.sh            # install & start
+./launchd-install.sh --uninstall
+```
+
+The LaunchAgent plist is written to `~/Library/LaunchAgents/com.nextme.bot.plist`.
+NextMe starts at login, restarts automatically on crash (10 s cool-down), and keeps network connections alive through screen lock.
+
+```bash
+tail -f ~/.nextme/logs/nextme.log          # follow logs
+launchctl list | grep nextme               # check status
+launchctl stop  com.nextme.bot             # stop
+launchctl start com.nextme.bot             # start
+```
+
+#### Linux — systemd user service
+
+```bash
+./systemd-install.sh            # install & start
+./systemd-install.sh --uninstall
+```
+
+The unit file is written to `~/.config/systemd/user/nextme.service`.
+`loginctl enable-linger` is applied automatically so the service keeps running even when you log out (requires `sudo` if not supported without it).
+
+```bash
+tail -f ~/.nextme/logs/nextme.log          # follow logs
+systemctl --user status nextme             # check status
+systemctl --user stop   nextme             # stop
+systemctl --user start  nextme             # start
+```
+
+#### Windows — Task Scheduler
+
+Run the following in an elevated PowerShell session:
+
+```powershell
+.\windows-service-install.ps1            # install & start
+.\windows-service-install.ps1 -Uninstall
+```
+
+A scheduled task named **"NextMe Bot"** is registered to start at login and restart automatically on failure (30 s cool-down).
+A thin wrapper script (`nextme-wrapper.ps1`) is generated in the project root to redirect output to the log file.
+
+```powershell
+Get-Content "$env:USERPROFILE\.nextme\logs\nextme.log" -Wait -Tail 50   # follow logs
+Get-ScheduledTask  -TaskName "NextMe Bot"      # check status
+Stop-ScheduledTask -TaskName "NextMe Bot"      # stop
+Start-ScheduledTask -TaskName "NextMe Bot"     # start
+```
+
 ---
 
 ## Security
