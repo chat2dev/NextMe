@@ -3,6 +3,10 @@
 Wraps ``lark_oapi.ws.Client`` (which handles reconnection internally) and
 provides lifecycle management (start / stop) plus a factory for
 ``FeishuReplier`` instances.
+
+When the Lark SDK's internal event loop crashes (e.g. macOS suspends the
+process on screen lock), this wrapper automatically recreates the WS client
+and reconnects instead of letting the whole process die.
 """
 
 from __future__ import annotations
@@ -18,6 +22,10 @@ from nextme.feishu.handler import MessageHandler
 from nextme.feishu.reply import FeishuReplier
 
 logger = logging.getLogger(__name__)
+
+# Delay between automatic reconnect attempts after the inner event loop dies.
+_RECONNECT_BASE_DELAY = 2.0  # seconds
+_RECONNECT_MAX_DELAY = 60.0  # seconds
 
 
 class FeishuClient:
@@ -40,7 +48,7 @@ class FeishuClient:
             "WARNING": lark.LogLevel.WARNING,
             "ERROR": lark.LogLevel.ERROR,
         }
-        sdk_log_level = _log_level_map.get(
+        self._sdk_log_level = _log_level_map.get(
             settings.log_level.upper(), lark.LogLevel.INFO
         )
 
@@ -52,30 +60,41 @@ class FeishuClient:
             .build()
         )
 
-        # WebSocket client (handles long-connection + reconnect automatically).
-        event_dispatcher = handler.build_event_dispatcher()
-        self._ws_client: lark.ws.Client = lark.ws.Client(
-            config.app_id,
-            config.app_secret,
-            event_handler=event_dispatcher,
-            log_level=sdk_log_level,
-        )
-
+        self._ws_client: Optional[lark.ws.Client] = None
         self._stop_event: asyncio.Event = asyncio.Event()
         # The fresh event loop used by the ws thread; set during start(), used by stop().
         self._ws_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _build_ws_client(self) -> lark.ws.Client:
+        """Create a fresh ``lark.ws.Client`` instance."""
+        event_dispatcher = self._handler.build_event_dispatcher()
+        return lark.ws.Client(
+            self._config.app_id,
+            self._config.app_secret,
+            event_handler=event_dispatcher,
+            log_level=self._sdk_log_level,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Start the WebSocket connection.
+        """Start the WebSocket connection with automatic reconnect.
 
         Registers the current event loop with the handler so that message
         callbacks can schedule coroutines onto it, then runs the lark WS
         client in a thread executor (``lark.ws.Client.start()`` is a blocking
-        call).  Returns only after ``stop()`` is called.
+        call).
+
+        If the Lark SDK's inner event loop crashes (e.g. macOS suspends the
+        process during screen lock), this method recreates the WS client and
+        reconnects with exponential backoff.  Returns only after ``stop()``
+        is called.
         """
         loop = asyncio.get_running_loop()
         self._handler.attach_loop(loop)
@@ -110,17 +129,50 @@ class FeishuClient:
                 _lark_ws_mod.loop = prev
                 fresh.close()
 
-        try:
-            await loop.run_in_executor(None, _run_ws)
-        except asyncio.CancelledError:
-            logger.info("FeishuClient.start() cancelled")
-            raise
-        except Exception:
-            logger.exception("FeishuClient WebSocket error")
-            raise
-        finally:
-            self._stop_event.set()
-            logger.info("FeishuClient WebSocket connection closed")
+        delay = _RECONNECT_BASE_DELAY
+        while not self._stop_event.is_set():
+            # Build a fresh WS client for each attempt so the Lark SDK's
+            # internal state (connection, tasks, etc.) is fully reset.
+            self._ws_client = self._build_ws_client()
+
+            try:
+                await loop.run_in_executor(None, _run_ws)
+            except asyncio.CancelledError:
+                logger.info("FeishuClient.start() cancelled")
+                raise
+            except Exception:
+                if self._stop_event.is_set():
+                    break
+                logger.exception(
+                    "FeishuClient WebSocket error, reconnecting in %.0fs", delay,
+                )
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(), timeout=delay,
+                    )
+                    # stop_event was set during the wait → exit
+                    break
+                except asyncio.TimeoutError:
+                    pass
+                delay = min(delay * 2, _RECONNECT_MAX_DELAY)
+                continue
+
+            # _run_ws returned without exception — the inner event loop
+            # was stopped (e.g. macOS sleep / screen lock).
+            if self._stop_event.is_set():
+                break
+            logger.warning(
+                "Feishu WebSocket event loop exited unexpectedly, "
+                "reconnecting in %.0fs", delay,
+            )
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+                break
+            except asyncio.TimeoutError:
+                pass
+            delay = min(delay * 2, _RECONNECT_MAX_DELAY)
+
+        logger.info("FeishuClient WebSocket connection closed")
 
     async def stop(self) -> None:
         """Gracefully disconnect the WebSocket connection.
@@ -133,14 +185,20 @@ class FeishuClient:
         2. Stopping the thread's private event loop via
            ``call_soon_threadsafe(loop.stop)`` — this unblocks
            ``loop.run_until_complete(_select())``.
+        3. Setting ``_stop_event`` to break out of our reconnect loop.
         """
         logger.info("Stopping Feishu WebSocket client")
 
-        # Disable reconnection so the client doesn't fight the shutdown.
-        try:
-            self._ws_client._auto_reconnect = False
-        except Exception:
-            pass
+        # Signal our reconnect loop to stop.
+        self._stop_event.set()
+
+        # Disable SDK-level reconnection so the client doesn't fight the shutdown.
+        ws_client = self._ws_client
+        if ws_client is not None:
+            try:
+                ws_client._auto_reconnect = False
+            except Exception:
+                pass
 
         # Stop the thread's event loop to unblock _select().
         ws_loop = self._ws_loop
@@ -150,8 +208,6 @@ class FeishuClient:
                 logger.debug("Sent stop() to ws thread event loop")
             except Exception:
                 logger.exception("Error stopping ws thread event loop")
-
-        self._stop_event.set()
 
     # ------------------------------------------------------------------
     # Factory
