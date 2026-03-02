@@ -121,6 +121,25 @@ cat > "$PLIST_PATH" << EOF
         <string>up</string>
     </array>
 
+    <!-- 禁用代理，避免 Lark SDK 走系统 SOCKS 代理 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ALL_PROXY</key>
+        <string></string>
+        <key>HTTPS_PROXY</key>
+        <string></string>
+        <key>HTTP_PROXY</key>
+        <string></string>
+        <key>all_proxy</key>
+        <string></string>
+        <key>https_proxy</key>
+        <string></string>
+        <key>http_proxy</key>
+        <string></string>
+        <key>no_proxy</key>
+        <string>*</string>
+    </dict>
+
     <!-- 工作目录 -->
     <key>WorkingDirectory</key>
     <string>${PROJECT_DIR}</string>
