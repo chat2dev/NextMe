@@ -169,6 +169,10 @@ cat > "$PLIST_PATH" << EOF
     <!-- 重启最小间隔（秒），防止崩溃循环 -->
     <key>ThrottleInterval</key>
     <integer>10</integer>
+
+    <!-- 提高调度优先级，减少锁屏后被节流的概率 -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
 </dict>
 </plist>
 EOF

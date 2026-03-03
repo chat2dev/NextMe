@@ -392,6 +392,13 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     logger.info("Background tasks started")
 
     # ------------------------------------------------------------------
+    # Step 9.5: Acquire macOS power assertion (prevent idle sleep)
+    # ------------------------------------------------------------------
+    from .power import PowerAssertion  # noqa: PLC0415
+
+    power_assertion = PowerAssertion.acquire("NextMe Feishu WebSocket keepalive")
+
+    # ------------------------------------------------------------------
     # Step 10: Register signal handlers
     # ------------------------------------------------------------------
     shutdown_event = asyncio.Event()
@@ -490,6 +497,9 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
                 await asyncio.wait_for(bg_task, timeout=5)
             except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
+
+    # 8. Release macOS power assertion.
+    power_assertion.release()
 
     # Remove PID file on clean shutdown.
     try:
