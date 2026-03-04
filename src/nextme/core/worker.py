@@ -516,13 +516,27 @@ class SessionWorker:
                 await self._send_cancelled(task)
                 raise
             except TaskTimeoutError:
+                elapsed = time.monotonic() - self._task_start
                 logger.warning(
                     "SessionWorker[%s]: task %s timed out after %.0fs",
                     self._session.context_id,
                     task.id,
-                    time.monotonic() - self._task_start,
+                    elapsed,
                 )
                 self._session.status = TaskStatus.DONE
+                # Stop and evict the runtime subprocess so the next message
+                # starts with a fresh process.  acp_registry.remove() calls
+                # runtime.stop() internally, which sends SIGTERM then SIGKILL.
+                # session.actual_id is preserved so the next ensure_ready()
+                # will --resume the Claude Code session and maintain context.
+                runtime_key = f"{self._session.context_id}:{self._session.project_name}"
+                try:
+                    await self._acp_registry.remove(runtime_key)
+                except Exception:
+                    logger.exception(
+                        "SessionWorker[%s]: failed to stop runtime after timeout",
+                        self._session.context_id,
+                    )
                 await self._send_timeout(task)
                 return
             except Exception as exc:
@@ -948,7 +962,8 @@ class SessionWorker:
         elapsed_s = int(time.monotonic() - self._task_start)
         elapsed_str = _format_elapsed(elapsed_s)
         timeout_card = self._replier.build_error_card(
-            f"任务执行超时（已运行 {elapsed_str}），会话上下文已保留，可继续发消息。",
+            f"任务执行超时（已运行 {elapsed_str}），Agent 已停止。"
+            f"会话上下文已保留，继续发消息将从当前进度续接；或发 /new 开启新会话。",
             title=f"⏰ 超时 {self._proj}",
         )
         try:

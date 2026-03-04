@@ -9,7 +9,7 @@
       "name": "my-project",
       "path": "/absolute/path/to/your/project",
       "executor": "claude",
-      "task_timeout_seconds": 28800
+      "task_timeout_seconds": 7200
     }
   ]
 }

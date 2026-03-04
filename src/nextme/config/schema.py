@@ -17,11 +17,11 @@ class Project(BaseModel):
     executor_args: list[str] = Field(default_factory=list)
     """Extra arguments appended to *executor* when spawning the subprocess.
     Example: ``["acp", "serve"]`` for ``coco acp serve``."""
-    task_timeout_seconds: int = Field(default=28800)
+    task_timeout_seconds: int = Field(default=7200)
     """Maximum wall-clock execution time for a single task (seconds).
-    When exceeded the task is aborted, the session and context are preserved,
-    and the user receives a timeout notification.
-    Set to 0 to disable the limit.  Default: 28800 (8 hours)."""
+    When exceeded the task is aborted, the runtime subprocess is restarted,
+    the session context is preserved, and the user receives a timeout notification.
+    Set to 0 to disable the limit.  Default: 7200 (2 hours)."""
 
     @field_validator("path")
     @classmethod
