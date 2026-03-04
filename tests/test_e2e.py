@@ -18,6 +18,9 @@ Tests
 10. test_review_card_disabled_after_approve          — approve → update_card called on review notification
 11. test_review_card_disabled_after_reject           — reject → update_card called on review notification
 12. test_path_lock_contention_shows_waiting_card     — 2nd user on same project sees "候补中" then "思考中"
+13. test_task_timeout_sends_timeout_card             — runtime raises TaskTimeoutError → timeout card sent, result card NOT sent
+14. test_task_timeout_evicts_runtime_from_registry   — after timeout, runtime is removed from ACPRuntimeRegistry
+15. test_task_timeout_session_preserved_next_message_succeeds — actual_id preserved; 2nd task after timeout succeeds
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ from nextme.config.schema import AppConfig, Project, Settings
 from nextme.core.dispatcher import TaskDispatcher
 from nextme.core.path_lock import PathLockRegistry
 from nextme.core.session import SessionRegistry
-from nextme.protocol.types import Task
+from nextme.protocol.types import Task, TaskTimeoutError
 
 
 # ---------------------------------------------------------------------------
@@ -750,3 +753,164 @@ async def test_path_lock_contention_shows_waiting_card(tmp_project, settings):
     assert "思考中" in updated_card_json, (
         f"Expected '思考中' in updated card JSON, got: {updated_card_json!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 13: Task timeout → timeout card sent, result card NOT sent
+# ---------------------------------------------------------------------------
+
+
+async def test_task_timeout_sends_timeout_card(tmp_project, settings):
+    """When the runtime raises TaskTimeoutError the worker sends a timeout error
+    card (containing '⏰' and '超时' in its title) and does NOT send a result card.
+    """
+    replier = make_replier()
+    mock_runtime = make_mock_runtime()
+    mock_runtime.execute = AsyncMock(side_effect=TaskTimeoutError("timed out after 7200s"))
+
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acp_registry=acp_registry)
+
+    task = make_task("long running task")
+    await dispatcher.dispatch(task)
+
+    session = _get_session(dispatcher, task.session_id)
+    assert session is not None
+
+    try:
+        await drain_session_queue(session)
+    except asyncio.TimeoutError:
+        pytest.fail("Session queue did not drain within timeout")
+    finally:
+        await cancel_workers(dispatcher)
+
+    # Timeout card must have been built with '⏰' and '超时' in the title.
+    replier.build_error_card.assert_called()
+    call_args = replier.build_error_card.call_args
+    title = call_args.kwargs.get("title", "")
+    assert "⏰" in title and "超时" in title, (
+        f"Expected '⏰' and '超时' in build_error_card title, got: {title!r}"
+    )
+
+    # Result card must NOT have been built.
+    replier.build_result_card.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 14: Task timeout → runtime evicted from ACPRuntimeRegistry
+# ---------------------------------------------------------------------------
+
+
+async def test_task_timeout_evicts_runtime_from_registry(tmp_project, settings):
+    """After a TaskTimeoutError the worker calls acp_registry.remove(), which
+    stops the runtime subprocess and evicts it from the registry.
+    """
+    replier = make_replier()
+    mock_runtime = make_mock_runtime()
+    mock_runtime.execute = AsyncMock(side_effect=TaskTimeoutError("timed out after 7200s"))
+
+    # Use a real registry so remove() actually pops the entry.
+    acp_registry = ACPRuntimeRegistry()
+    runtime_key = "oc_chat:ou_user:myproject"
+    # Pre-populate the registry so remove() has something to evict.
+    acp_registry._runtimes[runtime_key] = mock_runtime
+    # Also mock get_or_create so the worker receives our mock runtime.
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acp_registry=acp_registry)
+
+    task = make_task("long running task")
+    await dispatcher.dispatch(task)
+
+    session = _get_session(dispatcher, task.session_id)
+    assert session is not None
+
+    try:
+        await drain_session_queue(session)
+    except asyncio.TimeoutError:
+        pytest.fail("Session queue did not drain within timeout")
+    finally:
+        await cancel_workers(dispatcher)
+
+    # Runtime must have been evicted from the registry.
+    assert acp_registry.get(runtime_key) is None, (
+        "Expected runtime to be evicted from registry after timeout"
+    )
+    # stop() must have been called on the evicted runtime.
+    mock_runtime.stop.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test 15: Task timeout → session actual_id preserved; next message succeeds
+# ---------------------------------------------------------------------------
+
+
+async def test_task_timeout_session_preserved_next_message_succeeds(tmp_project, settings):
+    """After a timeout the session's actual_id is preserved (no context reset).
+    A subsequent normal message executes successfully and receives a result card.
+    """
+    replier = make_replier()
+
+    # First runtime: raises TaskTimeoutError immediately after ensure_ready sets actual_id.
+    mock_runtime_1 = make_mock_runtime()
+    mock_runtime_1.actual_id = "preserved-session-id"
+    mock_runtime_1.execute = AsyncMock(side_effect=TaskTimeoutError("timed out after 7200s"))
+
+    # Second runtime: succeeds normally.
+    mock_runtime_2 = make_mock_runtime(execute_return="Resumed answer")
+    mock_runtime_2.actual_id = "preserved-session-id"
+
+    # Real registry so remove() actually works; pre-populate for the first call.
+    acp_registry = ACPRuntimeRegistry()
+    runtime_key = "oc_chat:ou_user:myproject"
+    acp_registry._runtimes[runtime_key] = mock_runtime_1
+
+    call_count = 0
+
+    def _get_or_create(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return mock_runtime_1 if call_count == 1 else mock_runtime_2
+
+    acp_registry.get_or_create = MagicMock(side_effect=_get_or_create)
+
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acp_registry=acp_registry)
+
+    # --- First task: times out ---
+    task1 = make_task("long running task")
+    await dispatcher.dispatch(task1)
+
+    session = _get_session(dispatcher, task1.session_id)
+    assert session is not None
+
+    try:
+        await drain_session_queue(session)
+    except asyncio.TimeoutError:
+        pytest.fail("First task queue did not drain within timeout")
+
+    # Timeout card was sent; actual_id is preserved on the session.
+    replier.build_error_card.assert_called()
+    assert session.actual_id == "preserved-session-id", (
+        f"Expected session.actual_id='preserved-session-id', got {session.actual_id!r}"
+    )
+
+    # --- Second task: succeeds ---
+    replier.build_result_card.reset_mock()
+    task2 = make_task("follow-up question", session_id=task1.session_id)
+    await dispatcher.dispatch(task2)
+
+    try:
+        await drain_session_queue(session)
+    except asyncio.TimeoutError:
+        pytest.fail("Second task queue did not drain within timeout")
+    finally:
+        await cancel_workers(dispatcher)
+
+    # Second task must have received a result card.
+    replier.build_result_card.assert_called()
+    mock_runtime_2.execute.assert_called_once()
