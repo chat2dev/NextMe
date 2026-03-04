@@ -619,6 +619,18 @@ class SessionWorker:
 
         await self._send_result(task, final_content)
 
+        # Add a "DONE" reaction to the original message so the user can see
+        # at a glance that the task completed (fire-and-forget — failure is OK).
+        if task.message_id:
+            try:
+                await self._replier.send_reaction(task.message_id, "DONE")
+            except Exception:
+                logger.debug(
+                    "SessionWorker[%s]: failed to add DONE reaction to message %s",
+                    self._session.context_id,
+                    task.message_id,
+                )
+
     # ------------------------------------------------------------------
     # Progress callback
     # ------------------------------------------------------------------
