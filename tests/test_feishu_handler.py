@@ -1075,3 +1075,26 @@ class TestThreadSessionId:
         assert task.session_id == "p2p_chat1:ou_userX"
         assert task.user_id == "ou_userX"
         assert task.thread_root_id == ""
+
+    def test_deregister_thread_removes_from_active_set(self):
+        """deregister_thread removes the key so subsequent replies are ignored."""
+        handler, dispatcher, dispatched = self._make_handler()
+        handler._active_threads.add("oc_group1:om_root1")
+
+        # Deregister the thread (simulates /done closing it).
+        handler.deregister_thread("oc_group1", "om_root1")
+
+        assert "oc_group1:om_root1" not in handler._active_threads
+
+        # A reply to that thread must now be ignored.
+        data = self._make_group_thread_reply("om_reply99", "om_root1", "ou_userA", "late reply")
+        self._run_handle_and_collect(handler, dispatcher, dispatched, data)
+
+        assert len(dispatched) == 0
+
+    def test_deregister_thread_idempotent(self):
+        """deregister_thread on an already-absent key does not raise."""
+        handler, _, _ = self._make_handler()
+        # Key was never added — should not raise.
+        handler.deregister_thread("oc_group1", "om_nonexistent")
+        assert "oc_group1:om_nonexistent" not in handler._active_threads

@@ -21,7 +21,7 @@ import json
 import logging
 import uuid
 from datetime import timedelta
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
     from ..acl.manager import AclManager
@@ -111,6 +111,17 @@ class TaskDispatcher:
         )
         # Pending thread queue: chat_id → deque of Tasks waiting for a free slot.
         self._pending_thread_queue: dict[str, collections.deque] = {}
+        # Optional callback invoked when a thread is closed, so the handler can
+        # remove it from _active_threads.  Registered via register_thread_closed_callback().
+        self._thread_closed_callback: Callable[[str, str], None] | None = None
+
+    # ------------------------------------------------------------------
+    # Public: callback registration
+    # ------------------------------------------------------------------
+
+    def register_thread_closed_callback(self, callback: Callable[[str, str], None]) -> None:
+        """Register a callback invoked when a thread is closed (chat_id, thread_root_id)."""
+        self._thread_closed_callback = callback
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -396,6 +407,14 @@ class TaskDispatcher:
         """
         if self._state_store is not None:
             self._state_store.unregister_thread(chat_id, thread_root_id)
+
+        # Notify handler to remove from _active_threads so future messages in
+        # this thread are ignored after /done.
+        if self._thread_closed_callback is not None:
+            try:
+                self._thread_closed_callback(chat_id, thread_root_id)
+            except Exception:
+                logger.exception("_on_thread_closed: error in thread_closed_callback")
 
         queue = self._pending_thread_queue.get(chat_id)
         if queue:

@@ -116,6 +116,12 @@ class MessageHandler:
         self._active_threads = set(thread_keys)
         logger.info("MessageHandler: restored %d active thread(s)", len(thread_keys))
 
+    def deregister_thread(self, chat_id: str, thread_root_id: str) -> None:
+        """Remove a thread from the active set (called when /done closes a thread)."""
+        key = f"{chat_id}:{thread_root_id}"
+        self._active_threads.discard(key)
+        logger.info("MessageHandler: deregistered thread %r", key)
+
     # ------------------------------------------------------------------
     # Public: create a lark EventDispatcherHandler that wraps this handler.
     # ------------------------------------------------------------------
