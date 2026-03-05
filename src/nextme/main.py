@@ -375,6 +375,13 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     )
 
     handler = MessageHandler(dedup=dedup, dispatcher=dispatcher)
+
+    # Restore active thread set from persisted state so thread replies
+    # received after a bot restart are still routed correctly.
+    thread_keys = set(state_store._state.thread_records.keys()) if state_store._state else set()
+    handler.restore_active_threads(thread_keys)
+    logger.info("MessageHandler: restored %d active thread(s) from state", len(thread_keys))
+
     feishu_client = FeishuClient(config, settings, handler=handler)
 
     # Wire the real client into the dispatcher so dispatch() works correctly.
