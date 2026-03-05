@@ -804,3 +804,107 @@ class TestOnCardAction:
         # Toast is still set regardless of whether the loop was running
         assert resp.toast is not None
         assert resp.toast.content == "已收到"
+
+
+class TestMentionParsing:
+    """MessageHandler correctly extracts @mention open_ids into task.mentions."""
+
+    def _make_handler(self):
+        from nextme.feishu.handler import MessageHandler
+        from nextme.feishu.dedup import MessageDedup
+        dispatcher = MagicMock()
+        dispatcher.dispatch = AsyncMock()
+        handler = MessageHandler(dedup=MessageDedup(), dispatcher=dispatcher)
+        mock_loop = MagicMock()
+        mock_loop.is_running.return_value = True
+        handler._loop = mock_loop
+        return handler, dispatcher
+
+    def _make_event(self, msg_type, content_json, mentions_sdk=None, chat_id="oc_chat", user_id="ou_user"):
+        """Build a fake lark P2ImMessageReceiveV1-like object."""
+        message = MagicMock()
+        message.message_id = "om_001"
+        message.chat_id = chat_id
+        message.chat_type = "p2p"
+        message.message_type = msg_type
+        message.content = json.dumps(content_json)
+        message.mentions = mentions_sdk or []
+        sender = MagicMock()
+        sender.sender_id.open_id = user_id
+        event = MagicMock()
+        event.message = message
+        event.sender = sender
+        data = MagicMock()
+        data.event = event
+        return data
+
+    def _make_mention(self, key, open_id, name):
+        m = MagicMock()
+        m.key = key
+        m.id.open_id = open_id
+        m.name = name
+        return m
+
+    def _handle_and_get_task(self, handler, dispatcher, data):
+        """Run handle_message and return the Task that was dispatched."""
+        captured = []
+
+        def fake_rct(coro, loop):
+            # Run the coroutine synchronously so dispatcher.dispatch gets called.
+            import asyncio as _asyncio
+            _asyncio.get_event_loop().run_until_complete(coro)
+
+        with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe", side_effect=fake_rct):
+            handler.handle_message(data)
+
+        assert dispatcher.dispatch.called, "dispatch was not called"
+        return dispatcher.dispatch.call_args[0][0]
+
+    def test_text_message_parses_mentions(self):
+        handler, dispatcher = self._make_handler()
+        sdk_mentions = [
+            self._make_mention("@_user_1", "ou_aaa", "小明"),
+            self._make_mention("@_user_2", "ou_bbb", "小红"),
+        ]
+        data = self._make_event(
+            "text",
+            {"text": "@_user_1 @_user_2 /skill book 明天开会"},
+            mentions_sdk=sdk_mentions,
+        )
+        task = self._handle_and_get_task(handler, dispatcher, data)
+        assert task.mentions == [
+            {"name": "小明", "open_id": "ou_aaa"},
+            {"name": "小红", "open_id": "ou_bbb"},
+        ]
+
+    def test_text_message_no_mentions_gives_empty(self):
+        handler, dispatcher = self._make_handler()
+        data = self._make_event("text", {"text": "/skill book 明天开会"})
+        task = self._handle_and_get_task(handler, dispatcher, data)
+        assert task.mentions == []
+
+    def test_post_message_parses_at_nodes(self):
+        handler, dispatcher = self._make_handler()
+        post_content = {
+            "zh_cn": {
+                "title": "",
+                "content": [[
+                    {"tag": "text", "text": "帮我订会议 "},
+                    {"tag": "at", "user_id": "ou_ccc", "user_name": "阿强"},
+                    {"tag": "text", "text": " 明天下午3点"},
+                ]]
+            }
+        }
+        data = self._make_event("post", post_content)
+        task = self._handle_and_get_task(handler, dispatcher, data)
+        assert task.mentions == [{"name": "阿强", "open_id": "ou_ccc"}]
+
+    def test_mentions_deduplicated_by_open_id(self):
+        handler, dispatcher = self._make_handler()
+        sdk_mentions = [
+            self._make_mention("@_user_1", "ou_aaa", "小明"),
+            self._make_mention("@_user_1", "ou_aaa", "小明"),  # duplicate
+        ]
+        data = self._make_event("text", {"text": "hi"}, mentions_sdk=sdk_mentions)
+        task = self._handle_and_get_task(handler, dispatcher, data)
+        assert len(task.mentions) == 1

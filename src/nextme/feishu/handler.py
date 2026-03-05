@@ -34,6 +34,49 @@ logger = logging.getLogger(__name__)
 _MENTION_PREFIX_RE = re.compile(r"^(?:@_user_\d+\s*)+")
 
 
+def _extract_mentions(message: Any) -> list[dict[str, Any]]:
+    """Return deduplicated list of {name, open_id} from a Feishu message.
+
+    Handles two formats:
+    - text messages: message.mentions SDK list (each item has .id.open_id and .name)
+    - post messages: inline tag=="at" nodes in content JSON
+    """
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+
+    def _add(name: str, open_id: str) -> None:
+        if open_id and open_id not in seen:
+            seen.add(open_id)
+            result.append({"name": name or "", "open_id": open_id})
+
+    msg_type: str = getattr(message, "message_type", "") or ""
+
+    # text messages: SDK provides message.mentions
+    if msg_type == "text":
+        for m in getattr(message, "mentions", None) or []:
+            open_id = getattr(getattr(m, "id", None), "open_id", "") or ""
+            name = getattr(m, "name", "") or ""
+            _add(name, open_id)
+        return result
+
+    # post (rich-text) messages: parse tag=="at" nodes from content JSON
+    if msg_type == "post":
+        try:
+            raw = getattr(message, "content", "") or ""
+            content_obj = json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            return result
+        for lang_body in content_obj.values():
+            paragraphs = lang_body.get("content", []) if isinstance(lang_body, dict) else []
+            for paragraph in paragraphs:
+                for node in paragraph:
+                    if isinstance(node, dict) and node.get("tag") == "at":
+                        open_id = node.get("user_id", "") or ""
+                        name = node.get("user_name", "") or ""
+                        _add(name, open_id)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Minimal dispatcher protocol so this module does not import concrete classes.
 # ---------------------------------------------------------------------------
@@ -283,6 +326,7 @@ class MessageHandler:
             message_id=message_id,
             chat_type=chat_type,
             created_at=datetime.now(),
+            mentions=_extract_mentions(message),
         )
 
         logger.info(
