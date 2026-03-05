@@ -501,3 +501,18 @@ class TestSkillInvoker:
         )
         result = invoker.build_prompt(skill, "input_text", "context_text")
         assert result == "Line 1: input_text\nLine 2: context_text\nLine 3: done"
+
+
+# ---------------------------------------------------------------------------
+# book-meeting skill integration test
+# ---------------------------------------------------------------------------
+
+
+def test_book_meeting_skill_loads():
+    from nextme.skills.loader import load_skill_file
+    from pathlib import Path
+    skill_path = Path(__file__).parent.parent / "skills/public/book-meeting/SKILL.md"
+    skill = load_skill_file(skill_path, source="nextme")
+    assert skill.meta.trigger == "book"
+    assert skill.meta.name == "Book Meeting"
+    assert "{user_input}" in skill.template
