@@ -75,6 +75,8 @@ def get_or_create_calendar(token: str, cache_path: str = DEFAULT_CACHE) -> str:
 
     # Search existing calendars
     resp = _http_get(f"{BASE_URL}/calendar/v4/calendars", token)
+    if resp.get("code") != 0:
+        raise RuntimeError(f"list calendars failed: {resp.get('msg')}")
     for cal in (resp.get("data") or {}).get("calendar_list") or []:
         if cal.get("summary") == CALENDAR_NAME:
             cal_id = cal["calendar_id"]

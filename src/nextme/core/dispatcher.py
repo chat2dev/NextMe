@@ -553,6 +553,8 @@ class TaskDispatcher:
                 content=prompt,
                 session_id=task.session_id,
                 reply_fn=task.reply_fn,
+                message_id=task.message_id,
+                chat_type=task.chat_type,
                 timeout=task.timeout,
             )
             try:

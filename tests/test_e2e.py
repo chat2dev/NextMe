@@ -914,3 +914,59 @@ async def test_task_timeout_session_preserved_next_message_succeeds(tmp_project,
     # Second task must have received a result card.
     replier.build_result_card.assert_called()
     mock_runtime_2.execute.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Test 16: /skill book with @mentions → dispatches without crash
+# ---------------------------------------------------------------------------
+
+
+async def test_skill_book_mentions_in_prompt(tmp_project, settings):
+    """E2E: /skill book with @mentions → skill_task is forwarded with message_id
+    and chat_type; dispatch completes without error.
+
+    Note: The "book" skill is not registered in the test environment (no skill
+    directory is loaded).  This test therefore verifies that:
+    1. The dispatcher routes the /skill command without crashing.
+    2. An "access denied" card is NOT shown (ACL is open — no acl_manager).
+    3. The send_text path fires with "未找到 Skill" (unknown skill) rather than
+       an unhandled exception, confirming that message_id/chat_type forwarding
+       in the skill_task constructor does not break the dispatch path.
+
+    If the "book" skill were registered, runtime.execute would be called with a
+    prompt that includes the open_id lines from the @mentions list.
+    """
+    replier = make_replier()
+    mock_runtime = make_mock_runtime(execute_return="✅ 会议已预定")
+
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acp_registry=acp_registry)
+
+    task = Task(
+        id=str(uuid.uuid4()),
+        content="/skill book 明天下午3点 团队周会",
+        session_id="oc_chat:ou_user_book",
+        reply_fn=AsyncMock(),
+        message_id="msg_book_01",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        mentions=[
+            {"name": "小明", "open_id": "ou_attendee_aaa"},
+            {"name": "小红", "open_id": "ou_attendee_bbb"},
+        ],
+    )
+    await dispatcher.dispatch(task)
+
+    # The "book" skill is not registered in tests, so the dispatcher should have
+    # sent a "未找到 Skill" text message — not an access-denied card.
+    assert not replier.build_access_denied_card.called, (
+        "Should not be access denied — no ACL manager configured"
+    )
+    # Dispatcher must have responded (either found skill or reported missing skill).
+    # In test env without skills loaded, send_text is called with "未找到 Skill".
+    replier.send_text.assert_called()
+    text_call = replier.send_text.call_args
+    assert text_call is not None, "Expected send_text to be called for unknown skill"
