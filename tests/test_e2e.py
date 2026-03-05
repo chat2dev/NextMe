@@ -970,3 +970,194 @@ async def test_skill_book_mentions_in_prompt(tmp_project, settings):
     replier.send_text.assert_called()
     text_call = replier.send_text.call_args
     assert text_call is not None, "Expected send_text to be called for unknown skill"
+
+
+# ---------------------------------------------------------------------------
+# Test 17: Group @bot creates thread session (session_id = chat_id:message_id)
+# ---------------------------------------------------------------------------
+
+
+async def test_group_at_bot_creates_thread_session(tmp_project, settings):
+    """E2E: @bot on group root message creates session with session_id=chat_id:message_id."""
+    replier = make_replier()
+    mock_runtime = make_mock_runtime(execute_return="Feature built")
+
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acp_registry=acp_registry)
+
+    # session_id = chat_id:message_id (group thread format)
+    session_id = "oc_group1:om_root1"
+    task = Task(
+        id=str(uuid.uuid4()),
+        content="build a feature",
+        session_id=session_id,
+        reply_fn=AsyncMock(),
+        message_id="om_root1",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="ou_userA",
+        thread_root_id="om_root1",  # root message = thread creator
+    )
+
+    await dispatcher.dispatch(task)
+
+    session = _get_session(dispatcher, session_id)
+    assert session is not None, "Session should have been created for thread session_id"
+
+    try:
+        await drain_session_queue(session)
+    except asyncio.TimeoutError:
+        pytest.fail("Session task queue did not drain within timeout")
+    finally:
+        await cancel_workers(dispatcher)
+
+    # Runtime was called with the task
+    mock_runtime.execute.assert_called_once()
+    # Result card was built
+    replier.build_result_card.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 18: Thread reply dispatched to same session
+# ---------------------------------------------------------------------------
+
+
+async def test_thread_reply_uses_same_session_id(tmp_project, settings):
+    """E2E: follow-up reply in active thread goes to the same session (queued)."""
+    replier = make_replier()
+
+    execute_count = 0
+
+    async def counting_execute(task, on_progress, on_permission):
+        nonlocal execute_count
+        execute_count += 1
+        await asyncio.sleep(0.05)
+        return f"Response {execute_count}"
+
+    mock_runtime = AsyncMock()
+    mock_runtime.actual_id = "test-acp-session-id"
+    mock_runtime.is_running = True
+    mock_runtime.ensure_ready = AsyncMock()
+    mock_runtime.execute = counting_execute
+    mock_runtime.stop = AsyncMock()
+    mock_runtime.restore_session = AsyncMock()
+
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acp_registry=acp_registry)
+
+    # Both tasks share the same session_id (same thread)
+    session_id = "oc_group1:om_root1"
+
+    task1 = Task(
+        id=str(uuid.uuid4()),
+        content="first message",
+        session_id=session_id,
+        reply_fn=AsyncMock(),
+        message_id="om_root1",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="ou_userA",
+        thread_root_id="om_root1",
+    )
+
+    # Second message in same thread — same session_id, different message_id
+    task2 = Task(
+        id=str(uuid.uuid4()),
+        content="follow up",
+        session_id=session_id,
+        reply_fn=AsyncMock(),
+        message_id="om_reply1",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="ou_userB",  # different user, same thread
+        thread_root_id="om_root1",
+    )
+
+    await dispatcher.dispatch(task1)
+    await dispatcher.dispatch(task2)
+
+    session = _get_session(dispatcher, session_id)
+    assert session is not None, "Session should exist for the thread"
+
+    try:
+        await drain_session_queue(session, timeout=10.0)
+    except asyncio.TimeoutError:
+        pytest.fail("Both thread tasks were not processed within timeout")
+    finally:
+        await cancel_workers(dispatcher)
+
+    # Both tasks were processed by the same session worker
+    assert execute_count == 2, f"Expected 2 executions by same session, got {execute_count}"
+
+
+# ---------------------------------------------------------------------------
+# Test 19: /done command releases thread resources
+# ---------------------------------------------------------------------------
+
+
+async def test_done_command_releases_thread_resources(tmp_project, settings):
+    """E2E: /done in a group thread stops runtime and sends DONE reaction."""
+    replier = make_replier()
+    mock_runtime = make_mock_runtime(execute_return="Work started")
+
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acp_registry=acp_registry)
+
+    session_id = "oc_group1:om_done_root"
+
+    # First establish the session with a normal task
+    task1 = Task(
+        id=str(uuid.uuid4()),
+        content="start work",
+        session_id=session_id,
+        reply_fn=AsyncMock(),
+        message_id="om_done_root",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="ou_userA",
+        thread_root_id="om_done_root",
+    )
+
+    await dispatcher.dispatch(task1)
+
+    session = _get_session(dispatcher, session_id)
+    assert session is not None
+
+    try:
+        await drain_session_queue(session)
+    except asyncio.TimeoutError:
+        pytest.fail("First task did not complete within timeout")
+
+    # Now send /done in the same thread
+    done_task = Task(
+        id=str(uuid.uuid4()),
+        content="/done",
+        session_id=session_id,
+        reply_fn=AsyncMock(),
+        message_id="om_done_reply",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="ou_userA",
+        thread_root_id="om_done_root",
+    )
+
+    await dispatcher.dispatch(done_task)
+    # Allow async cleanup to complete
+    await asyncio.sleep(0.15)
+
+    try:
+        await cancel_workers(dispatcher)
+    except Exception:
+        pass
+
+    # DONE reaction sent to root message
+    replier.send_reaction.assert_called_with("om_done_root", "DONE")
