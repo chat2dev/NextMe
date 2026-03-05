@@ -509,8 +509,6 @@ class TestSkillInvoker:
 
 
 def test_book_meeting_skill_loads():
-    from nextme.skills.loader import load_skill_file
-    from pathlib import Path
     skill_path = Path(__file__).parent.parent / "skills/public/book-meeting/SKILL.md"
     skill = load_skill_file(skill_path, source="nextme")
     assert skill.meta.trigger == "book"
