@@ -461,3 +461,64 @@ async def test_save_project_actual_id_persists_across_flush_reload(tmp_path):
     store2 = make_store(tmp_path)
     await store2.load()
     assert store2.get_project_actual_id("ctx1:user1", "repo-a") == "sess-persist"
+
+
+# --- Thread management ---
+
+
+async def test_register_and_count_thread(tmp_path):
+    from nextme.config.state_store import StateStore
+    from nextme.config.schema import Settings
+    store = StateStore(Settings(), state_path=tmp_path / "state.json")
+    await store.load()
+
+    store.register_thread("oc_G", "om_001", "myproject")
+    assert store.get_active_thread_count("oc_G") == 1
+
+    store.register_thread("oc_G", "om_002", "myproject")
+    assert store.get_active_thread_count("oc_G") == 2
+
+    # 重复注册同一个不增加计数
+    store.register_thread("oc_G", "om_001", "myproject")
+    assert store.get_active_thread_count("oc_G") == 2
+
+
+async def test_unregister_thread(tmp_path):
+    from nextme.config.state_store import StateStore
+    from nextme.config.schema import Settings
+    store = StateStore(Settings(), state_path=tmp_path / "state.json")
+    await store.load()
+
+    store.register_thread("oc_G", "om_001", "myproject")
+    store.unregister_thread("oc_G", "om_001")
+    assert store.get_active_thread_count("oc_G") == 0
+
+    # 幂等：重复 unregister 不报错
+    store.unregister_thread("oc_G", "om_001")
+    assert store.get_active_thread_count("oc_G") == 0
+
+
+async def test_get_thread_project(tmp_path):
+    from nextme.config.state_store import StateStore
+    from nextme.config.schema import Settings
+    store = StateStore(Settings(), state_path=tmp_path / "state.json")
+    await store.load()
+
+    store.register_thread("oc_G", "om_001", "proj_A")
+    assert store.get_thread_project("oc_G", "om_001") == "proj_A"
+    assert store.get_thread_project("oc_G", "om_999") == ""
+
+
+async def test_touch_thread_updates_last_active(tmp_path):
+    from nextme.config.state_store import StateStore
+    from nextme.config.schema import Settings
+    from datetime import datetime
+    import time
+    store = StateStore(Settings(), state_path=tmp_path / "state.json")
+    await store.load()
+    store.register_thread("oc_G", "om_001", "myproject")
+    before = store._require_loaded().thread_records["oc_G:om_001"].last_active_at
+    time.sleep(0.01)
+    store.touch_thread("oc_G", "om_001")
+    after = store._require_loaded().thread_records["oc_G:om_001"].last_active_at
+    assert after > before
