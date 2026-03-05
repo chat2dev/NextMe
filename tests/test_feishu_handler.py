@@ -822,8 +822,9 @@ class TestMentionParsing:
 
     def _make_event(self, msg_type, content_json, mentions_sdk=None, chat_id="oc_chat", user_id="ou_user"):
         """Build a fake lark P2ImMessageReceiveV1-like object."""
+        import uuid
         message = MagicMock()
-        message.message_id = "om_001"
+        message.message_id = f"om_{uuid.uuid4().hex[:8]}"
         message.chat_id = chat_id
         message.chat_type = "p2p"
         message.message_type = msg_type
@@ -847,12 +848,15 @@ class TestMentionParsing:
 
     def _handle_and_get_task(self, handler, dispatcher, data):
         """Run handle_message and return the Task that was dispatched."""
-        captured = []
 
         def fake_rct(coro, loop):
             # Run the coroutine synchronously so dispatcher.dispatch gets called.
             import asyncio as _asyncio
-            _asyncio.get_event_loop().run_until_complete(coro)
+            _loop = _asyncio.new_event_loop()
+            try:
+                _loop.run_until_complete(coro)
+            finally:
+                _loop.close()
 
         with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe", side_effect=fake_rct):
             handler.handle_message(data)
@@ -908,3 +912,21 @@ class TestMentionParsing:
         data = self._make_event("text", {"text": "hi"}, mentions_sdk=sdk_mentions)
         task = self._handle_and_get_task(handler, dispatcher, data)
         assert len(task.mentions) == 1
+
+    def test_text_message_none_id_skipped(self):
+        handler, dispatcher = self._make_handler()
+        # SDK mention with m.id = None (no open_id extractable)
+        broken_mention = MagicMock()
+        broken_mention.id = None
+        broken_mention.name = "broken"
+        data = self._make_event("text", {"text": "hi"}, mentions_sdk=[broken_mention])
+        handler.handle_message(data)
+        task = dispatcher.dispatch.call_args[0][0]
+        assert task.mentions == []
+
+    def test_unsupported_message_type_gives_empty(self):
+        handler, dispatcher = self._make_handler()
+        data = self._make_event("image", {"image_key": "img_abc"})
+        handler.handle_message(data)
+        # Image messages produce empty text → handler drops them before dispatch.
+        assert dispatcher.dispatch.call_args is None
