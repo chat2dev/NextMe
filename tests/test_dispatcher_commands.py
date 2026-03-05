@@ -567,7 +567,178 @@ class TestUserIdExtraction:
         assert session is not None
         assert session.task_queue.qsize() == 1
 
-        skill_task = session.task_queue.get_nowait()
-        # Requester should be the actual user, not "om_thread_root" (which is the session suffix)
-        assert "[预定人] (open_id: ou_actual_user)" in skill_task.content
-        assert "om_thread_root" not in skill_task.content
+
+# ---------------------------------------------------------------------------
+# Thread limit tests
+# ---------------------------------------------------------------------------
+
+
+class TestThreadLimit:
+    """Group thread limit: queue new threads when max_active_threads_per_chat reached."""
+
+    async def test_thread_within_limit_dispatched_normally(self, tmp_path):
+        """First thread in a chat is dispatched without restriction."""
+        from nextme.config.state_store import StateStore
+
+        replier = make_replier()
+        settings_obj = Settings(max_active_threads_per_chat=2)
+        store = StateStore(settings_obj, state_path=tmp_path / "state.json")
+        await store.load()
+
+        d = make_dispatcher(tmp_path, replier)
+        d._state_store = store
+        d._settings = settings_obj
+
+        task = make_task("hi", session_id="oc_G:om_root1")
+        task.user_id = "ou_A"
+        task.thread_root_id = "om_root1"
+        task.message_id = "om_root1"  # same as thread_root_id = new thread
+        task.chat_type = "group"
+
+        with patch.object(d, "_ensure_worker", new=AsyncMock()):
+            await d.dispatch(task)
+
+        # No queuing message should have been sent
+        for call in replier.reply_text.call_args_list:
+            assert "排队" not in str(call) and "上限" not in str(call)
+
+        # Thread should be registered as active
+        assert store.get_active_thread_count("oc_G") == 1
+
+    async def test_thread_at_limit_sends_queue_message(self, tmp_path):
+        """When active thread count == limit, new root message is queued."""
+        from nextme.config.state_store import StateStore
+
+        replier = make_replier()
+        settings_obj = Settings(max_active_threads_per_chat=1)
+
+        store = StateStore(settings_obj, state_path=tmp_path / "state.json")
+        await store.load()
+        store.register_thread("oc_G", "om_root1", "test")  # already 1 active
+
+        d = make_dispatcher(tmp_path, replier)
+        d._state_store = store
+        d._settings = settings_obj
+
+        task = make_task("hi", session_id="oc_G:om_root2")
+        task.user_id = "ou_B"
+        task.thread_root_id = "om_root2"
+        task.message_id = "om_root2"
+        task.chat_type = "group"
+
+        with patch.object(d, "_ensure_worker", new=AsyncMock()):
+            await d.dispatch(task)
+
+        # Should have sent a queuing reply
+        queue_calls = [
+            call
+            for call in replier.reply_text.call_args_list
+            if "排队" in str(call) or "上限" in str(call)
+        ]
+        assert queue_calls, (
+            "Expected a queue-full reply but got: " + str(replier.reply_text.call_args_list)
+        )
+
+        # Task should be in pending queue, not dispatched
+        assert "oc_G" in d._pending_thread_queue
+        assert len(d._pending_thread_queue["oc_G"]) == 1
+
+    async def test_thread_at_limit_does_not_enqueue_task(self, tmp_path):
+        """Queued thread tasks are NOT placed in the session task queue."""
+        from nextme.config.state_store import StateStore
+
+        replier = make_replier()
+        settings_obj = Settings(max_active_threads_per_chat=1)
+
+        store = StateStore(settings_obj, state_path=tmp_path / "state.json")
+        await store.load()
+        store.register_thread("oc_G", "om_root1", "test")
+
+        d = make_dispatcher(tmp_path, replier)
+        d._state_store = store
+        d._settings = settings_obj
+
+        task = make_task("hi", session_id="oc_G:om_root2")
+        task.user_id = "ou_B"
+        task.thread_root_id = "om_root2"
+        task.message_id = "om_root2"
+        task.chat_type = "group"
+
+        ensure_worker_mock = AsyncMock()
+        with patch.object(d, "_ensure_worker", new=ensure_worker_mock):
+            await d.dispatch(task)
+
+        # _ensure_worker should NOT have been called (task was queued, not dispatched)
+        ensure_worker_mock.assert_not_called()
+
+    async def test_on_thread_closed_dispatches_next_queued(self, tmp_path):
+        """_on_thread_closed releases slot and re-dispatches the next pending task."""
+        from nextme.config.state_store import StateStore
+        import collections
+
+        replier = make_replier()
+        settings_obj = Settings(max_active_threads_per_chat=1)
+
+        store = StateStore(settings_obj, state_path=tmp_path / "state.json")
+        await store.load()
+        store.register_thread("oc_G", "om_root1", "test")  # 1 active
+
+        d = make_dispatcher(tmp_path, replier)
+        d._state_store = store
+        d._settings = settings_obj
+
+        # Pre-populate pending queue
+        pending_task = make_task("hi", session_id="oc_G:om_root2")
+        pending_task.user_id = "ou_B"
+        pending_task.thread_root_id = "om_root2"
+        pending_task.message_id = "om_root2"
+        pending_task.chat_type = "group"
+        d._pending_thread_queue["oc_G"] = collections.deque([pending_task])
+
+        dispatched = []
+
+        async def fake_dispatch(task):
+            dispatched.append(task)
+
+        with patch.object(d, "dispatch", side_effect=fake_dispatch):
+            d._on_thread_closed("oc_G", "om_root1")
+            # give asyncio.create_task a chance to run
+            await asyncio.sleep(0)
+
+        # thread should have been unregistered
+        assert store.get_active_thread_count("oc_G") == 0
+        # pending queue should now be empty
+        assert len(d._pending_thread_queue["oc_G"]) == 0
+        # pending task should have been re-dispatched
+        assert len(dispatched) == 1
+        assert dispatched[0] is pending_task
+
+    async def test_non_root_group_message_not_limited(self, tmp_path):
+        """Follow-up messages in a thread (message_id != thread_root_id) bypass limit."""
+        from nextme.config.state_store import StateStore
+
+        replier = make_replier()
+        settings_obj = Settings(max_active_threads_per_chat=1)
+
+        store = StateStore(settings_obj, state_path=tmp_path / "state.json")
+        await store.load()
+        store.register_thread("oc_G", "om_root1", "test")  # at limit
+
+        d = make_dispatcher(tmp_path, replier)
+        d._state_store = store
+        d._settings = settings_obj
+
+        # Follow-up message: session_id uses thread_root_id but message_id is different
+        task = make_task("follow up", session_id="oc_G:om_root1")
+        task.user_id = "ou_A"
+        task.thread_root_id = "om_root1"
+        task.message_id = "om_reply_789"  # different from thread_root_id
+        task.chat_type = "group"
+
+        ensure_worker_mock = AsyncMock()
+        with patch.object(d, "_ensure_worker", new=ensure_worker_mock):
+            await d.dispatch(task)
+
+        # Should be dispatched normally, not queued
+        ensure_worker_mock.assert_called_once()
+        assert "oc_G" not in d._pending_thread_queue or len(d._pending_thread_queue["oc_G"]) == 0

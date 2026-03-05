@@ -16,6 +16,7 @@ It is responsible for:
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import uuid
@@ -107,6 +108,8 @@ class TaskDispatcher:
         self._dynamic_bindings: dict[str, str] = (
             state_store.get_all_bindings() if state_store is not None else {}
         )
+        # Pending thread queue: chat_id → deque of Tasks waiting for a free slot.
+        self._pending_thread_queue: dict[str, collections.deque] = {}
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -124,7 +127,10 @@ class TaskDispatcher:
         2. If the text matches a meta-command, handle it and return.
         3. If there is a pending permission future and the text is a valid
            digit reply, resolve the permission and return.
-        4. Otherwise enqueue the task and ensure a worker is running.
+        4. For group root messages: enforce the active-thread limit.  If the
+           limit is reached, park the task in :attr:`_pending_thread_queue`
+           and return after sending a queuing notice.
+        5. Otherwise enqueue the task and ensure a worker is running.
 
         Args:
             task: The incoming task containing the user's message.
@@ -272,7 +278,54 @@ class TaskDispatcher:
             return
 
         # ------------------------------------------------------------------
-        # 3. Normal task — enqueue and ensure worker is running.
+        # 3. Thread limit check (group root messages only).
+        #
+        # A "new thread" is identified by: chat_type == "group" AND
+        # thread_root_id == message_id (the root message creates the thread).
+        # When the active thread count for the chat has reached the configured
+        # limit we park the task in a per-chat deque and send a queuing notice
+        # to the user.  _on_thread_closed() drains the deque when a slot opens.
+        # ------------------------------------------------------------------
+        if (
+            task.chat_type == "group"
+            and task.thread_root_id
+            and task.thread_root_id == task.message_id
+            and self._state_store is not None
+        ):
+            active_count = self._state_store.get_active_thread_count(chat_id)
+            limit = self._settings.max_active_threads_per_chat
+            if active_count >= limit:
+                queue = self._pending_thread_queue.setdefault(chat_id, collections.deque())
+                queue_pos = len(queue) + 1
+                queue.append(task)
+                logger.info(
+                    "TaskDispatcher: thread limit reached for chat %r "
+                    "(active=%d limit=%d), queued task %s at position %d",
+                    chat_id,
+                    active_count,
+                    limit,
+                    task.id,
+                    queue_pos,
+                )
+                try:
+                    await replier.reply_text(
+                        task.message_id,
+                        f"⏳ 当前活跃话题已达上限（{limit} 个），"
+                        f"你的请求排在第 {queue_pos} 位，将在有话题关闭后自动处理。",
+                    )
+                except Exception:
+                    logger.exception(
+                        "TaskDispatcher: failed to send queue-full message for task %s",
+                        task.id,
+                    )
+                return
+            # Within limit: register this new thread as active.
+            self._state_store.register_thread(
+                chat_id, task.thread_root_id, session.project_name
+            )
+
+        # ------------------------------------------------------------------
+        # 4. Normal task — enqueue and ensure worker is running.
         # ------------------------------------------------------------------
         # Override task timeout from the resolved project config.
         project = self._config.get_project(session.project_name)
@@ -324,6 +377,34 @@ class TaskDispatcher:
     # ------------------------------------------------------------------
     # Private: chat / permission helpers
     # ------------------------------------------------------------------
+
+    def _on_thread_closed(self, chat_id: str, thread_root_id: str) -> None:
+        """Release a thread slot and dispatch the next pending thread task if any.
+
+        Called by the worker (or ``/done`` command) when a group thread is
+        considered finished.  It:
+
+        1. Unregisters the thread from :attr:`_state_store` so the slot is freed.
+        2. Pops the oldest pending task for the chat from
+           :attr:`_pending_thread_queue` and schedules a new ``dispatch`` call
+           via :func:`asyncio.create_task`.
+
+        Args:
+            chat_id: The Feishu group chat ID (e.g. ``"oc_xxx"``).
+            thread_root_id: The root message ID of the thread being closed.
+        """
+        if self._state_store is not None:
+            self._state_store.unregister_thread(chat_id, thread_root_id)
+
+        queue = self._pending_thread_queue.get(chat_id)
+        if queue:
+            next_task = queue.popleft()
+            logger.info(
+                "TaskDispatcher: dequeuing pending thread task %s for chat %r",
+                next_task.id,
+                chat_id,
+            )
+            asyncio.create_task(self.dispatch(next_task))
 
     def _get_chat_id(self, session_id: str) -> str:
         """Extract ``chat_id`` from ``"chatID:userID"``."""
