@@ -467,3 +467,95 @@ async def test_handle_remember_handles_memory_manager_exception_gracefully(repli
     bad_mgr.add_fact = MagicMock()
     # Should not raise; still tries to send confirmation
     await handle_remember("ou_user", "fact", bad_mgr, replier, "oc_chat")
+
+
+# ---------------------------------------------------------------------------
+# handle_done tests
+# ---------------------------------------------------------------------------
+
+class TestHandleDone:
+    @pytest.mark.asyncio
+    async def test_done_cancels_task_and_sends_reaction(self):
+        """handle_done cancels active task, clears queue, sends DONE reaction."""
+        from nextme.core.commands import handle_done
+        from nextme.protocol.types import Task, TaskStatus
+        from unittest.mock import AsyncMock, MagicMock
+        import uuid, asyncio
+
+        replier = MagicMock()
+        replier.send_reaction = AsyncMock()
+        replier.reply_text = AsyncMock()
+
+        session = MagicMock()
+        session.context_id = "oc_G:om_root1"
+        session.project_name = "proj"
+        active_task = MagicMock()
+        active_task.canceled = False
+        session.active_task = active_task
+        session.perm_future = None
+        queue = asyncio.Queue()
+        await queue.put(MagicMock())   # one pending item
+        session.task_queue = queue
+        session.pending_tasks = [MagicMock()]
+
+        acp_registry = MagicMock()
+        acp_registry.remove = AsyncMock()
+
+        on_thread_closed = MagicMock()
+
+        await handle_done(
+            session=session,
+            runtime=None,
+            replier=replier,
+            chat_id="oc_G",
+            root_message_id="om_root1",
+            acp_registry=acp_registry,
+            on_thread_closed=on_thread_closed,
+        )
+
+        # Task cancelled
+        assert active_task.canceled is True
+        # Queue drained
+        assert session.task_queue.empty()
+        assert session.pending_tasks == []
+        # Runtime removed (key format: context_id:project_name)
+        acp_registry.remove.assert_called_once()
+        # Thread slot released
+        on_thread_closed.assert_called_once()
+        # Reaction sent
+        replier.send_reaction.assert_called_once_with("om_root1", "DONE")
+
+    @pytest.mark.asyncio
+    async def test_done_with_runtime_cancels_it(self):
+        """When runtime is provided, handle_done calls runtime.cancel()."""
+        from nextme.core.commands import handle_done
+        from unittest.mock import AsyncMock, MagicMock
+        import asyncio
+
+        replier = MagicMock()
+        replier.send_reaction = AsyncMock()
+        replier.reply_text = AsyncMock()
+        runtime = AsyncMock()
+        runtime.cancel = AsyncMock()
+        session = MagicMock()
+        session.context_id = "oc_G:om_root1"
+        session.project_name = "proj"
+        session.active_task = None
+        session.perm_future = None
+        session.task_queue = asyncio.Queue()
+        session.pending_tasks = []
+
+        acp_registry = MagicMock()
+        acp_registry.remove = AsyncMock()
+
+        await handle_done(
+            session=session,
+            runtime=runtime,
+            replier=replier,
+            chat_id="oc_G",
+            root_message_id="om_root1",
+            acp_registry=acp_registry,
+            on_thread_closed=MagicMock(),
+        )
+
+        runtime.cancel.assert_called_once()

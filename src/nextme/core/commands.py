@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 
 import json
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..config.schema import AppConfig, Settings
 from ..protocol.types import TaskStatus
@@ -145,6 +145,84 @@ async def handle_stop(
         logger.exception(
             "handle_stop: failed to send confirmation to chat %r", chat_id
         )
+
+
+async def handle_done(
+    session: Any,
+    runtime: Any | None,
+    replier: Any,
+    chat_id: str,
+    root_message_id: str,
+    acp_registry: Any,
+    on_thread_closed: Any,
+) -> None:
+    """Close a thread: cancel tasks, stop Claude subprocess, release slot, add reaction.
+
+    Args:
+        session: The thread's Session object.
+        runtime: The associated agent runtime, if any.
+        replier: Feishu message sender.
+        chat_id: The group chat id.
+        root_message_id: Root message of the thread (receives DONE reaction).
+        acp_registry: ACPRuntimeRegistry for subprocess removal.
+        on_thread_closed: Callback to release thread slot and process queue.
+    """
+    logger.info(
+        "handle_done: closing thread session context_id=%r", session.context_id
+    )
+
+    # 1. Cancel active task
+    if session.active_task is not None:
+        session.active_task.canceled = True
+
+    # 2. Cancel pending permission
+    if hasattr(session, "cancel_permission"):
+        session.cancel_permission()
+    elif session.perm_future is not None and not session.perm_future.done():
+        session.perm_future.cancel()
+
+    # 3. Cancel runtime if running
+    if runtime is not None:
+        try:
+            await runtime.cancel()
+        except Exception:
+            logger.exception("handle_done: error calling runtime.cancel()")
+
+    # 4. Drain task queue
+    while not session.task_queue.empty():
+        try:
+            session.task_queue.get_nowait()
+        except Exception:
+            break
+    session.pending_tasks.clear()
+
+    # 5. Stop and remove subprocess
+    runtime_key = f"{session.context_id}:{session.project_name}"
+    try:
+        await acp_registry.remove(runtime_key)
+    except Exception:
+        logger.exception("handle_done: error removing runtime %r", runtime_key)
+
+    # 6. Release thread slot (triggers pending queue)
+    try:
+        on_thread_closed()
+    except Exception:
+        logger.exception("handle_done: error in on_thread_closed callback")
+
+    # 7. Add DONE reaction to root message
+    if root_message_id:
+        try:
+            await replier.send_reaction(root_message_id, "DONE")
+        except Exception:
+            logger.exception("handle_done: failed to send DONE reaction")
+
+    # 8. Confirm in thread
+    try:
+        await replier.reply_text(
+            root_message_id, "✅ 话题已关闭，资源已释放。"
+        )
+    except Exception:
+        logger.exception("handle_done: failed to send confirmation")
 
 
 async def handle_help(replier: Replier, chat_id: str) -> None:
