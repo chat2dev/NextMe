@@ -100,6 +100,8 @@ class MessageHandler:
         # The asyncio event loop that owns the dispatcher.  Captured lazily on
         # the first call from the asyncio side (see get_event_handler).
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._active_threads: set[str] = set()
+        # Format: "chat_id:thread_root_id" — threads the bot is actively participating in.
 
     # ------------------------------------------------------------------
     # Public: called from asyncio context to capture the running loop.
@@ -108,6 +110,11 @@ class MessageHandler:
     def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Capture *loop* so that handle_message can schedule coroutines onto it."""
         self._loop = loop
+
+    def restore_active_threads(self, thread_keys: set[str]) -> None:
+        """Restore active thread set from persisted state on startup."""
+        self._active_threads = set(thread_keys)
+        logger.info("MessageHandler: restored %d active thread(s)", len(thread_keys))
 
     # ------------------------------------------------------------------
     # Public: create a lark EventDispatcherHandler that wraps this handler.
@@ -305,7 +312,36 @@ class MessageHandler:
             logger.debug("handle_message: empty text, skipping message_id=%s", message_id)
             return
 
-        session_id = f"{chat_id}:{user_id}"
+        root_id: str = getattr(message, "root_id", "") or ""
+        is_group = chat_type == "group"
+
+        if is_group:
+            if root_id:
+                # 话题内回复：检查是否是 bot 参与的话题
+                thread_key = f"{chat_id}:{root_id}"
+                if thread_key not in self._active_threads:
+                    logger.debug(
+                        "handle_message: ignoring reply in unknown thread root_id=%s", root_id
+                    )
+                    return
+                session_id = thread_key
+                thread_root_id = root_id
+            else:
+                # 群聊根消息：必须 @bot
+                if not self._has_bot_mention(message):
+                    logger.debug(
+                        "handle_message: ignoring group root message without @mention message_id=%s",
+                        message_id,
+                    )
+                    return
+                session_id = f"{chat_id}:{message_id}"
+                thread_root_id = message_id
+                # 注册新话题
+                self._active_threads.add(f"{chat_id}:{message_id}")
+        else:
+            # p2p：保持不变
+            session_id = f"{chat_id}:{user_id}"
+            thread_root_id = ""
 
         async def _reply_fn(reply: Reply) -> None:
             # Placeholder reply callback; the real one is injected by the
@@ -327,6 +363,8 @@ class MessageHandler:
             chat_type=chat_type,
             created_at=datetime.now(),
             mentions=_extract_mentions(message),
+            user_id=user_id,
+            thread_root_id=thread_root_id,
         )
 
         logger.info(
@@ -343,6 +381,12 @@ class MessageHandler:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _has_bot_mention(message: Any) -> bool:
+        """Return True if the message has any @mention (indicating bot was @-mentioned)."""
+        mentions = getattr(message, "mentions", None) or []
+        return len(mentions) > 0
 
     def _schedule_dispatch(self, task: Task) -> None:
         """Schedule ``dispatcher.dispatch(task)`` on the asyncio event loop."""

@@ -930,3 +930,148 @@ class TestMentionParsing:
         handler.handle_message(data)
         # Image messages produce empty text → handler drops them before dispatch.
         assert dispatcher.dispatch.call_args is None
+
+
+class TestThreadSessionId:
+    """Verify session_id construction and thread routing in group chats."""
+
+    def _make_handler(self):
+        dispatcher = MagicMock()
+        dispatched: list = []
+        async def _dispatch(task): dispatched.append(task)
+        dispatcher.dispatch = _dispatch
+        handler = MessageHandler(MessageDedup(), dispatcher)
+        mock_loop = MagicMock()
+        mock_loop.is_running.return_value = True
+        handler._loop = mock_loop
+        return handler, dispatcher, dispatched
+
+    def _run_handle_and_collect(self, handler, dispatcher, dispatched, data):
+        """Invoke handle_message with run_coroutine_threadsafe patched to actually run coroutines."""
+        def fake_rct(coro, loop):
+            _loop = asyncio.new_event_loop()
+            try:
+                _loop.run_until_complete(coro)
+            finally:
+                _loop.close()
+
+        with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe", side_effect=fake_rct):
+            handler.handle_message(data)
+
+    def _make_group_root_message(self, message_id: str, user_id: str, text: str, with_mention: bool = True):
+        """Group chat root message (root_id empty). With bot @mention by default."""
+        message = MagicMock()
+        message.message_id = message_id
+        message.chat_id = "oc_group1"
+        message.chat_type = "group"
+        message.message_type = "text"
+        message.root_id = ""
+        message.parent_id = ""
+        content = {"text": f"@_user_1 {text}" if with_mention else text}
+        message.content = json.dumps(content)
+        bot_mention = MagicMock()
+        bot_mention.id = MagicMock()
+        bot_mention.id.open_id = "ou_bot_id"
+        bot_mention.name = "NextMe"
+        message.mentions = [bot_mention] if with_mention else []
+        sender = MagicMock()
+        sender.sender_id = MagicMock()
+        sender.sender_id.open_id = user_id
+        event = MagicMock()
+        event.message = message
+        event.sender = sender
+        data = MagicMock()
+        data.event = event
+        return data
+
+    def _make_group_thread_reply(self, message_id: str, root_id: str, user_id: str, text: str):
+        """Group chat reply within a thread (root_id set, no @mention needed)."""
+        message = MagicMock()
+        message.message_id = message_id
+        message.chat_id = "oc_group1"
+        message.chat_type = "group"
+        message.message_type = "text"
+        message.root_id = root_id
+        message.parent_id = root_id
+        message.content = json.dumps({"text": text})
+        message.mentions = []
+        sender = MagicMock()
+        sender.sender_id = MagicMock()
+        sender.sender_id.open_id = user_id
+        event = MagicMock()
+        event.message = message
+        event.sender = sender
+        data = MagicMock()
+        data.event = event
+        return data
+
+    def test_group_root_message_with_mention_creates_thread_session(self):
+        """@bot on root message → session_id = chat_id:message_id, user_id filled."""
+        handler, dispatcher, dispatched = self._make_handler()
+        data = self._make_group_root_message("om_root1", "ou_userA", "hello bot")
+        self._run_handle_and_collect(handler, dispatcher, dispatched, data)
+
+        assert len(dispatched) == 1
+        task = dispatched[0]
+        assert task.session_id == "oc_group1:om_root1"
+        assert task.user_id == "ou_userA"
+        assert task.thread_root_id == "om_root1"
+
+    def test_group_root_message_without_mention_ignored(self):
+        """Root message without @bot in group chat is ignored."""
+        handler, dispatcher, dispatched = self._make_handler()
+        data = self._make_group_root_message("om_root2", "ou_userA", "plain message", with_mention=False)
+        self._run_handle_and_collect(handler, dispatcher, dispatched, data)
+
+        assert len(dispatched) == 0
+
+    def test_group_thread_reply_in_active_thread_dispatched(self):
+        """Reply in an active thread (no @) is dispatched with same session_id."""
+        handler, dispatcher, dispatched = self._make_handler()
+        handler._active_threads.add("oc_group1:om_root1")  # simulate registered thread
+        data = self._make_group_thread_reply("om_reply1", "om_root1", "ou_userB", "follow-up")
+        self._run_handle_and_collect(handler, dispatcher, dispatched, data)
+
+        assert len(dispatched) == 1
+        task = dispatched[0]
+        assert task.session_id == "oc_group1:om_root1"
+        assert task.user_id == "ou_userB"
+        assert task.thread_root_id == "om_root1"
+
+    def test_group_thread_reply_in_unknown_thread_ignored(self):
+        """Reply in an unknown thread (bot not involved) is silently dropped."""
+        handler, dispatcher, dispatched = self._make_handler()
+        # _active_threads is empty — thread not registered
+        data = self._make_group_thread_reply("om_reply2", "om_root_other", "ou_userC", "hey")
+        self._run_handle_and_collect(handler, dispatcher, dispatched, data)
+
+        assert len(dispatched) == 0
+
+    def test_p2p_session_id_unchanged(self):
+        """P2P chat session_id stays chat_id:user_id regardless of thread logic."""
+        handler, dispatcher, dispatched = self._make_handler()
+
+        message = MagicMock()
+        message.message_id = "om_p2p1"
+        message.chat_id = "p2p_chat1"
+        message.chat_type = "p2p"
+        message.message_type = "text"
+        message.root_id = ""
+        message.content = json.dumps({"text": "hello"})
+        message.mentions = []
+        sender = MagicMock()
+        sender.sender_id = MagicMock()
+        sender.sender_id.open_id = "ou_userX"
+        event = MagicMock()
+        event.message = message
+        event.sender = sender
+        data = MagicMock()
+        data.event = event
+
+        self._run_handle_and_collect(handler, dispatcher, dispatched, data)
+
+        assert len(dispatched) == 1
+        task = dispatched[0]
+        assert task.session_id == "p2p_chat1:ou_userX"
+        assert task.user_id == "ou_userX"
+        assert task.thread_root_id == ""
