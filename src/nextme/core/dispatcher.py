@@ -540,7 +540,14 @@ class TaskDispatcher:
             logger.info(
                 "TaskDispatcher: invoking skill %r for context_id=%r", trigger, context_id
             )
-            prompt = SkillInvoker().build_prompt(skill, user_input=user_input.strip())
+            enriched_input = user_input.strip()
+            if task.mentions:
+                lines = [
+                    f"- {m['name']} (open_id: {m['open_id']})"
+                    for m in task.mentions
+                ]
+                enriched_input += "\n\n参与人(@mentions):\n" + "\n".join(lines)
+            prompt = SkillInvoker().build_prompt(skill, user_input=enriched_input)
             skill_task = Task(
                 id=str(uuid.uuid4()),
                 content=prompt,

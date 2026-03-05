@@ -456,3 +456,61 @@ async def test_dispatcher_zero_task_timeout_keeps_task_default(tmp_path):
     await d.dispatch(task)
 
     assert task.timeout == original_timeout
+
+
+# ---------------------------------------------------------------------------
+# @mention injection into skill user_input
+# ---------------------------------------------------------------------------
+
+
+class TestSkillMentionInjection:
+    """Verify that task.mentions are appended to the skill prompt content."""
+
+    async def test_skill_user_input_includes_mentions(self, tmp_path):
+        """When a skill task has mentions, the enqueued skill_task content
+        should include each mention's open_id and name."""
+        replier = make_replier()
+        skill_registry = SkillRegistry()
+        skill_registry._skills["book"] = make_skill("book", name="Book Meeting")
+        d = make_dispatcher(tmp_path, replier, skill_registry=skill_registry)
+
+        session_id = "oc_chat:ou_user"
+        task = make_task("/skill book 明天下午3点", session_id=session_id)
+        task.mentions = [
+            {"name": "小明", "open_id": "ou_aaa"},
+            {"name": "小红", "open_id": "ou_bbb"},
+        ]
+
+        with patch.object(d, "_ensure_worker", new=AsyncMock()):
+            await d.dispatch(task)
+
+        session = _get_session(d, session_id)
+        assert session is not None
+        assert session.task_queue.qsize() == 1
+
+        skill_task = session.task_queue.get_nowait()
+        assert "ou_aaa" in skill_task.content
+        assert "小明" in skill_task.content
+        assert "ou_bbb" in skill_task.content
+
+    async def test_skill_no_mentions_unchanged(self, tmp_path):
+        """When task.mentions is empty, no '参与人' section is added to the
+        skill task content."""
+        replier = make_replier()
+        skill_registry = SkillRegistry()
+        skill_registry._skills["book"] = make_skill("book", name="Book Meeting")
+        d = make_dispatcher(tmp_path, replier, skill_registry=skill_registry)
+
+        session_id = "oc_chat:ou_user"
+        task = make_task("/skill book 明天下午3点", session_id=session_id)
+        task.mentions = []  # explicitly empty
+
+        with patch.object(d, "_ensure_worker", new=AsyncMock()):
+            await d.dispatch(task)
+
+        session = _get_session(d, session_id)
+        assert session is not None
+        assert session.task_queue.qsize() == 1
+
+        skill_task = session.task_queue.get_nowait()
+        assert "参与人" not in skill_task.content
