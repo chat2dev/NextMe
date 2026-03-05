@@ -541,15 +541,19 @@ class TaskDispatcher:
                 "TaskDispatcher: invoking skill %r for context_id=%r", trigger, context_id
             )
             enriched_input = user_input.strip()
-            if task.mentions:
-                lines = [
-                    f"- {m['name']} (open_id: {m['open_id']})"
-                    for m in task.mentions
-                ]
-                enriched_input += "\n\n参与人(@mentions):\n" + "\n".join(lines)
             requester_open_id = self._get_user_id(task.session_id) if task.session_id else ""
-            if requester_open_id:
-                enriched_input += f"\n\n预定人 open_id：{requester_open_id}"
+            # Build unified attendee block: @mentions + requester (deduped)
+            seen_ids: set[str] = set()
+            attendee_lines: list[str] = []
+            for m in task.mentions:
+                oid = m.get("open_id", "")
+                if oid and oid not in seen_ids:
+                    seen_ids.add(oid)
+                    attendee_lines.append(f"- {m.get('name', '')} (open_id: {oid})")
+            if requester_open_id and requester_open_id not in seen_ids:
+                attendee_lines.append(f"- [预定人] (open_id: {requester_open_id})")
+            if attendee_lines:
+                enriched_input += "\n\n参与人(@mentions):\n" + "\n".join(attendee_lines)
             prompt = SkillInvoker().build_prompt(skill, user_input=enriched_input)
             skill_task = Task(
                 id=str(uuid.uuid4()),

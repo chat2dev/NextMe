@@ -88,7 +88,6 @@ def get_or_create_calendar(token: str, cache_path: str = DEFAULT_CACHE) -> str:
     resp = _http_post(f"{BASE_URL}/calendar/v4/calendars", token, {
         "summary": CALENDAR_NAME,
         "description": "由 NextMe bot 创建的共享会议日历",
-        "permissions": "show_only_free_busy",
         "color": -1,
     })
     if resp.get("code") != 0:
