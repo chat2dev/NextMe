@@ -113,6 +113,7 @@ def create_event(
         "vchat": {"vc_type": "vc"},
         "free_busy_status": "busy",
         "visibility": "default",
+        "attendee_ability": "can_see_others",
         "need_notification": True,
     }
     resp = _http_post(f"{BASE_URL}/calendar/v4/calendars/{cal_id}/events", token, body)

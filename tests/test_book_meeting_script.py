@@ -61,7 +61,7 @@ class TestCreateEvent:
             "event_id": "ev_001",
             "vchat": {"meeting_url": "https://meeting.feishu.cn/abc"},
         }}}
-        with patch.object(bm, "_http_post", return_value=resp):
+        with patch.object(bm, "_http_post", return_value=resp) as mock_post:
             event_id, vchat_url = bm.create_event(
                 "token", "cal_id",
                 title="Team Meeting",
@@ -70,6 +70,8 @@ class TestCreateEvent:
             )
         assert event_id == "ev_001"
         assert vchat_url == "https://meeting.feishu.cn/abc"
+        body = mock_post.call_args[0][2]
+        assert body.get("attendee_ability") == "can_see_others"
 
     def test_raises_on_api_error(self):
         with patch.object(bm, "_http_post", return_value={"code": 1, "msg": "error"}):
