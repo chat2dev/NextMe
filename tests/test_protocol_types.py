@@ -20,3 +20,10 @@ def test_task_accepts_mentions_list():
         mentions=[{"name": "小明", "open_id": "ou_abc"}],
     )
     assert task.mentions == [{"name": "小明", "open_id": "ou_abc"}]
+
+
+def test_task_mentions_instances_are_independent():
+    task1 = Task(id="1", content="hi", session_id="s", reply_fn=AsyncMock())
+    task2 = Task(id="2", content="hi", session_id="s", reply_fn=AsyncMock())
+    task1.mentions.append({"name": "x", "open_id": "y"})
+    assert task2.mentions == []
