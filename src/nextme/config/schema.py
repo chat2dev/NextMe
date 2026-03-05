@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -84,6 +85,18 @@ class Settings(BaseModel):
     admin_users: list[str] = Field(default_factory=list)
     """Feishu open_ids of super-admins. Hot-reloadable via ./reload.sh (SIGHUP).
     These users bypass all ACL checks and can approve owner applications."""
+    max_active_threads_per_chat: int = 8
+    """每个群聊最多同时活���的话题数。超出则排队等候直到有话题关闭。"""
+
+
+class ThreadRecord(BaseModel):
+    """Persistent metadata for one Feishu thread session."""
+
+    chat_id: str
+    thread_root_id: str  # Feishu root message_id，话题唯一标识
+    project_name: str
+    created_at: datetime = Field(default_factory=datetime.now)
+    last_active_at: datetime = Field(default_factory=datetime.now)
 
 
 class ProjectState(BaseModel):
@@ -107,3 +120,5 @@ class GlobalState(BaseModel):
     contexts: dict[str, UserState] = Field(default_factory=dict)
     bindings: dict[str, str] = Field(default_factory=dict)
     """Dynamic chat→project bindings set via ``/project bind``.  Key: chat_id, value: project name."""
+    thread_records: dict[str, ThreadRecord] = Field(default_factory=dict)
+    # key: "chat_id:thread_root_id"
