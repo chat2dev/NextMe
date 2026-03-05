@@ -35,3 +35,5 @@ nextme.json
 
 # uv
 .python-version
+.worktrees/
+.worktrees/
