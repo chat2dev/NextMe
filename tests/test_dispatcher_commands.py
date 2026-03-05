@@ -492,10 +492,13 @@ class TestSkillMentionInjection:
         assert "ou_aaa" in skill_task.content
         assert "小明" in skill_task.content
         assert "ou_bbb" in skill_task.content
+        # Requester (parsed from session_id "oc_chat:ou_user") is also injected
+        assert "ou_user" in skill_task.content
+        assert "预定人 open_id" in skill_task.content
 
-    async def test_skill_no_mentions_unchanged(self, tmp_path):
-        """When task.mentions is empty, no '参与人' section is added to the
-        skill task content."""
+    async def test_skill_no_mentions_requester_injected(self, tmp_path):
+        """When task.mentions is empty, the requester's open_id is still
+        injected into the skill task content via '预定人 open_id' line."""
         replier = make_replier()
         skill_registry = SkillRegistry()
         skill_registry._skills["book"] = make_skill("book", name="Book Meeting")
@@ -514,3 +517,4 @@ class TestSkillMentionInjection:
 
         skill_task = session.task_queue.get_nowait()
         assert "参与人" not in skill_task.content
+        assert "预定人 open_id：ou_user" in skill_task.content

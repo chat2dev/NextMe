@@ -547,6 +547,9 @@ class TaskDispatcher:
                     for m in task.mentions
                 ]
                 enriched_input += "\n\n参与人(@mentions):\n" + "\n".join(lines)
+            requester_open_id = self._get_user_id(task.session_id) if task.session_id else ""
+            if requester_open_id:
+                enriched_input += f"\n\n预定人 open_id：{requester_open_id}"
             prompt = SkillInvoker().build_prompt(skill, user_input=enriched_input)
             skill_task = Task(
                 id=str(uuid.uuid4()),
