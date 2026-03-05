@@ -98,6 +98,16 @@ class TestAddAttendees:
             for c in calls
         )
 
+    def test_raises_on_api_error(self):
+        with patch.object(bm, "_http_post", return_value={"code": 1, "msg": "fail"}):
+            with pytest.raises(RuntimeError, match="add attendees"):
+                bm.add_attendees("token", "cal_id", "ev_id", ["ou_x"], None)
+
+    def test_no_op_when_no_attendees_and_no_room(self):
+        with patch.object(bm, "_http_post") as mock_post:
+            bm.add_attendees("token", "cal_id", "ev_id", [], None)
+        mock_post.assert_not_called()
+
 
 class TestSearchRoom:
     def test_returns_first_match(self):

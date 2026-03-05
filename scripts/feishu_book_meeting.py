@@ -160,26 +160,17 @@ def search_room(token: str, keyword: str) -> tuple[str | None, str | None]:
 # ---------------------------------------------------------------------------
 
 def _iso_to_timestamp(iso: str) -> str:
-    """Convert ISO8601 string to Unix timestamp string."""
+    """Convert ISO8601 string to Unix timestamp string (Python 3.12+ fromisoformat handles offsets)."""
     from datetime import datetime, timezone, timedelta
-    # Handle +08:00 suffix
-    if iso.endswith("+08:00"):
-        iso_clean = iso[:-6]
-        dt = datetime.fromisoformat(iso_clean).replace(tzinfo=timezone(timedelta(hours=8)))
-    else:
-        dt = datetime.fromisoformat(iso)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
+    dt = datetime.fromisoformat(iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
     return str(int(dt.timestamp()))
 
 
 def _format_dt(iso: str) -> str:
     from datetime import datetime
-    if iso.endswith("+08:00"):
-        iso_clean = iso[:-6]
-        dt = datetime.fromisoformat(iso_clean)
-    else:
-        dt = datetime.fromisoformat(iso)
+    dt = datetime.fromisoformat(iso)
     return dt.strftime("%Y-%m-%d %H:%M")
 
 
