@@ -61,6 +61,8 @@ class Task:
     timeout: timedelta = field(default_factory=lambda: timedelta(hours=8))
     canceled: bool = False
     was_queued: bool = False            # set when task waited in queue
+    mentions: list[dict[str, str]] = field(default_factory=list)
+    # Each entry: {"name": "小明", "open_id": "ou_xxxxxxxx"}
 
 
 # Emitted by ACPRuntime callbacks
