@@ -179,7 +179,7 @@ class TaskDispatcher:
                 await self._handle_meta_command(task, user_ctx)
                 return
             # Not an open command — check authorization.
-            user_id = self._get_user_id(context_id)
+            user_id = task.user_id or self._get_user_id(context_id)
             role = await self._acl_manager.get_role(user_id)
             if role is None:
                 logger.info(
@@ -411,7 +411,7 @@ class TaskDispatcher:
         caller_role: Optional[_Role] = None
         if self._acl_manager is not None:
             caller_role = await self._acl_manager.get_role(
-                self._get_user_id(context_id)
+                task.user_id or self._get_user_id(context_id)
             )
 
         if command == "/help":
@@ -541,7 +541,7 @@ class TaskDispatcher:
                 "TaskDispatcher: invoking skill %r for context_id=%r", trigger, context_id
             )
             enriched_input = user_input.strip()
-            requester_open_id = self._get_user_id(task.session_id) if task.session_id else ""
+            requester_open_id = task.user_id or (self._get_user_id(task.session_id) if task.session_id else "")
             # Build unified attendee block: @mentions + requester (deduped)
             seen_ids: set[str] = set()
             attendee_lines: list[str] = []
@@ -606,20 +606,20 @@ class TaskDispatcher:
             if self._memory_manager is None:
                 await replier.send_text(chat_id, "记忆功能未启用。")
                 return
-            user_id = self._get_user_id(context_id)
+            user_id = task.user_id or self._get_user_id(context_id)
             await handle_remember(user_id, arg, self._memory_manager, replier, chat_id)
 
         elif command == "/whoami":
             if self._acl_manager is not None:
                 from .commands import handle_whoami
                 await handle_whoami(
-                    self._get_user_id(context_id),
+                    task.user_id or self._get_user_id(context_id),
                     self._acl_manager,
                     replier,
                     chat_id,
                 )
             else:
-                uid = self._get_user_id(context_id)
+                uid = task.user_id or self._get_user_id(context_id)
                 await replier.send_text(chat_id, f"open_id: `{uid}`\n角色: (未启用 ACL)")
 
         elif command == "/acl":
@@ -629,7 +629,7 @@ class TaskDispatcher:
                 await replier.send_text(chat_id, "权限不足。")
             else:
                 await self._handle_acl_command(
-                    arg, caller_role, self._get_user_id(context_id), replier, chat_id
+                    arg, caller_role, task.user_id or self._get_user_id(context_id), replier, chat_id
                 )
 
         else:

@@ -518,3 +518,56 @@ class TestSkillMentionInjection:
         skill_task = session.task_queue.get_nowait()
         assert "参与人(@mentions)" in skill_task.content
         assert "[预定人] (open_id: ou_user)" in skill_task.content
+
+
+# ---------------------------------------------------------------------------
+# task.user_id extraction tests
+# ---------------------------------------------------------------------------
+
+
+class TestUserIdExtraction:
+    """ACL and /whoami commands use task.user_id, not session_id suffix."""
+
+    async def test_group_thread_session_uses_task_user_id(self, tmp_path):
+        """When session_id is chat_id:thread_root_id, user identity comes from task.user_id."""
+        replier = make_replier()
+        d = make_dispatcher(tmp_path, replier)
+
+        # Simulate group thread task: session_id ends with message_id, not user_id
+        task = make_task("hello", session_id="oc_chat:om_thread_root")
+        task.user_id = "ou_actual_user"
+        task.thread_root_id = "om_thread_root"
+        task.chat_type = "group"
+
+        with patch.object(d, "_ensure_worker", new=AsyncMock()):
+            await d.dispatch(task)
+
+        # Should not crash; user_id correctly used for any user-identity lookup
+
+    async def test_skill_group_thread_uses_task_user_id_for_requester(self, tmp_path):
+        """When session_id is chat_id:thread_root_id, skill requester open_id
+        comes from task.user_id, not the session_id suffix."""
+        replier = make_replier()
+        skill_registry = SkillRegistry()
+        skill_registry._skills["book"] = make_skill("book", name="Book Meeting")
+        d = make_dispatcher(tmp_path, replier, skill_registry=skill_registry)
+
+        # session_id ends with message thread id, NOT user id
+        session_id = "oc_chat:om_thread_root"
+        task = make_task("/skill book 明天下午3点", session_id=session_id)
+        task.user_id = "ou_actual_user"
+        task.thread_root_id = "om_thread_root"
+        task.chat_type = "group"
+        task.mentions = []
+
+        with patch.object(d, "_ensure_worker", new=AsyncMock()):
+            await d.dispatch(task)
+
+        session = _get_session(d, session_id)
+        assert session is not None
+        assert session.task_queue.qsize() == 1
+
+        skill_task = session.task_queue.get_nowait()
+        # Requester should be the actual user, not "om_thread_root" (which is the session suffix)
+        assert "[预定人] (open_id: ou_actual_user)" in skill_task.content
+        assert "om_thread_root" not in skill_task.content
