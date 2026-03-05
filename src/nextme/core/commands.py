@@ -33,6 +33,7 @@ HELP_COMMANDS: list[tuple[str, str]] = [
     ("/whoami", "查看我的 open_id 和角色"),
     ("/new", "开启新对话（清除当前对话历史）"),
     ("/stop", "取消当前执行中的任务"),
+    ("/done", "关闭当前话题，释放 Claude 进程（仅群聊话题内有效）"),
     ("/help", "显示帮助"),
     ("/skill", "列出所有 Skill"),
     ("/skill <trigger>", "触发指定 Skill"),

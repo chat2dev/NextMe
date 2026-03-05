@@ -43,6 +43,7 @@ from ..protocol.types import (
 from .interfaces import IMAdapter, Replier
 from .commands import (
     handle_bind,
+    handle_done,
     handle_unbind,
     handle_help,
     handle_new,
@@ -516,6 +517,31 @@ class TaskDispatcher:
                 return
             runtime = self._acp_registry.get(f"{context_id}:{session.project_name}")
             await handle_stop(session, replier, chat_id, runtime=runtime)
+
+        elif command == "/done":
+            if task.chat_type != "group" or not task.thread_root_id:
+                await replier.send_text(
+                    chat_id, "/done 仅在群聊话题内有效。"
+                )
+                return
+            if session is None:
+                await replier.send_text(chat_id, "当前没有活跃 Session。")
+                return
+            runtime = self._acp_registry.get(f"{context_id}:{session.project_name}")
+            chat_id_str = self._get_chat_id(context_id)
+
+            def _on_closed() -> None:
+                self._on_thread_closed(chat_id_str, task.thread_root_id)
+
+            await handle_done(
+                session=session,
+                runtime=runtime,
+                replier=replier,
+                chat_id=chat_id_str,
+                root_message_id=task.thread_root_id,
+                acp_registry=self._acp_registry,
+                on_thread_closed=_on_closed,
+            )
 
         elif command == "/status":
             await handle_status(user_ctx, replier, chat_id)

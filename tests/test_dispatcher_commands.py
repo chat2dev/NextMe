@@ -742,3 +742,56 @@ class TestThreadLimit:
         # Should be dispatched normally, not queued
         ensure_worker_mock.assert_called_once()
         assert "oc_G" not in d._pending_thread_queue or len(d._pending_thread_queue["oc_G"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# /done command routing tests
+# ---------------------------------------------------------------------------
+
+
+class TestDoneCommand:
+    """Verify /done command routing in dispatcher."""
+
+    async def test_done_command_calls_handle_done(self, tmp_path):
+        """/done in a group thread triggers handle_done."""
+        replier = make_replier()
+        d = make_dispatcher(tmp_path, replier)
+
+        task = make_task("/done", session_id="oc_G:om_root1")
+        task.user_id = "ou_A"
+        task.thread_root_id = "om_root1"
+        task.message_id = "om_reply1"
+        task.chat_type = "group"
+
+        with patch("nextme.core.dispatcher.handle_done", new=AsyncMock()) as mock_done:
+            await d.dispatch(task)
+            mock_done.assert_called_once()
+
+    async def test_done_outside_thread_sends_error(self, tmp_path):
+        """/done in p2p chat sends helpful error message (not group thread)."""
+        replier = make_replier()
+        d = make_dispatcher(tmp_path, replier)
+
+        task = make_task("/done", session_id="p2p_chat:ou_user")
+        task.user_id = "ou_user"
+        task.thread_root_id = ""
+        task.chat_type = "p2p"
+
+        await d.dispatch(task)
+        # Should send an error about /done only working in group threads
+        assert replier.send_text.called or replier.reply_text.called
+
+    async def test_done_group_without_thread_root_sends_error(self, tmp_path):
+        """/done in group chat with no thread_root_id sends an error."""
+        replier = make_replier()
+        d = make_dispatcher(tmp_path, replier)
+
+        task = make_task("/done", session_id="oc_G:ou_user")
+        task.user_id = "ou_user"
+        task.thread_root_id = ""  # not in a thread
+        task.chat_type = "group"
+
+        await d.dispatch(task)
+        replier.send_text.assert_called()
+        text_arg = replier.send_text.call_args[0][1]
+        assert "话题" in text_arg or "/done" in text_arg
