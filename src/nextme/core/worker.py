@@ -221,9 +221,12 @@ class SessionWorker:
                         task.id,
                     )
                     # Mark task as cancelled and send feedback before re-raising.
-                    task.canceled = True
-                    self._session.status = TaskStatus.CANCELED
-                    await self._send_cancelled(task)
+                    # Guard: _execute_task's inner handler may have already sent
+                    # the cancel card (and set task.canceled=True); don't send twice.
+                    if not task.canceled:
+                        task.canceled = True
+                        self._session.status = TaskStatus.CANCELED
+                        await self._send_cancelled(task)
                     raise
                 finally:
                     self._session.active_task = None
@@ -472,8 +475,10 @@ class SessionWorker:
 
             # Inject user memory facts into the task prompt for new sessions only.
             # Facts are keyed by user_id (global across all chats) not context_id.
+            # For group thread sessions, context_id ends with thread_root_id (not user open_id);
+            # use task.user_id which is always the sender's actual open_id.
             if not runtime.actual_id and self._memory_manager is not None:
-                user_id = self._session.context_id.rsplit(":", 1)[-1]
+                user_id = task.user_id or self._session.context_id.rsplit(":", 1)[-1]
                 try:
                     await self._memory_manager.load(user_id)
                 except Exception:
@@ -498,6 +503,29 @@ class SessionWorker:
                         content=f"{rendered}\n\n[用户消息]\n{task.content}",
                     )
 
+            # Inject @mentions open_ids and requester open_id into the prompt so
+            # the agent can resolve Feishu @_user_N placeholders to actual open_id
+            # values (needed by skills like book-meeting that call Feishu APIs).
+            requester_open_id = task.user_id
+            seen_open_ids: set[str] = set()
+            mention_lines: list[str] = []
+            for m in task.mentions:
+                oid = m.get("open_id", "")
+                if oid and oid not in seen_open_ids:
+                    seen_open_ids.add(oid)
+                    mention_lines.append(f"- {m.get('name', '')} (open_id: {oid})")
+            # Always include the requester (message sender) so skills like
+            # book-meeting can add them as a participant.
+            if requester_open_id and requester_open_id not in seen_open_ids:
+                seen_open_ids.add(requester_open_id)
+                mention_lines.append(f"- [预定人] (open_id: {requester_open_id})")
+            if mention_lines:
+                mentions_block = "[消息中的@提及用户]\n" + "\n".join(mention_lines)
+                task = dataclasses.replace(
+                    task,
+                    content=f"{task.content}\n\n{mentions_block}",
+                )
+
             # Step 4 — Execute.
             # ── DEBUG ② 发给 Executor(Agent) 的原始输入 ─────────────────
             logger.debug(
@@ -512,6 +540,7 @@ class SessionWorker:
                     on_permission=self._on_permission,
                 )
             except asyncio.CancelledError:
+                task.canceled = True
                 self._session.status = TaskStatus.CANCELED
                 await self._send_cancelled(task)
                 raise
@@ -571,7 +600,8 @@ class SessionWorker:
         # Extract <memory> facts written by the agent and strip them from the
         # displayed output.  Writeback happens regardless of session age so
         # that the agent can update memory at any point in a conversation.
-        user_id = self._session.context_id.rsplit(":", 1)[-1]
+        # Use task.user_id for group threads (context_id ends with thread_root_id there).
+        user_id = task.user_id or self._session.context_id.rsplit(":", 1)[-1]
         memory_ops, final_content = self._extract_and_strip_memory(final_content)
         # ── DEBUG ⑤ Agent 返回的 memory 操作 ────────────────────────────
         if memory_ops:
@@ -621,7 +651,9 @@ class SessionWorker:
 
         # Add a "DONE" reaction to the original message so the user can see
         # at a glance that the task completed (fire-and-forget — failure is OK).
-        if task.message_id:
+        # For group thread sessions, skip the per-task reaction — /done sends it
+        # on the root message when the user explicitly closes the thread.
+        if task.message_id and not task.thread_root_id:
             try:
                 await self._replier.send_reaction(task.message_id, "DONE")
             except Exception:
@@ -806,7 +838,12 @@ class SessionWorker:
         if not req.options:
             desc = req.description or "工具调用"
             try:
-                await self._replier.send_text(chat_id, f"已自动授权: {desc}")
+                if self._active_in_thread and self._active_message_id:
+                    await self._replier.reply_text(
+                        self._active_message_id, f"已自动授权: {desc}", in_thread=True
+                    )
+                else:
+                    await self._replier.send_text(chat_id, f"已自动授权: {desc}")
             except Exception:
                 logger.exception(
                     "SessionWorker[%s]: failed to send auto-approve notification",
@@ -826,7 +863,12 @@ class SessionWorker:
             display_id=self._session.actual_id or "",
         )
         try:
-            await self._replier.send_card(chat_id, card)
+            if self._active_in_thread and self._active_message_id:
+                await self._replier.reply_card(
+                    self._active_message_id, card, in_thread=True
+                )
+            else:
+                await self._replier.send_card(chat_id, card)
         except Exception:
             logger.exception(
                 "SessionWorker[%s]: failed to send permission card",

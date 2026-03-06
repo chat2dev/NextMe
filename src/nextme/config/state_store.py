@@ -146,6 +146,47 @@ class StateStore:
         project_state = user_state.projects.get(project_name)
         return project_state.actual_id if project_state else ""
 
+    def register_thread(self, chat_id: str, thread_root_id: str, project_name: str) -> None:
+        """注册一个新话题，幂等（已存在则只更新 last_active_at）。"""
+        from .schema import ThreadRecord
+        state = self._require_loaded()
+        key = f"{chat_id}:{thread_root_id}"
+        if key not in state.thread_records:
+            state.thread_records[key] = ThreadRecord(
+                chat_id=chat_id,
+                thread_root_id=thread_root_id,
+                project_name=project_name,
+            )
+            self._dirty = True
+
+    def unregister_thread(self, chat_id: str, thread_root_id: str) -> None:
+        """移除话题记录，幂等。"""
+        state = self._require_loaded()
+        key = f"{chat_id}:{thread_root_id}"
+        if key in state.thread_records:
+            state.thread_records.pop(key)
+            self._dirty = True
+
+    def get_active_thread_count(self, chat_id: str) -> int:
+        """返回指定 chat 当前活跃话题数。"""
+        state = self._require_loaded()
+        return sum(1 for r in state.thread_records.values() if r.chat_id == chat_id)
+
+    def get_thread_project(self, chat_id: str, thread_root_id: str) -> str:
+        """返回话题关联的 project_name，不存在则返回空串。"""
+        state = self._require_loaded()
+        record = state.thread_records.get(f"{chat_id}:{thread_root_id}")
+        return record.project_name if record else ""
+
+    def touch_thread(self, chat_id: str, thread_root_id: str) -> None:
+        """更新话题的 last_active_at 时间戳。"""
+        from datetime import datetime
+        state = self._require_loaded()
+        key = f"{chat_id}:{thread_root_id}"
+        if key in state.thread_records:
+            state.thread_records[key].last_active_at = datetime.now()
+            self._dirty = True
+
     async def flush(self) -> None:
         """Force-write the current in-memory state to disk atomically.
 

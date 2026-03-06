@@ -16,11 +16,12 @@ It is responsible for:
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import uuid
 from datetime import timedelta
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
     from ..acl.manager import AclManager
@@ -42,6 +43,7 @@ from ..protocol.types import (
 from .interfaces import IMAdapter, Replier
 from .commands import (
     handle_bind,
+    handle_done,
     handle_unbind,
     handle_help,
     handle_new,
@@ -107,6 +109,26 @@ class TaskDispatcher:
         self._dynamic_bindings: dict[str, str] = (
             state_store.get_all_bindings() if state_store is not None else {}
         )
+        # Pending thread queue: chat_id → deque of Tasks waiting for a free slot.
+        self._pending_thread_queue: dict[str, collections.deque] = {}
+        # Optional callback invoked when a thread is closed, so the handler can
+        # remove it from _active_threads.  Registered via register_thread_closed_callback().
+        self._thread_closed_callback: Callable[[str, str], None] | None = None
+        # Optional callback invoked when a thread is accepted (after limit check passes),
+        # so the handler can add it to _active_threads.  Registered via register_thread_accept_callback().
+        self._thread_accept_callback: Callable[[str, str], None] | None = None
+
+    # ------------------------------------------------------------------
+    # Public: callback registration
+    # ------------------------------------------------------------------
+
+    def register_thread_closed_callback(self, callback: Callable[[str, str], None]) -> None:
+        """Register a callback invoked when a thread is closed (chat_id, thread_root_id)."""
+        self._thread_closed_callback = callback
+
+    def register_thread_accept_callback(self, callback: Callable[[str, str], None]) -> None:
+        """Register a callback invoked when a thread is accepted (chat_id, thread_root_id)."""
+        self._thread_accept_callback = callback
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -124,7 +146,10 @@ class TaskDispatcher:
         2. If the text matches a meta-command, handle it and return.
         3. If there is a pending permission future and the text is a valid
            digit reply, resolve the permission and return.
-        4. Otherwise enqueue the task and ensure a worker is running.
+        4. For group root messages: enforce the active-thread limit.  If the
+           limit is reached, park the task in :attr:`_pending_thread_queue`
+           and return after sending a queuing notice.
+        5. Otherwise enqueue the task and ensure a worker is running.
 
         Args:
             task: The incoming task containing the user's message.
@@ -179,7 +204,7 @@ class TaskDispatcher:
                 await self._handle_meta_command(task, user_ctx)
                 return
             # Not an open command — check authorization.
-            user_id = self._get_user_id(context_id)
+            user_id = task.user_id or self._get_user_id(context_id)
             role = await self._acl_manager.get_role(user_id)
             if role is None:
                 logger.info(
@@ -261,6 +286,17 @@ class TaskDispatcher:
         # 1. Meta-commands
         # ------------------------------------------------------------------
         if self._is_meta_command(text):
+            # Acknowledge receipt before handling so the user knows the
+            # command was seen even if the handler takes a moment.
+            if task.message_id:
+                try:
+                    await replier.send_reaction(task.message_id, "OK")
+                except Exception:
+                    logger.warning(
+                        "TaskDispatcher: failed to send reaction for meta-command task %s",
+                        task.id,
+                        exc_info=True,
+                    )
             await self._handle_meta_command(task, user_ctx)
             return
 
@@ -272,7 +308,62 @@ class TaskDispatcher:
             return
 
         # ------------------------------------------------------------------
-        # 3. Normal task — enqueue and ensure worker is running.
+        # 3. Thread limit check (group root messages only).
+        #
+        # A "new thread" is identified by: chat_type == "group" AND
+        # thread_root_id == message_id (the root message creates the thread).
+        # When the active thread count for the chat has reached the configured
+        # limit we park the task in a per-chat deque and send a queuing notice
+        # to the user.  _on_thread_closed() drains the deque when a slot opens.
+        # ------------------------------------------------------------------
+        if (
+            task.chat_type == "group"
+            and task.thread_root_id
+            and task.thread_root_id == task.message_id
+            and self._state_store is not None
+        ):
+            active_count = self._state_store.get_active_thread_count(chat_id)
+            limit = self._settings.max_active_threads_per_chat
+            if active_count >= limit:
+                queue = self._pending_thread_queue.setdefault(chat_id, collections.deque())
+                queue_pos = len(queue) + 1
+                # Revert handler's optimistic _active_threads entry — the thread is only queued, not active.
+                if self._thread_closed_callback is not None:
+                    try:
+                        self._thread_closed_callback(chat_id, task.thread_root_id)
+                    except Exception:
+                        logger.exception(
+                            "TaskDispatcher: failed to revert _active_threads for queued thread"
+                        )
+                queue.append(task)
+                logger.info(
+                    "TaskDispatcher: thread limit reached for chat %r "
+                    "(active=%d limit=%d), queued task %s at position %d",
+                    chat_id,
+                    active_count,
+                    limit,
+                    task.id,
+                    queue_pos,
+                )
+                try:
+                    await replier.reply_text(
+                        task.message_id,
+                        f"⏳ 当前活跃话题已达上限（{limit} 个），"
+                        f"你的请求排在第 {queue_pos} 位，将在有话题关闭后自动处理。",
+                    )
+                except Exception:
+                    logger.exception(
+                        "TaskDispatcher: failed to send queue-full message for task %s",
+                        task.id,
+                    )
+                return
+            # Within limit: register this new thread as active.
+            self._state_store.register_thread(
+                chat_id, task.thread_root_id, session.project_name
+            )
+
+        # ------------------------------------------------------------------
+        # 4. Normal task — enqueue and ensure worker is running.
         # ------------------------------------------------------------------
         # Override task timeout from the resolved project config.
         project = self._config.get_project(session.project_name)
@@ -324,6 +415,49 @@ class TaskDispatcher:
     # ------------------------------------------------------------------
     # Private: chat / permission helpers
     # ------------------------------------------------------------------
+
+    def _on_thread_closed(self, chat_id: str, thread_root_id: str) -> None:
+        """Release a thread slot and dispatch the next pending thread task if any.
+
+        Called by the worker (or ``/done`` command) when a group thread is
+        considered finished.  It:
+
+        1. Unregisters the thread from :attr:`_state_store` so the slot is freed.
+        2. Pops the oldest pending task for the chat from
+           :attr:`_pending_thread_queue` and schedules a new ``dispatch`` call
+           via :func:`asyncio.create_task`.
+
+        Args:
+            chat_id: The Feishu group chat ID (e.g. ``"oc_xxx"``).
+            thread_root_id: The root message ID of the thread being closed.
+        """
+        if self._state_store is not None:
+            self._state_store.unregister_thread(chat_id, thread_root_id)
+
+        # Notify handler to remove from _active_threads so future messages in
+        # this thread are ignored after /done.
+        if self._thread_closed_callback is not None:
+            try:
+                self._thread_closed_callback(chat_id, thread_root_id)
+            except Exception:
+                logger.exception("_on_thread_closed: error in thread_closed_callback")
+
+        queue = self._pending_thread_queue.get(chat_id)
+        if queue:
+            next_task = queue.popleft()
+            logger.info(
+                "TaskDispatcher: dequeuing pending thread task %s for chat %r",
+                next_task.id,
+                chat_id,
+            )
+            # Re-register in handler._active_threads so follow-up messages in this thread
+            # are routed correctly once it becomes active.
+            if self._thread_accept_callback is not None:
+                try:
+                    self._thread_accept_callback(chat_id, next_task.thread_root_id)
+                except Exception:
+                    logger.exception("_on_thread_closed: failed to re-register thread in handler")
+            asyncio.create_task(self.dispatch(next_task))
 
     def _get_chat_id(self, session_id: str) -> str:
         """Extract ``chat_id`` from ``"chatID:userID"``."""
@@ -406,23 +540,30 @@ class TaskDispatcher:
 
         session = user_ctx.get_active_session()
 
+        # For group thread sessions, replies go in-thread rather than to chat root.
+        in_thread = task.chat_type == "group" and bool(task.thread_root_id)
+        reply_msg_id = task.message_id if in_thread else ""
+
         # Resolve caller role for permission-gated commands.
         from ..acl.schema import Role as _Role
         caller_role: Optional[_Role] = None
         if self._acl_manager is not None:
             caller_role = await self._acl_manager.get_role(
-                self._get_user_id(context_id)
+                task.user_id or self._get_user_id(context_id)
             )
 
         if command == "/help":
-            await handle_help(replier, chat_id)
+            await handle_help(replier, chat_id, reply_msg_id=reply_msg_id)
 
         elif command == "/new":
             if session is None:
-                await replier.send_text(chat_id, "当前没有活跃 Session。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "当前没有活跃 Session。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "当前没有活跃 Session。")
                 return
             runtime = self._acp_registry.get(f"{context_id}:{session.project_name}")
-            await handle_new(session, runtime, replier, chat_id)
+            await handle_new(session, runtime, replier, chat_id, reply_msg_id=reply_msg_id)
             # Clear persisted session id so the next task starts a truly fresh session.
             if self._state_store is not None:
                 self._state_store.save_project_actual_id(
@@ -431,13 +572,45 @@ class TaskDispatcher:
 
         elif command == "/stop":
             if session is None:
-                await replier.send_text(chat_id, "当前没有活跃 Session。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "当前没有活跃 Session。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "当前没有活跃 Session。")
                 return
             runtime = self._acp_registry.get(f"{context_id}:{session.project_name}")
-            await handle_stop(session, replier, chat_id, runtime=runtime)
+            await handle_stop(session, replier, chat_id, runtime=runtime, reply_msg_id=reply_msg_id)
+
+        elif command == "/done":
+            if task.chat_type != "group" or not task.thread_root_id:
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "/done 仅在群聊话题内有效。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "/done 仅在群聊话题内有效。")
+                return
+            if session is None:
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "当前没有活跃 Session。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "当前没有活跃 Session。")
+                return
+            runtime = self._acp_registry.get(f"{context_id}:{session.project_name}")
+            chat_id_str = self._get_chat_id(context_id)
+
+            def _on_closed() -> None:
+                self._on_thread_closed(chat_id_str, task.thread_root_id)
+
+            await handle_done(
+                session=session,
+                runtime=runtime,
+                replier=replier,
+                chat_id=chat_id_str,
+                root_message_id=task.thread_root_id,
+                acp_registry=self._acp_registry,
+                on_thread_closed=_on_closed,
+            )
 
         elif command == "/status":
-            await handle_status(user_ctx, replier, chat_id)
+            await handle_status(user_ctx, replier, chat_id, reply_msg_id=reply_msg_id)
 
         elif command == "/project":
             if not arg:
@@ -462,7 +635,11 @@ class TaskDispatcher:
                     },
                     "body": {"elements": [{"tag": "markdown", "content": "\n".join(proj_lines)}]},
                 }
-                await replier.send_card(chat_id, json.dumps(proj_card, ensure_ascii=False))
+                proj_card_json = json.dumps(proj_card, ensure_ascii=False)
+                if reply_msg_id:
+                    await replier.reply_card(reply_msg_id, proj_card_json, in_thread=True)
+                else:
+                    await replier.send_card(chat_id, proj_card_json)
                 return
 
             sub_parts = arg.split(maxsplit=1)
@@ -471,23 +648,27 @@ class TaskDispatcher:
             if sub_cmd == "bind":
                 bind_name = sub_parts[1].strip() if len(sub_parts) > 1 else ""
                 if not bind_name:
-                    await replier.send_text(chat_id, "用法: `/project bind <name>`")
+                    if reply_msg_id:
+                        await replier.reply_text(reply_msg_id, "用法: `/project bind <name>`", in_thread=True)
+                    else:
+                        await replier.send_text(chat_id, "用法: `/project bind <name>`")
                     return
-                bound = await handle_bind(chat_id, bind_name, self._config, replier)
+                bound = await handle_bind(chat_id, bind_name, self._config, replier, reply_msg_id=reply_msg_id)
                 if bound:
                     self._dynamic_bindings[chat_id] = bound
                     if self._state_store is not None:
                         self._state_store.set_binding(chat_id, bound)
 
             elif sub_cmd == "unbind":
-                await handle_unbind(chat_id, replier)
+                await handle_unbind(chat_id, replier, reply_msg_id=reply_msg_id)
                 self._dynamic_bindings.pop(chat_id, None)
                 if self._state_store is not None:
                     self._state_store.remove_binding(chat_id)
 
             else:
                 await handle_project(
-                    user_ctx, arg, self._config, self._settings, replier, chat_id
+                    user_ctx, arg, self._config, self._settings, replier, chat_id,
+                    reply_msg_id=reply_msg_id,
                 )
 
         elif command == "/skill":
@@ -522,7 +703,11 @@ class TaskDispatcher:
                     },
                     "body": {"elements": [{"tag": "markdown", "content": skill_content}]},
                 }
-                await replier.send_card(chat_id, json.dumps(skill_card, ensure_ascii=False))
+                skill_card_json = json.dumps(skill_card, ensure_ascii=False)
+                if reply_msg_id:
+                    await replier.reply_card(reply_msg_id, skill_card_json, in_thread=True)
+                else:
+                    await replier.send_card(chat_id, skill_card_json)
                 return
             # Look up the skill and enqueue a rendered prompt as a normal task.
             trigger, _, user_input = arg.partition(" ")
@@ -532,16 +717,23 @@ class TaskDispatcher:
                     f"`{s.meta.trigger}`"
                     for s in sorted(self._skill_registry.list_all(), key=lambda x: x.meta.trigger)
                 )
-                await replier.send_text(
-                    chat_id,
-                    f"未找到 Skill `{trigger}`。\n可用: {available or '(无)'}",
-                )
+                if reply_msg_id:
+                    await replier.reply_text(
+                        reply_msg_id,
+                        f"未找到 Skill `{trigger}`。\n可用: {available or '(无)'}",
+                        in_thread=True,
+                    )
+                else:
+                    await replier.send_text(
+                        chat_id,
+                        f"未找到 Skill `{trigger}`。\n可用: {available or '(无)'}",
+                    )
                 return
             logger.info(
                 "TaskDispatcher: invoking skill %r for context_id=%r", trigger, context_id
             )
             enriched_input = user_input.strip()
-            requester_open_id = self._get_user_id(task.session_id) if task.session_id else ""
+            requester_open_id = task.user_id or (self._get_user_id(task.session_id) if task.session_id else "")
             # Build unified attendee block: @mentions + requester (deduped)
             seen_ids: set[str] = set()
             attendee_lines: list[str] = []
@@ -569,7 +761,10 @@ class TaskDispatcher:
                 session.pending_tasks.append(skill_task)
                 skill_task.was_queued = session.task_queue.qsize() > 1
             except asyncio.QueueFull:
-                await replier.send_text(chat_id, "任务队列已满，请稍后再试。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "任务队列已满，请稍后再试。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "任务队列已满，请稍后再试。")
                 return
             await self._ensure_worker(session, replier)
 
@@ -597,39 +792,58 @@ class TaskDispatcher:
                 },
                 "body": {"elements": [{"tag": "markdown", "content": content}]},
             }
-            await replier.send_card(chat_id, json.dumps(card, ensure_ascii=False))
+            task_card_json = json.dumps(card, ensure_ascii=False)
+            if reply_msg_id:
+                await replier.reply_card(reply_msg_id, task_card_json, in_thread=True)
+            else:
+                await replier.send_card(chat_id, task_card_json)
 
         elif command == "/remember":
             if not arg:
-                await replier.send_text(chat_id, "用法: `/remember <text>`")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "用法: `/remember <text>`", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "用法: `/remember <text>`")
                 return
             if self._memory_manager is None:
-                await replier.send_text(chat_id, "记忆功能未启用。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "记忆功能未启用。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "记忆功能未启用。")
                 return
-            user_id = self._get_user_id(context_id)
-            await handle_remember(user_id, arg, self._memory_manager, replier, chat_id)
+            user_id = task.user_id or self._get_user_id(context_id)
+            await handle_remember(user_id, arg, self._memory_manager, replier, chat_id, reply_msg_id=reply_msg_id)
 
         elif command == "/whoami":
             if self._acl_manager is not None:
                 from .commands import handle_whoami
                 await handle_whoami(
-                    self._get_user_id(context_id),
+                    task.user_id or self._get_user_id(context_id),
                     self._acl_manager,
                     replier,
                     chat_id,
                 )
             else:
-                uid = self._get_user_id(context_id)
-                await replier.send_text(chat_id, f"open_id: `{uid}`\n角色: (未启用 ACL)")
+                uid = task.user_id or self._get_user_id(context_id)
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, f"open_id: `{uid}`\n角色: (未启用 ACL)", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, f"open_id: `{uid}`\n角色: (未启用 ACL)")
 
         elif command == "/acl":
             if self._acl_manager is None:
-                await replier.send_text(chat_id, "ACL 功能未启用。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "ACL 功能未启用。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "ACL 功能未启用。")
             elif caller_role not in (_Role.ADMIN, _Role.OWNER, _Role.COLLABORATOR):
-                await replier.send_text(chat_id, "权限不足。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "权限不足。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "权限不足。")
             else:
                 await self._handle_acl_command(
-                    arg, caller_role, self._get_user_id(context_id), replier, chat_id
+                    arg, caller_role, task.user_id or self._get_user_id(context_id), replier, chat_id
                 )
 
         else:
@@ -638,7 +852,7 @@ class TaskDispatcher:
                 command,
                 context_id,
             )
-            await handle_help(replier, chat_id)
+            await handle_help(replier, chat_id, reply_msg_id=reply_msg_id)
 
     async def _handle_acl_command(
         self,

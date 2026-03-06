@@ -1,6 +1,7 @@
 """Unit tests for nextme.core.worker.SessionWorker."""
 
 import asyncio
+import dataclasses
 import json
 import time
 import pytest
@@ -156,6 +157,37 @@ async def test_run_dequeues_multiple_tasks(worker, session, acp_registry):
     except asyncio.CancelledError:
         pass
     assert mock_runtime.execute.call_count >= 1
+
+
+async def test_run_cancellation_sends_cancel_card_exactly_once(worker, session, acp_registry, replier):
+    """On worker cancellation mid-execution, 'already cancelled' card is sent only once.
+
+    Regression test: previously _execute_task() and run() both called
+    _send_cancelled() when CancelledError propagated through both handlers,
+    causing two '已取消' messages on bot restart.
+    """
+    _, mock_runtime = acp_registry
+    # Simulate slow runtime so the worker is executing when we cancel it.
+    async def slow_execute(**kwargs):
+        await asyncio.sleep(10)
+        return "done"
+    mock_runtime.execute.side_effect = slow_execute
+
+    task, _ = make_task("slow task")
+    await session.task_queue.put(task)
+    task_runner = asyncio.create_task(worker.run())
+    await asyncio.sleep(0.05)  # let worker start executing
+    task_runner.cancel()
+    try:
+        await task_runner
+    except asyncio.CancelledError:
+        pass
+
+    # _send_cancelled calls build_result_card then update_card/reply_card.
+    # It must have been called exactly once — not twice.
+    assert replier.build_result_card.call_count == 1, (
+        f"Expected 1 cancel card, got {replier.build_result_card.call_count}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1456,3 +1488,80 @@ async def test_worker_send_timeout_includes_elapsed(
     error_msg = call_args[0][0]
     # Must mention elapsed time (e.g. "0s", "1s", ...)
     assert "s" in error_msg  # _format_elapsed always ends in 's'
+
+
+# ---------------------------------------------------------------------------
+# @mention open_id injection tests
+# ---------------------------------------------------------------------------
+
+async def test_worker_injects_mentions_into_agent_input(
+    session, acp_registry, replier, settings, path_lock_registry
+):
+    """task.mentions open_ids and requester open_id are appended to the content."""
+    registry, mock_runtime = acp_registry
+    worker = SessionWorker(session, registry, replier, settings, path_lock_registry)
+    task, _ = make_task("约下周三会议 @_user_2 @_user_3")
+    task = dataclasses.replace(task, user_id="ou_requester000", mentions=[
+        {"name": "Alice", "open_id": "ou_alice123"},
+        {"name": "Bob", "open_id": "ou_bob456"},
+    ])
+    await worker._execute_task(task)
+    executed_content = mock_runtime.execute.call_args[1]["task"].content
+    assert "ou_alice123" in executed_content
+    assert "ou_bob456" in executed_content
+    assert "ou_requester000" in executed_content
+    assert "[消息中的@提及用户]" in executed_content
+    assert "[预定人]" in executed_content
+    assert "Alice" in executed_content
+
+
+async def test_worker_injects_requester_even_without_mentions(
+    session, acp_registry, replier, settings, path_lock_registry
+):
+    """Requester open_id is injected even when no @mentions in message."""
+    registry, mock_runtime = acp_registry
+    worker = SessionWorker(session, registry, replier, settings, path_lock_registry)
+    task, _ = make_task("约个会议")
+    task = dataclasses.replace(task, user_id="ou_requester000", mentions=[])
+    await worker._execute_task(task)
+    executed_content = mock_runtime.execute.call_args[1]["task"].content
+    assert "ou_requester000" in executed_content
+    assert "[预定人]" in executed_content
+
+
+async def test_worker_skips_mentions_injection_when_no_user_id_and_no_mentions(
+    session, acp_registry, replier, settings, path_lock_registry
+):
+    """No mentions block when both task.mentions and task.user_id are empty."""
+    registry, mock_runtime = acp_registry
+    worker = SessionWorker(session, registry, replier, settings, path_lock_registry)
+    task, _ = make_task("plain message")
+    # task.mentions defaults to [], task.user_id defaults to ""
+    await worker._execute_task(task)
+    executed_content = mock_runtime.execute.call_args[1]["task"].content
+    assert "[消息中的@提及用户]" not in executed_content
+    assert executed_content == "plain message"
+
+
+async def test_worker_memory_load_uses_task_user_id_for_group_thread(
+    session, acp_registry, replier, settings, path_lock_registry, memory_manager_mock
+):
+    """Memory is loaded for task.user_id (sender), not thread_root_id from context_id."""
+    from nextme.memory.schema import Fact
+    registry, mock_runtime = acp_registry
+    # Memory injection only happens for new sessions (actual_id == "")
+    mock_runtime.actual_id = ""
+    # Simulate group-thread session: context_id ends with thread_root_id (om_xxx), not user open_id
+    session.context_id = "oc_chat123:om_thread_root_456"
+    fact = Fact(text="User prefers dark mode", source="user_command")
+    memory_manager_mock.get_top_facts = MagicMock(return_value=[fact])
+    worker = SessionWorker(
+        session, registry, replier, settings, path_lock_registry,
+        memory_manager=memory_manager_mock,
+    )
+    task, _ = make_task("hello")
+    # task.user_id is the actual sender open_id
+    task = dataclasses.replace(task, user_id="ou_actual_user_789")
+    await worker._execute_task(task)
+    # Must load memory for the actual user, not the thread_root_id
+    memory_manager_mock.load.assert_awaited_once_with("ou_actual_user_789")

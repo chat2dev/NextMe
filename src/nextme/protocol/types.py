@@ -63,6 +63,8 @@ class Task:
     was_queued: bool = False            # set when task waited in queue
     mentions: list[dict[str, Any]] = field(default_factory=list)
     # Each entry: {"name": "小明", "open_id": "ou_xxxxxxxx"}
+    user_id: str = ""            # 发消息用户的 open_id（群聊时 session_id 末段已非 user_id）
+    thread_root_id: str = ""     # 所属话题的根消息 ID；p2p 时为空
 
 
 # Emitted by ACPRuntime callbacks

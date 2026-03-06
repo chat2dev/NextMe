@@ -239,3 +239,36 @@ class TestGlobalState:
         gs2 = GlobalState()
         gs1.contexts["k"] = UserState()
         assert "k" not in gs2.contexts
+
+
+# ---------------------------------------------------------------------------
+# ThreadRecord
+# ---------------------------------------------------------------------------
+
+
+from nextme.config.schema import ThreadRecord
+from datetime import datetime
+
+
+def test_thread_record_fields():
+    now = datetime.now()
+    tr = ThreadRecord(
+        chat_id="oc_G",
+        thread_root_id="om_001",
+        project_name="myproject",
+        created_at=now,
+        last_active_at=now,
+    )
+    assert tr.chat_id == "oc_G"
+    assert tr.thread_root_id == "om_001"
+    assert tr.project_name == "myproject"
+
+
+def test_global_state_has_thread_records():
+    gs = GlobalState()
+    assert gs.thread_records == {}
+
+
+def test_settings_has_max_active_threads():
+    s = Settings()
+    assert s.max_active_threads_per_chat == 8

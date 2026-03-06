@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 
 import json
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..config.schema import AppConfig, Settings
 from ..protocol.types import TaskStatus
@@ -33,6 +33,7 @@ HELP_COMMANDS: list[tuple[str, str]] = [
     ("/whoami", "查看我的 open_id 和角色"),
     ("/new", "开启新对话（清除当前对话历史）"),
     ("/stop", "取消当前执行中的任务"),
+    ("/done", "关闭当前话题，释放 Claude 进程（仅群聊话题内有效）"),
     ("/help", "显示帮助"),
     ("/skill", "列出所有 Skill"),
     ("/skill <trigger>", "触发指定 Skill"),
@@ -61,6 +62,7 @@ async def handle_new(
     runtime: AgentRuntime | None,
     replier: Replier,
     chat_id: str,
+    reply_msg_id: str = "",
 ) -> None:
     """Reset the agent session, clearing conversation history.
 
@@ -72,6 +74,7 @@ async def handle_new(
         runtime: The associated agent runtime, if any.
         replier: Feishu message sender.
         chat_id: Target chat.
+        reply_msg_id: When set, reply in-thread to this message id (group chats).
     """
     logger.info(
         "handle_new: resetting session for context_id=%r project=%r",
@@ -90,7 +93,10 @@ async def handle_new(
             )
 
     try:
-        await replier.send_text(chat_id, "已开启新对话，历史记录已清除。")
+        if reply_msg_id:
+            await replier.reply_text(reply_msg_id, "已开启新对话，历史记录已清除。", in_thread=True)
+        else:
+            await replier.send_text(chat_id, "已开启新对话，历史记录已清除。")
     except Exception:
         logger.exception("handle_new: failed to send confirmation to chat %r", chat_id)
 
@@ -100,6 +106,7 @@ async def handle_stop(
     replier: Replier,
     chat_id: str,
     runtime: Optional[AgentRuntime] = None,
+    reply_msg_id: str = "",
 ) -> None:
     """Cancel the task currently executing in *session*.
 
@@ -114,6 +121,7 @@ async def handle_stop(
         runtime: The associated agent runtime, if any.  When provided,
             ``runtime.cancel()`` is called to immediately interrupt the
             in-flight subprocess (SIGTERM / session/cancel).
+        reply_msg_id: When set, reply in-thread to this message id (group chats).
     """
     logger.info(
         "handle_stop: stopping active task for context_id=%r", session.context_id
@@ -140,24 +148,109 @@ async def handle_stop(
             )
 
     try:
-        await replier.send_text(chat_id, "已发送取消信号，当前任务将尽快停止。")
+        if reply_msg_id:
+            await replier.reply_text(reply_msg_id, "已发送取消信号，当前任务将尽快停止。", in_thread=True)
+        else:
+            await replier.send_text(chat_id, "已发送取消信号，当前任务将尽快停止。")
     except Exception:
         logger.exception(
             "handle_stop: failed to send confirmation to chat %r", chat_id
         )
 
 
-async def handle_help(replier: Replier, chat_id: str) -> None:
+async def handle_done(
+    session: Any,
+    runtime: Any | None,
+    replier: Any,
+    chat_id: str,
+    root_message_id: str,
+    acp_registry: Any,
+    on_thread_closed: Any,
+) -> None:
+    """Close a thread: cancel tasks, stop Claude subprocess, release slot, add reaction.
+
+    Args:
+        session: The thread's Session object.
+        runtime: The associated agent runtime, if any.
+        replier: Feishu message sender.
+        chat_id: The group chat id.
+        root_message_id: Root message of the thread (receives DONE reaction).
+        acp_registry: ACPRuntimeRegistry for subprocess removal.
+        on_thread_closed: Callback to release thread slot and process queue.
+    """
+    logger.info(
+        "handle_done: closing thread session context_id=%r", session.context_id
+    )
+
+    # 1. Cancel active task
+    if session.active_task is not None:
+        session.active_task.canceled = True
+
+    # 2. Cancel pending permission
+    if hasattr(session, "cancel_permission"):
+        session.cancel_permission()
+    elif session.perm_future is not None and not session.perm_future.done():
+        session.perm_future.cancel()
+
+    # 3. Cancel runtime if running
+    if runtime is not None:
+        try:
+            await runtime.cancel()
+        except Exception:
+            logger.exception("handle_done: error calling runtime.cancel()")
+
+    # 4. Drain task queue
+    while not session.task_queue.empty():
+        try:
+            session.task_queue.get_nowait()
+        except Exception:
+            break
+    session.pending_tasks.clear()
+
+    # 5. Stop and remove subprocess
+    runtime_key = f"{session.context_id}:{session.project_name}"
+    try:
+        await acp_registry.remove(runtime_key)
+    except Exception:
+        logger.exception("handle_done: error removing runtime %r", runtime_key)
+
+    # 6. Release thread slot (triggers pending queue)
+    try:
+        on_thread_closed()
+    except Exception:
+        logger.exception("handle_done: error in on_thread_closed callback")
+
+    # 7. Add DONE reaction to root message
+    if root_message_id:
+        try:
+            await replier.send_reaction(root_message_id, "DONE")
+        except Exception:
+            logger.exception("handle_done: failed to send DONE reaction")
+
+    # 8. Confirm in thread
+    try:
+        await replier.reply_text(
+            root_message_id, "✅ 话题已关闭，资源已释放。"
+        )
+    except Exception:
+        logger.exception("handle_done: failed to send confirmation")
+
+
+async def handle_help(replier: Replier, chat_id: str, reply_msg_id: str = "") -> None:
     """Send the help card listing all available commands.
 
     Args:
         replier: Feishu message sender.
         chat_id: Target chat.
+        reply_msg_id: When set, reply in-thread to this message id (group chats).
     """
     logger.debug("handle_help: sending help card to chat %r", chat_id)
     try:
         card = replier.build_help_card(HELP_COMMANDS)
-        await replier.send_card(chat_id, card)
+        if reply_msg_id:
+            await replier.reply_card(reply_msg_id, card, in_thread=True)
+        else:
+            await replier.send_card(chat_id, card)
     except Exception:
         logger.exception("handle_help: failed to send help card to chat %r", chat_id)
 
@@ -166,6 +259,7 @@ async def handle_status(
     user_ctx: UserContext,
     replier: Replier,
     chat_id: str,
+    reply_msg_id: str = "",
 ) -> None:
     """Send a status card showing all active project sessions for *user_ctx*.
 
@@ -177,6 +271,7 @@ async def handle_status(
         user_ctx: The user context containing all sessions.
         replier: Feishu message sender.
         chat_id: Target chat.
+        reply_msg_id: When set, reply in-thread to this message id (group chats).
     """
     logger.debug(
         "handle_status: sending status for context_id=%r", user_ctx.context_id
@@ -184,7 +279,10 @@ async def handle_status(
 
     if not user_ctx.sessions:
         try:
-            await replier.send_text(chat_id, "当前没有活跃 Session。")
+            if reply_msg_id:
+                await replier.reply_text(reply_msg_id, "当前没有活跃 Session。", in_thread=True)
+            else:
+                await replier.send_text(chat_id, "当前没有活跃 Session。")
         except Exception:
             logger.exception(
                 "handle_status: failed to send empty-status message to chat %r", chat_id
@@ -198,27 +296,38 @@ async def handle_status(
 
         # Session ID label
         if session.actual_id:
-            session_label = session.actual_id
+            session_label = f"`{session.actual_id[:16]}…`"
         elif session.status.value == "executing":
-            session_label = "(初始化中…)"
+            session_label = "_(初始化中…)_"
         else:
-            session_label = "(无)"
+            session_label = "_(无)_"
+
+        # Status emoji
+        status_emoji = {
+            "idle": "💤",
+            "executing": "⚙️",
+            "waiting_permission": "🔐",
+            "canceled": "🚫",
+            "done": "✅",
+        }.get(session.status.value, "❓")
 
         # Active task label: show content preview instead of raw UUID
         if session.active_task:
             preview = session.active_task.content.replace("\n", " ")
-            if len(preview) > 40:
-                preview = preview[:40] + "…"
+            if len(preview) > 50:
+                preview = preview[:50] + "…"
             task_label = f"`{preview}`"
         else:
-            task_label = "无"
+            task_label = "_无_"
+
+        queue_label = f"**{queue_size}** 个待处理" if queue_size > 0 else "_无_"
 
         section = "\n".join([
-            f"**{active_marker}{session.project_name}**",
-            f"路径: `{session.project_path}`",
-            f"状态: {session.status.value}  执行器: {session.executor}",
-            f"Session: {session_label}",
-            f"当前任务: {task_label}  队列: {queue_size}",
+            f"**{active_marker}{session.project_name}**　{status_emoji} {session.status.value}",
+            f"📁 `{session.project_path}`",
+            f"🔧 执行器: `{session.executor}`　　Session: {session_label}",
+            f"📝 当前任务: {task_label}",
+            f"📋 队列: {queue_label}",
         ])
         sections.append(section)
 
@@ -228,7 +337,7 @@ async def handle_status(
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "Session 状态"},
+            "title": {"tag": "plain_text", "content": "📊 Session 状态"},
             "template": "blue",
         },
         "body": {
@@ -239,7 +348,11 @@ async def handle_status(
     }
 
     try:
-        await replier.send_card(chat_id, json.dumps(card, ensure_ascii=False))
+        card_json = json.dumps(card, ensure_ascii=False)
+        if reply_msg_id:
+            await replier.reply_card(reply_msg_id, card_json, in_thread=True)
+        else:
+            await replier.send_card(chat_id, card_json)
     except Exception:
         logger.exception(
             "handle_status: failed to send status card to chat %r", chat_id
@@ -251,6 +364,7 @@ async def handle_bind(
     project_name: str,
     config: AppConfig,
     replier: Replier,
+    reply_msg_id: str = "",
 ) -> Optional[str]:
     """Bind *chat_id* to *project_name*, returning the name on success or ``None``.
 
@@ -262,6 +376,7 @@ async def handle_bind(
         project_name: Name of the project to bind this chat to.
         config: Application configuration containing the project list.
         replier: Feishu message sender.
+        reply_msg_id: When set, reply in-thread to this message id (group chats).
 
     Returns:
         *project_name* when the project was found and the binding is accepted;
@@ -276,7 +391,10 @@ async def handle_bind(
             "请检查配置文件。"
         )
         try:
-            await replier.send_text(chat_id, msg)
+            if reply_msg_id:
+                await replier.reply_text(reply_msg_id, msg, in_thread=True)
+            else:
+                await replier.send_text(chat_id, msg)
         except Exception:
             logger.exception(
                 "handle_bind: failed to send 'not found' message to chat %r", chat_id
@@ -284,13 +402,16 @@ async def handle_bind(
         return None
 
     logger.info("handle_bind: binding chat %r → project %r", chat_id, project_name)
+    confirm_msg = (
+        f"已将当前群聊绑定到项目 **{project.name}**\n"
+        f"路径: `{project.path}`\n"
+        "后续消息将自动路由到该项目。"
+    )
     try:
-        await replier.send_text(
-            chat_id,
-            f"已将当前群聊绑定到项目 **{project.name}**\n"
-            f"路径: `{project.path}`\n"
-            "后续消息将自动路由到该项目。",
-        )
+        if reply_msg_id:
+            await replier.reply_text(reply_msg_id, confirm_msg, in_thread=True)
+        else:
+            await replier.send_text(chat_id, confirm_msg)
     except Exception:
         logger.exception(
             "handle_bind: failed to send confirmation to chat %r", chat_id
@@ -298,7 +419,7 @@ async def handle_bind(
     return project_name
 
 
-async def handle_unbind(chat_id: str, replier: Replier) -> bool:
+async def handle_unbind(chat_id: str, replier: Replier, reply_msg_id: str = "") -> bool:
     """Remove a chat→project binding for *chat_id*.
 
     Always sends a confirmation message.  Returns ``True`` so the caller can
@@ -307,13 +428,17 @@ async def handle_unbind(chat_id: str, replier: Replier) -> bool:
     Args:
         chat_id: Feishu chat identifier whose binding should be removed.
         replier: Feishu message sender.
+        reply_msg_id: When set, reply in-thread to this message id (group chats).
 
     Returns:
         ``True`` (always; the caller decides what to do if no binding existed).
     """
     logger.info("handle_unbind: removing binding for chat %r", chat_id)
     try:
-        await replier.send_text(chat_id, "已解除当前群聊的项目绑定，恢复使用活跃项目。")
+        if reply_msg_id:
+            await replier.reply_text(reply_msg_id, "已解除当前群聊的项目绑定，恢复使用活跃项目。", in_thread=True)
+        else:
+            await replier.send_text(chat_id, "已解除当前群聊的项目绑定，恢复使用活跃项目。")
     except Exception:
         logger.exception(
             "handle_unbind: failed to send confirmation to chat %r", chat_id
@@ -327,6 +452,7 @@ async def handle_remember(
     memory_manager: "MemoryManager",
     replier: Replier,
     chat_id: str,
+    reply_msg_id: str = "",
 ) -> None:
     """Save a user-supplied fact to long-term memory (global across all chats).
 
@@ -339,6 +465,7 @@ async def handle_remember(
         memory_manager: The :class:`~nextme.memory.manager.MemoryManager` instance.
         replier: Feishu message sender.
         chat_id: Target chat.
+        reply_msg_id: When set, reply in-thread to this message id (group chats).
     """
     from ..memory.schema import Fact
 
@@ -354,7 +481,10 @@ async def handle_remember(
             "handle_remember: error saving fact for user_id=%r", user_id
         )
     try:
-        await replier.send_text(chat_id, f"已记住：{text}")
+        if reply_msg_id:
+            await replier.reply_text(reply_msg_id, f"已记住：{text}", in_thread=True)
+        else:
+            await replier.send_text(chat_id, f"已记住：{text}")
     except Exception:
         logger.exception(
             "handle_remember: failed to send confirmation to chat %r", chat_id
@@ -368,6 +498,7 @@ async def handle_project(
     settings: Settings,
     replier: Replier,
     chat_id: str,
+    reply_msg_id: str = "",
 ) -> None:
     """Switch the active project for *user_ctx*.
 
@@ -382,6 +513,7 @@ async def handle_project(
         settings: Application settings.
         replier: Feishu message sender.
         chat_id: Target chat.
+        reply_msg_id: When set, reply in-thread to this message id (group chats).
     """
     logger.info(
         "handle_project: context_id=%r switching to project %r",
@@ -397,7 +529,10 @@ async def handle_project(
             "请检查配置文件。"
         )
         try:
-            await replier.send_text(chat_id, msg)
+            if reply_msg_id:
+                await replier.reply_text(reply_msg_id, msg, in_thread=True)
+            else:
+                await replier.send_text(chat_id, msg)
         except Exception:
             logger.exception(
                 "handle_project: failed to send 'not found' message to chat %r",
@@ -413,12 +548,32 @@ async def handle_project(
         user_ctx.context_id,
     )
 
-    msg = (
-        f"已切换到项目 **{session.project_name}**\n"
-        f"路径: `{session.project_path}`"
-    )
+    card = {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "✅ 项目已切换"},
+            "template": "green",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**项目**　`{session.project_name}`\n"
+                        f"**路径**　`{session.project_path}`\n"
+                        f"**执行器**　`{session.executor}`"
+                    ),
+                }
+            ]
+        },
+    }
     try:
-        await replier.send_text(chat_id, msg)
+        card_json = json.dumps(card, ensure_ascii=False)
+        if reply_msg_id:
+            await replier.reply_card(reply_msg_id, card_json, in_thread=True)
+        else:
+            await replier.send_card(chat_id, card_json)
     except Exception:
         logger.exception(
             "handle_project: failed to send confirmation to chat %r", chat_id
