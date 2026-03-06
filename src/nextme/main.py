@@ -456,6 +456,11 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     # ------------------------------------------------------------------
     logger.info("Shutting down…")
 
+    # 0. Mark all sessions as shutting down so workers don't send
+    #    "已取消" cards to every thread when they are cancelled below.
+    for _session in session_registry.all_sessions():
+        _session.suppress_cancel = True
+
     # 1. Stop Feishu WebSocket.
     try:
         await feishu_client.stop()

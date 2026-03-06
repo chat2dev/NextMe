@@ -1035,7 +1035,17 @@ class SessionWorker:
         await self._update_or_reply(task, error_card)
 
     async def _send_cancelled(self, task: Task) -> None:
-        """Update the progress card to show a cancellation notice."""
+        """Update the progress card to show a cancellation notice.
+
+        No-op when ``session.suppress_cancel`` is True (e.g. bot shutdown).
+        """
+        if self._session.suppress_cancel:
+            logger.debug(
+                "SessionWorker[%s]: suppress_cancel=True; skipping cancel card for task %s",
+                self._session.context_id,
+                task.id,
+            )
+            return
         cancel_card = self._replier.build_result_card(
             content="操作已取消",
             title=f"已取消 {self._proj}",

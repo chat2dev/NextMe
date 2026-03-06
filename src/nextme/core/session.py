@@ -62,6 +62,8 @@ class Session:
         self.active_task: Optional[Task] = None
         self.perm_future: Optional[asyncio.Future[PermissionChoice]] = None
         self.perm_options: list[PermOption] = []
+        self.suppress_cancel: bool = False
+        """When True, _send_cancelled() is a no-op (used during bot shutdown)."""
 
         logger.debug(
             "Session created: context_id=%r project=%r path=%s executor=%r",
