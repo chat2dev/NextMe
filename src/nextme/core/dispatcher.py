@@ -286,6 +286,17 @@ class TaskDispatcher:
         # 1. Meta-commands
         # ------------------------------------------------------------------
         if self._is_meta_command(text):
+            # Acknowledge receipt before handling so the user knows the
+            # command was seen even if the handler takes a moment.
+            if task.message_id:
+                try:
+                    await replier.send_reaction(task.message_id, "OK")
+                except Exception:
+                    logger.warning(
+                        "TaskDispatcher: failed to send reaction for meta-command task %s",
+                        task.id,
+                        exc_info=True,
+                    )
             await self._handle_meta_command(task, user_ctx)
             return
 

@@ -274,10 +274,11 @@ async def test_handle_project_found_creates_session_and_sends_text(
 ):
     config = AppConfig(app_id="x", app_secret="y", projects=[project])
     await handle_project(user_ctx, project.name, config, settings, replier, "oc_chat")
-    replier.send_text.assert_awaited_once()
-    text_arg = replier.send_text.call_args[0][1]
-    # Confirmation message should mention the project name
-    assert project.name in text_arg
+    # Success path now sends a card, not plain text
+    replier.send_card.assert_awaited_once()
+    card_arg = replier.send_card.call_args[0][1]
+    # Confirmation card JSON should mention the project name
+    assert project.name in card_arg
 
 
 async def test_handle_project_found_sets_active_project(
@@ -315,7 +316,8 @@ async def test_handle_project_found_sends_to_correct_chat(
 ):
     config = AppConfig(app_id="x", app_secret="y", projects=[project])
     await handle_project(user_ctx, project.name, config, settings, replier, "oc_chat_target")
-    call_args = replier.send_text.call_args[0]
+    # Success path sends a card to the chat
+    call_args = replier.send_card.call_args[0]
     assert call_args[0] == "oc_chat_target"
 
 
@@ -331,10 +333,10 @@ async def test_handle_project_not_found_sends_to_correct_chat(
 async def test_handle_project_send_text_exception_gracefully(
     user_ctx, project, replier, settings
 ):
-    """handle_project should not propagate exceptions from replier.send_text."""
+    """handle_project should not propagate exceptions from replier.send_card."""
     config = AppConfig(app_id="x", app_secret="y", projects=[project])
     bad_replier = MagicMock()
-    bad_replier.send_text = AsyncMock(side_effect=RuntimeError("send failed"))
+    bad_replier.send_card = AsyncMock(side_effect=RuntimeError("send failed"))
     # Should not raise
     await handle_project(user_ctx, project.name, config, settings, bad_replier, "oc_chat")
 

@@ -296,27 +296,38 @@ async def handle_status(
 
         # Session ID label
         if session.actual_id:
-            session_label = session.actual_id
+            session_label = f"`{session.actual_id[:16]}…`"
         elif session.status.value == "executing":
-            session_label = "(初始化中…)"
+            session_label = "_(初始化中…)_"
         else:
-            session_label = "(无)"
+            session_label = "_(无)_"
+
+        # Status emoji
+        status_emoji = {
+            "idle": "💤",
+            "executing": "⚙️",
+            "waiting_permission": "🔐",
+            "canceled": "🚫",
+            "done": "✅",
+        }.get(session.status.value, "❓")
 
         # Active task label: show content preview instead of raw UUID
         if session.active_task:
             preview = session.active_task.content.replace("\n", " ")
-            if len(preview) > 40:
-                preview = preview[:40] + "…"
+            if len(preview) > 50:
+                preview = preview[:50] + "…"
             task_label = f"`{preview}`"
         else:
-            task_label = "无"
+            task_label = "_无_"
+
+        queue_label = f"**{queue_size}** 个待处理" if queue_size > 0 else "_无_"
 
         section = "\n".join([
-            f"**{active_marker}{session.project_name}**",
-            f"路径: `{session.project_path}`",
-            f"状态: {session.status.value}  执行器: {session.executor}",
-            f"Session: {session_label}",
-            f"当前任务: {task_label}  队列: {queue_size}",
+            f"**{active_marker}{session.project_name}**　{status_emoji} {session.status.value}",
+            f"📁 `{session.project_path}`",
+            f"🔧 执行器: `{session.executor}`　　Session: {session_label}",
+            f"📝 当前任务: {task_label}",
+            f"📋 队列: {queue_label}",
         ])
         sections.append(section)
 
@@ -326,7 +337,7 @@ async def handle_status(
         "schema": "2.0",
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "Session 状态"},
+            "title": {"tag": "plain_text", "content": "📊 Session 状态"},
             "template": "blue",
         },
         "body": {
@@ -537,15 +548,32 @@ async def handle_project(
         user_ctx.context_id,
     )
 
-    msg = (
-        f"已切换到项目 **{session.project_name}**\n"
-        f"路径: `{session.project_path}`"
-    )
+    card = {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "✅ 项目已切换"},
+            "template": "green",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**项目**　`{session.project_name}`\n"
+                        f"**路径**　`{session.project_path}`\n"
+                        f"**执行器**　`{session.executor}`"
+                    ),
+                }
+            ]
+        },
+    }
     try:
+        card_json = json.dumps(card, ensure_ascii=False)
         if reply_msg_id:
-            await replier.reply_text(reply_msg_id, msg, in_thread=True)
+            await replier.reply_card(reply_msg_id, card_json, in_thread=True)
         else:
-            await replier.send_text(chat_id, msg)
+            await replier.send_card(chat_id, card_json)
     except Exception:
         logger.exception(
             "handle_project: failed to send confirmation to chat %r", chat_id
