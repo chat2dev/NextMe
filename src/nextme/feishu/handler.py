@@ -329,8 +329,10 @@ class MessageHandler:
 
         if is_group:
             if root_id:
-                # 话题内回复：必须 @bot，且话题必须是 bot 参与的
-                if not self._has_bot_mention(message):
+                # 话题内回复：必须 @bot 或是元命令（/xxx），且话题必须是 bot 参与的。
+                # 元命令（/stop /done /project 等）无需 @mention，用户明确发给 bot。
+                is_meta = text.startswith("/")
+                if not is_meta and not self._has_bot_mention(message):
                     logger.debug(
                         "handle_message: ignoring thread reply without @mention root_id=%s",
                         root_id,

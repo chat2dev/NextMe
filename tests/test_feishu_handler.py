@@ -1042,7 +1042,7 @@ class TestThreadSessionId:
         assert task.thread_root_id == "om_root1"
 
     def test_group_thread_reply_without_mention_ignored(self):
-        """Reply in an active thread WITHOUT @bot is silently dropped."""
+        """Regular reply in an active thread WITHOUT @bot is silently dropped."""
         handler, dispatcher, dispatched = self._make_handler()
         handler._active_threads.add("oc_group1:om_root1")
         data = self._make_group_thread_reply("om_reply_no_at", "om_root1", "ou_userB",
@@ -1050,6 +1050,20 @@ class TestThreadSessionId:
         self._run_handle_and_collect(handler, dispatcher, dispatched, data)
 
         assert len(dispatched) == 0
+
+    def test_group_thread_meta_command_without_mention_dispatched(self):
+        """Meta-command (/stop etc.) in active thread is dispatched even without @mention."""
+        handler, dispatcher, dispatched = self._make_handler()
+        handler._active_threads.add("oc_group1:om_root1")
+        # /stop sent without @bot mention — should still be dispatched
+        data = self._make_group_thread_reply("om_stop1", "om_root1", "ou_userB",
+                                              "/stop", with_mention=False)
+        self._run_handle_and_collect(handler, dispatcher, dispatched, data)
+
+        assert len(dispatched) == 1
+        task = dispatched[0]
+        assert task.content == "/stop"
+        assert task.thread_root_id == "om_root1"
 
     def test_group_thread_reply_in_unknown_thread_ignored(self):
         """Reply in an unknown thread (bot not involved) is silently dropped."""
