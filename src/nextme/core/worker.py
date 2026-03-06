@@ -500,21 +500,28 @@ class SessionWorker:
                         content=f"{rendered}\n\n[用户消息]\n{task.content}",
                     )
 
-            # Inject @mentions open_ids into the prompt so the agent can resolve
-            # Feishu @_user_N placeholders to actual open_id values (needed by
-            # skills like book-meeting that call Feishu APIs with open_ids).
-            if task.mentions:
-                mention_lines = [
-                    f"- {m.get('name', '')} (open_id: {m['open_id']})"
-                    for m in task.mentions
-                    if m.get("open_id")
-                ]
-                if mention_lines:
-                    mentions_block = "[消息中的@提及用户]\n" + "\n".join(mention_lines)
-                    task = dataclasses.replace(
-                        task,
-                        content=f"{task.content}\n\n{mentions_block}",
-                    )
+            # Inject @mentions open_ids and requester open_id into the prompt so
+            # the agent can resolve Feishu @_user_N placeholders to actual open_id
+            # values (needed by skills like book-meeting that call Feishu APIs).
+            requester_open_id = task.user_id
+            seen_open_ids: set[str] = set()
+            mention_lines: list[str] = []
+            for m in task.mentions:
+                oid = m.get("open_id", "")
+                if oid and oid not in seen_open_ids:
+                    seen_open_ids.add(oid)
+                    mention_lines.append(f"- {m.get('name', '')} (open_id: {oid})")
+            # Always include the requester (message sender) so skills like
+            # book-meeting can add them as a participant.
+            if requester_open_id and requester_open_id not in seen_open_ids:
+                seen_open_ids.add(requester_open_id)
+                mention_lines.append(f"- [预定人] (open_id: {requester_open_id})")
+            if mention_lines:
+                mentions_block = "[消息中的@提及用户]\n" + "\n".join(mention_lines)
+                task = dataclasses.replace(
+                    task,
+                    content=f"{task.content}\n\n{mentions_block}",
+                )
 
             # Step 4 — Execute.
             # ── DEBUG ② 发给 Executor(Agent) 的原始输入 ─────────────────
@@ -827,7 +834,12 @@ class SessionWorker:
         if not req.options:
             desc = req.description or "工具调用"
             try:
-                await self._replier.send_text(chat_id, f"已自动授权: {desc}")
+                if self._active_in_thread and self._active_message_id:
+                    await self._replier.reply_text(
+                        self._active_message_id, f"已自动授权: {desc}", in_thread=True
+                    )
+                else:
+                    await self._replier.send_text(chat_id, f"已自动授权: {desc}")
             except Exception:
                 logger.exception(
                     "SessionWorker[%s]: failed to send auto-approve notification",
@@ -847,7 +859,12 @@ class SessionWorker:
             display_id=self._session.actual_id or "",
         )
         try:
-            await self._replier.send_card(chat_id, card)
+            if self._active_in_thread and self._active_message_id:
+                await self._replier.reply_card(
+                    self._active_message_id, card, in_thread=True
+                )
+            else:
+                await self._replier.send_card(chat_id, card)
         except Exception:
             logger.exception(
                 "SessionWorker[%s]: failed to send permission card",

@@ -1466,11 +1466,11 @@ async def test_worker_send_timeout_includes_elapsed(
 async def test_worker_injects_mentions_into_agent_input(
     session, acp_registry, replier, settings, path_lock_registry
 ):
-    """task.mentions open_ids are appended to the content sent to the agent."""
+    """task.mentions open_ids and requester open_id are appended to the content."""
     registry, mock_runtime = acp_registry
     worker = SessionWorker(session, registry, replier, settings, path_lock_registry)
     task, _ = make_task("约下周三会议 @_user_2 @_user_3")
-    task = dataclasses.replace(task, mentions=[
+    task = dataclasses.replace(task, user_id="ou_requester000", mentions=[
         {"name": "Alice", "open_id": "ou_alice123"},
         {"name": "Bob", "open_id": "ou_bob456"},
     ])
@@ -1478,18 +1478,34 @@ async def test_worker_injects_mentions_into_agent_input(
     executed_content = mock_runtime.execute.call_args[1]["task"].content
     assert "ou_alice123" in executed_content
     assert "ou_bob456" in executed_content
+    assert "ou_requester000" in executed_content
     assert "[消息中的@提及用户]" in executed_content
+    assert "[预定人]" in executed_content
     assert "Alice" in executed_content
 
 
-async def test_worker_skips_mentions_injection_when_empty(
+async def test_worker_injects_requester_even_without_mentions(
     session, acp_registry, replier, settings, path_lock_registry
 ):
-    """No mentions block is injected when task.mentions is empty."""
+    """Requester open_id is injected even when no @mentions in message."""
+    registry, mock_runtime = acp_registry
+    worker = SessionWorker(session, registry, replier, settings, path_lock_registry)
+    task, _ = make_task("约个会议")
+    task = dataclasses.replace(task, user_id="ou_requester000", mentions=[])
+    await worker._execute_task(task)
+    executed_content = mock_runtime.execute.call_args[1]["task"].content
+    assert "ou_requester000" in executed_content
+    assert "[预定人]" in executed_content
+
+
+async def test_worker_skips_mentions_injection_when_no_user_id_and_no_mentions(
+    session, acp_registry, replier, settings, path_lock_registry
+):
+    """No mentions block when both task.mentions and task.user_id are empty."""
     registry, mock_runtime = acp_registry
     worker = SessionWorker(session, registry, replier, settings, path_lock_registry)
     task, _ = make_task("plain message")
-    # task.mentions defaults to []
+    # task.mentions defaults to [], task.user_id defaults to ""
     await worker._execute_task(task)
     executed_content = mock_runtime.execute.call_args[1]["task"].content
     assert "[消息中的@提及用户]" not in executed_content
