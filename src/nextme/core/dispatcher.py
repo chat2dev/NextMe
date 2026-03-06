@@ -51,6 +51,7 @@ from .commands import (
     handle_remember,
     handle_status,
     handle_stop,
+    handle_threads_list,
 )
 from .path_lock import PathLockRegistry
 from .session import Session, SessionRegistry, UserContext
@@ -829,6 +830,101 @@ class TaskDispatcher:
                     await replier.reply_text(reply_msg_id, f"open_id: `{uid}`\n角色: (未启用 ACL)", in_thread=True)
                 else:
                     await replier.send_text(chat_id, f"open_id: `{uid}`\n角色: (未启用 ACL)")
+
+        elif command == "/thread":
+            if task.chat_type != "group":
+                msg = "/thread 仅在群聊中有效。"
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, msg, in_thread=True)
+                else:
+                    await replier.send_text(chat_id, msg)
+                return
+            if self._state_store is None:
+                await replier.send_text(chat_id, "状态存储未启用，无法查看话题列表。")
+                return
+
+            if not arg:
+                # List active threads for this chat.
+                threads = self._state_store.get_threads_for_chat(chat_id)
+                await handle_threads_list(chat_id, threads, replier, reply_msg_id=reply_msg_id)
+                return
+
+            sub_parts = arg.split(maxsplit=1)
+            sub_cmd = sub_parts[0].lower()
+
+            if sub_cmd != "close":
+                await replier.send_text(
+                    chat_id, "未知子命令。用法: `/thread` 或 `/thread close <short_id>`"
+                )
+                return
+
+            short_id = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+            if not short_id:
+                msg = "用法: `/thread close <short_id>`"
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, msg, in_thread=True)
+                else:
+                    await replier.send_text(chat_id, msg)
+                return
+
+            # Permission check: only Owner/Admin can force-close threads.
+            if caller_role not in (_Role.ADMIN, _Role.OWNER):
+                msg = "权限不足：仅 Owner/Admin 可强制关闭话题。"
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, msg, in_thread=True)
+                else:
+                    await replier.send_text(chat_id, msg)
+                return
+
+            # Find the thread by short_id prefix.
+            threads = self._state_store.get_threads_for_chat(chat_id)
+            matches = [t for t in threads if t.thread_root_id.startswith(short_id)]
+            if not matches:
+                msg = f"未找到话题 `{short_id}`，请用 `/thread` 查看当前列表。"
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, msg, in_thread=True)
+                else:
+                    await replier.send_text(chat_id, msg)
+                return
+            if len(matches) > 1:
+                msg = f"短 ID `{short_id}` 匹配多个话题，请提供更多字符。"
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, msg, in_thread=True)
+                else:
+                    await replier.send_text(chat_id, msg)
+                return
+
+            target_thread = matches[0]
+            target_session_id = f"{chat_id}:{target_thread.thread_root_id}"
+            target_user_ctx = self._session_registry.get_or_create(target_session_id)
+            target_session = target_user_ctx.get_active_session()
+
+            if target_session is None:
+                # No in-memory session, just unregister the thread record.
+                self._on_thread_closed(chat_id, target_thread.thread_root_id)
+                msg = f"✅ 话题 `{short_id}…` 已关闭（无活跃 Session）。"
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, msg, in_thread=True)
+                else:
+                    await replier.send_text(chat_id, msg)
+                return
+
+            target_runtime = self._acp_registry.get(
+                f"{target_session_id}:{target_session.project_name}"
+            )
+
+            def _on_target_closed() -> None:
+                self._on_thread_closed(chat_id, target_thread.thread_root_id)
+
+            await handle_done(
+                session=target_session,
+                runtime=target_runtime,
+                replier=replier,
+                chat_id=chat_id,
+                root_message_id=target_thread.thread_root_id,
+                acp_registry=self._acp_registry,
+                on_thread_closed=_on_target_closed,
+            )
 
         elif command == "/acl":
             if self._acl_manager is None:

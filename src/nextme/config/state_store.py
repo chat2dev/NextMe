@@ -172,6 +172,13 @@ class StateStore:
         state = self._require_loaded()
         return sum(1 for r in state.thread_records.values() if r.chat_id == chat_id)
 
+    def get_threads_for_chat(self, chat_id: str):
+        """Return all active ThreadRecord objects for *chat_id*, sorted by created_at."""
+        from .schema import ThreadRecord
+        state = self._require_loaded()
+        records = [r for r in state.thread_records.values() if r.chat_id == chat_id]
+        return sorted(records, key=lambda r: r.created_at)
+
     def get_thread_project(self, chat_id: str, thread_root_id: str) -> str:
         """返回话题关联的 project_name，不存在则返回空串。"""
         state = self._require_loaded()

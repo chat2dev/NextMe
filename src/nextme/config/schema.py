@@ -85,7 +85,7 @@ class Settings(BaseModel):
     admin_users: list[str] = Field(default_factory=list)
     """Feishu open_ids of super-admins. Hot-reloadable via ./reload.sh (SIGHUP).
     These users bypass all ACL checks and can approve owner applications."""
-    max_active_threads_per_chat: int = 8
+    max_active_threads_per_chat: int = 100
     """每个群聊最多同时活跃的话题数。超出则排队等候直到有话题关闭。"""
     require_at_mention: bool = True
     """是否只处理 @机器人 的消息。

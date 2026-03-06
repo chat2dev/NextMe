@@ -34,6 +34,8 @@ HELP_COMMANDS: list[tuple[str, str]] = [
     ("/new", "开启新对话（清除当前对话历史）"),
     ("/stop", "取消当前执行中的任务"),
     ("/done", "关闭当前话题，释放 Claude 进程（仅群聊话题内有效）"),
+    ("/thread", "查看当前群聊的活跃话题列表"),
+    ("/thread close <short_id>", "强制关闭指定话题（Owner/Admin 可用）"),
     ("/help", "显示帮助"),
     ("/skill", "列出所有 Skill"),
     ("/skill <trigger>", "触发指定 Skill"),
@@ -489,6 +491,59 @@ async def handle_remember(
         logger.exception(
             "handle_remember: failed to send confirmation to chat %r", chat_id
         )
+
+
+async def handle_threads_list(
+    chat_id: str,
+    threads: list,
+    replier: Replier,
+    reply_msg_id: str = "",
+) -> None:
+    """Send a card listing all active threads for *chat_id*.
+
+    Args:
+        chat_id: Feishu group chat identifier.
+        threads: List of ThreadRecord objects sorted by created_at.
+        replier: Feishu message sender.
+        reply_msg_id: When set, reply in-thread to this message id.
+    """
+    if not threads:
+        msg = "当前群聊没有活跃话题。"
+        try:
+            if reply_msg_id:
+                await replier.reply_text(reply_msg_id, msg, in_thread=True)
+            else:
+                await replier.send_text(chat_id, msg)
+        except Exception:
+            logger.exception("handle_threads_list: failed to send to chat %r", chat_id)
+        return
+
+    lines: list[str] = []
+    for i, t in enumerate(threads, 1):
+        short_id = t.thread_root_id[:8]
+        created = t.created_at.strftime("%m-%d %H:%M")
+        lines.append(f"**{i}.** `{short_id}…`  📁 {t.project_name}  🕐 {created}")
+
+    lines.append("")
+    lines.append("关闭话题: `/thread close <short_id>`")
+
+    card = {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": f"活跃话题（{len(threads)} 个）"},
+            "template": "blue",
+        },
+        "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)}]},
+    }
+    card_json = json.dumps(card, ensure_ascii=False)
+    try:
+        if reply_msg_id:
+            await replier.reply_card(reply_msg_id, card_json, in_thread=True)
+        else:
+            await replier.send_card(chat_id, card_json)
+    except Exception:
+        logger.exception("handle_threads_list: failed to send card to chat %r", chat_id)
 
 
 async def handle_project(

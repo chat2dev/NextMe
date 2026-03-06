@@ -271,4 +271,4 @@ def test_global_state_has_thread_records():
 
 def test_settings_has_max_active_threads():
     s = Settings()
-    assert s.max_active_threads_per_chat == 8
+    assert s.max_active_threads_per_chat == 100
