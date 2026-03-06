@@ -621,7 +621,9 @@ class SessionWorker:
 
         # Add a "DONE" reaction to the original message so the user can see
         # at a glance that the task completed (fire-and-forget — failure is OK).
-        if task.message_id:
+        # For group thread sessions, skip the per-task reaction — /done sends it
+        # on the root message when the user explicitly closes the thread.
+        if task.message_id and not task.thread_root_id:
             try:
                 await self._replier.send_reaction(task.message_id, "DONE")
             except Exception:

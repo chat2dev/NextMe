@@ -529,6 +529,10 @@ class TaskDispatcher:
 
         session = user_ctx.get_active_session()
 
+        # For group thread sessions, replies go in-thread rather than to chat root.
+        in_thread = task.chat_type == "group" and bool(task.thread_root_id)
+        reply_msg_id = task.message_id if in_thread else ""
+
         # Resolve caller role for permission-gated commands.
         from ..acl.schema import Role as _Role
         caller_role: Optional[_Role] = None
@@ -538,14 +542,17 @@ class TaskDispatcher:
             )
 
         if command == "/help":
-            await handle_help(replier, chat_id)
+            await handle_help(replier, chat_id, reply_msg_id=reply_msg_id)
 
         elif command == "/new":
             if session is None:
-                await replier.send_text(chat_id, "当前没有活跃 Session。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "当前没有活跃 Session。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "当前没有活跃 Session。")
                 return
             runtime = self._acp_registry.get(f"{context_id}:{session.project_name}")
-            await handle_new(session, runtime, replier, chat_id)
+            await handle_new(session, runtime, replier, chat_id, reply_msg_id=reply_msg_id)
             # Clear persisted session id so the next task starts a truly fresh session.
             if self._state_store is not None:
                 self._state_store.save_project_actual_id(
@@ -554,19 +561,26 @@ class TaskDispatcher:
 
         elif command == "/stop":
             if session is None:
-                await replier.send_text(chat_id, "当前没有活跃 Session。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "当前没有活跃 Session。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "当前没有活跃 Session。")
                 return
             runtime = self._acp_registry.get(f"{context_id}:{session.project_name}")
-            await handle_stop(session, replier, chat_id, runtime=runtime)
+            await handle_stop(session, replier, chat_id, runtime=runtime, reply_msg_id=reply_msg_id)
 
         elif command == "/done":
             if task.chat_type != "group" or not task.thread_root_id:
-                await replier.send_text(
-                    chat_id, "/done 仅在群聊话题内有效。"
-                )
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "/done 仅在群聊话题内有效。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "/done 仅在群聊话题内有效。")
                 return
             if session is None:
-                await replier.send_text(chat_id, "当前没有活跃 Session。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "当前没有活跃 Session。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "当前没有活跃 Session。")
                 return
             runtime = self._acp_registry.get(f"{context_id}:{session.project_name}")
             chat_id_str = self._get_chat_id(context_id)
@@ -585,7 +599,7 @@ class TaskDispatcher:
             )
 
         elif command == "/status":
-            await handle_status(user_ctx, replier, chat_id)
+            await handle_status(user_ctx, replier, chat_id, reply_msg_id=reply_msg_id)
 
         elif command == "/project":
             if not arg:
@@ -610,7 +624,11 @@ class TaskDispatcher:
                     },
                     "body": {"elements": [{"tag": "markdown", "content": "\n".join(proj_lines)}]},
                 }
-                await replier.send_card(chat_id, json.dumps(proj_card, ensure_ascii=False))
+                proj_card_json = json.dumps(proj_card, ensure_ascii=False)
+                if reply_msg_id:
+                    await replier.reply_card(reply_msg_id, proj_card_json, in_thread=True)
+                else:
+                    await replier.send_card(chat_id, proj_card_json)
                 return
 
             sub_parts = arg.split(maxsplit=1)
@@ -619,23 +637,27 @@ class TaskDispatcher:
             if sub_cmd == "bind":
                 bind_name = sub_parts[1].strip() if len(sub_parts) > 1 else ""
                 if not bind_name:
-                    await replier.send_text(chat_id, "用法: `/project bind <name>`")
+                    if reply_msg_id:
+                        await replier.reply_text(reply_msg_id, "用法: `/project bind <name>`", in_thread=True)
+                    else:
+                        await replier.send_text(chat_id, "用法: `/project bind <name>`")
                     return
-                bound = await handle_bind(chat_id, bind_name, self._config, replier)
+                bound = await handle_bind(chat_id, bind_name, self._config, replier, reply_msg_id=reply_msg_id)
                 if bound:
                     self._dynamic_bindings[chat_id] = bound
                     if self._state_store is not None:
                         self._state_store.set_binding(chat_id, bound)
 
             elif sub_cmd == "unbind":
-                await handle_unbind(chat_id, replier)
+                await handle_unbind(chat_id, replier, reply_msg_id=reply_msg_id)
                 self._dynamic_bindings.pop(chat_id, None)
                 if self._state_store is not None:
                     self._state_store.remove_binding(chat_id)
 
             else:
                 await handle_project(
-                    user_ctx, arg, self._config, self._settings, replier, chat_id
+                    user_ctx, arg, self._config, self._settings, replier, chat_id,
+                    reply_msg_id=reply_msg_id,
                 )
 
         elif command == "/skill":
@@ -670,7 +692,11 @@ class TaskDispatcher:
                     },
                     "body": {"elements": [{"tag": "markdown", "content": skill_content}]},
                 }
-                await replier.send_card(chat_id, json.dumps(skill_card, ensure_ascii=False))
+                skill_card_json = json.dumps(skill_card, ensure_ascii=False)
+                if reply_msg_id:
+                    await replier.reply_card(reply_msg_id, skill_card_json, in_thread=True)
+                else:
+                    await replier.send_card(chat_id, skill_card_json)
                 return
             # Look up the skill and enqueue a rendered prompt as a normal task.
             trigger, _, user_input = arg.partition(" ")
@@ -680,10 +706,17 @@ class TaskDispatcher:
                     f"`{s.meta.trigger}`"
                     for s in sorted(self._skill_registry.list_all(), key=lambda x: x.meta.trigger)
                 )
-                await replier.send_text(
-                    chat_id,
-                    f"未找到 Skill `{trigger}`。\n可用: {available or '(无)'}",
-                )
+                if reply_msg_id:
+                    await replier.reply_text(
+                        reply_msg_id,
+                        f"未找到 Skill `{trigger}`。\n可用: {available or '(无)'}",
+                        in_thread=True,
+                    )
+                else:
+                    await replier.send_text(
+                        chat_id,
+                        f"未找到 Skill `{trigger}`。\n可用: {available or '(无)'}",
+                    )
                 return
             logger.info(
                 "TaskDispatcher: invoking skill %r for context_id=%r", trigger, context_id
@@ -717,7 +750,10 @@ class TaskDispatcher:
                 session.pending_tasks.append(skill_task)
                 skill_task.was_queued = session.task_queue.qsize() > 1
             except asyncio.QueueFull:
-                await replier.send_text(chat_id, "任务队列已满，请稍后再试。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "任务队列已满，请稍后再试。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "任务队列已满，请稍后再试。")
                 return
             await self._ensure_worker(session, replier)
 
@@ -745,17 +781,27 @@ class TaskDispatcher:
                 },
                 "body": {"elements": [{"tag": "markdown", "content": content}]},
             }
-            await replier.send_card(chat_id, json.dumps(card, ensure_ascii=False))
+            task_card_json = json.dumps(card, ensure_ascii=False)
+            if reply_msg_id:
+                await replier.reply_card(reply_msg_id, task_card_json, in_thread=True)
+            else:
+                await replier.send_card(chat_id, task_card_json)
 
         elif command == "/remember":
             if not arg:
-                await replier.send_text(chat_id, "用法: `/remember <text>`")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "用法: `/remember <text>`", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "用法: `/remember <text>`")
                 return
             if self._memory_manager is None:
-                await replier.send_text(chat_id, "记忆功能未启用。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "记忆功能未启用。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "记忆功能未启用。")
                 return
             user_id = task.user_id or self._get_user_id(context_id)
-            await handle_remember(user_id, arg, self._memory_manager, replier, chat_id)
+            await handle_remember(user_id, arg, self._memory_manager, replier, chat_id, reply_msg_id=reply_msg_id)
 
         elif command == "/whoami":
             if self._acl_manager is not None:
@@ -768,13 +814,22 @@ class TaskDispatcher:
                 )
             else:
                 uid = task.user_id or self._get_user_id(context_id)
-                await replier.send_text(chat_id, f"open_id: `{uid}`\n角色: (未启用 ACL)")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, f"open_id: `{uid}`\n角色: (未启用 ACL)", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, f"open_id: `{uid}`\n角色: (未启用 ACL)")
 
         elif command == "/acl":
             if self._acl_manager is None:
-                await replier.send_text(chat_id, "ACL 功能未启用。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "ACL 功能未启用。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "ACL 功能未启用。")
             elif caller_role not in (_Role.ADMIN, _Role.OWNER, _Role.COLLABORATOR):
-                await replier.send_text(chat_id, "权限不足。")
+                if reply_msg_id:
+                    await replier.reply_text(reply_msg_id, "权限不足。", in_thread=True)
+                else:
+                    await replier.send_text(chat_id, "权限不足。")
             else:
                 await self._handle_acl_command(
                     arg, caller_role, task.user_id or self._get_user_id(context_id), replier, chat_id
@@ -786,7 +841,7 @@ class TaskDispatcher:
                 command,
                 context_id,
             )
-            await handle_help(replier, chat_id)
+            await handle_help(replier, chat_id, reply_msg_id=reply_msg_id)
 
     async def _handle_acl_command(
         self,
