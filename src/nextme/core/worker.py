@@ -472,8 +472,10 @@ class SessionWorker:
 
             # Inject user memory facts into the task prompt for new sessions only.
             # Facts are keyed by user_id (global across all chats) not context_id.
+            # For group thread sessions, context_id ends with thread_root_id (not user open_id);
+            # use task.user_id which is always the sender's actual open_id.
             if not runtime.actual_id and self._memory_manager is not None:
-                user_id = self._session.context_id.rsplit(":", 1)[-1]
+                user_id = task.user_id or self._session.context_id.rsplit(":", 1)[-1]
                 try:
                     await self._memory_manager.load(user_id)
                 except Exception:
@@ -496,6 +498,22 @@ class SessionWorker:
                     task = dataclasses.replace(
                         task,
                         content=f"{rendered}\n\n[用户消息]\n{task.content}",
+                    )
+
+            # Inject @mentions open_ids into the prompt so the agent can resolve
+            # Feishu @_user_N placeholders to actual open_id values (needed by
+            # skills like book-meeting that call Feishu APIs with open_ids).
+            if task.mentions:
+                mention_lines = [
+                    f"- {m.get('name', '')} (open_id: {m['open_id']})"
+                    for m in task.mentions
+                    if m.get("open_id")
+                ]
+                if mention_lines:
+                    mentions_block = "[消息中的@提及用户]\n" + "\n".join(mention_lines)
+                    task = dataclasses.replace(
+                        task,
+                        content=f"{task.content}\n\n{mentions_block}",
                     )
 
             # Step 4 — Execute.
@@ -571,7 +589,8 @@ class SessionWorker:
         # Extract <memory> facts written by the agent and strip them from the
         # displayed output.  Writeback happens regardless of session age so
         # that the agent can update memory at any point in a conversation.
-        user_id = self._session.context_id.rsplit(":", 1)[-1]
+        # Use task.user_id for group threads (context_id ends with thread_root_id there).
+        user_id = task.user_id or self._session.context_id.rsplit(":", 1)[-1]
         memory_ops, final_content = self._extract_and_strip_memory(final_content)
         # ── DEBUG ⑤ Agent 返回的 memory 操作 ────────────────────────────
         if memory_ops:
