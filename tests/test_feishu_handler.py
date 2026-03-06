@@ -984,8 +984,9 @@ class TestThreadSessionId:
         data.event = event
         return data
 
-    def _make_group_thread_reply(self, message_id: str, root_id: str, user_id: str, text: str):
-        """Group chat reply within a thread (root_id set, no @mention needed)."""
+    def _make_group_thread_reply(self, message_id: str, root_id: str, user_id: str, text: str,
+                                  with_mention: bool = True):
+        """Group chat reply within a thread (root_id set). with_mention controls @bot presence."""
         message = MagicMock()
         message.message_id = message_id
         message.chat_id = "oc_group1"
@@ -994,7 +995,8 @@ class TestThreadSessionId:
         message.root_id = root_id
         message.parent_id = root_id
         message.content = json.dumps({"text": text})
-        message.mentions = []
+        # With @mention: non-empty mentions list; without: empty list
+        message.mentions = [MagicMock()] if with_mention else []
         sender = MagicMock()
         sender.sender_id = MagicMock()
         sender.sender_id.open_id = user_id
@@ -1025,11 +1027,12 @@ class TestThreadSessionId:
 
         assert len(dispatched) == 0
 
-    def test_group_thread_reply_in_active_thread_dispatched(self):
-        """Reply in an active thread (no @) is dispatched with same session_id."""
+    def test_group_thread_reply_with_mention_dispatched(self):
+        """Reply in an active thread WITH @bot is dispatched with same session_id."""
         handler, dispatcher, dispatched = self._make_handler()
         handler._active_threads.add("oc_group1:om_root1")  # simulate registered thread
-        data = self._make_group_thread_reply("om_reply1", "om_root1", "ou_userB", "follow-up")
+        data = self._make_group_thread_reply("om_reply1", "om_root1", "ou_userB", "follow-up",
+                                              with_mention=True)
         self._run_handle_and_collect(handler, dispatcher, dispatched, data)
 
         assert len(dispatched) == 1
@@ -1037,6 +1040,16 @@ class TestThreadSessionId:
         assert task.session_id == "oc_group1:om_root1"
         assert task.user_id == "ou_userB"
         assert task.thread_root_id == "om_root1"
+
+    def test_group_thread_reply_without_mention_ignored(self):
+        """Reply in an active thread WITHOUT @bot is silently dropped."""
+        handler, dispatcher, dispatched = self._make_handler()
+        handler._active_threads.add("oc_group1:om_root1")
+        data = self._make_group_thread_reply("om_reply_no_at", "om_root1", "ou_userB",
+                                              "no mention here", with_mention=False)
+        self._run_handle_and_collect(handler, dispatcher, dispatched, data)
+
+        assert len(dispatched) == 0
 
     def test_group_thread_reply_in_unknown_thread_ignored(self):
         """Reply in an unknown thread (bot not involved) is silently dropped."""

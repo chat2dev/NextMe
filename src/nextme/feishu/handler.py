@@ -329,7 +329,13 @@ class MessageHandler:
 
         if is_group:
             if root_id:
-                # 话题内回复：检查是否是 bot 参与的话题
+                # 话题内回复：必须 @bot，且话题必须是 bot 参与的
+                if not self._has_bot_mention(message):
+                    logger.debug(
+                        "handle_message: ignoring thread reply without @mention root_id=%s",
+                        root_id,
+                    )
+                    return
                 thread_key = f"{chat_id}:{root_id}"
                 if thread_key not in self._active_threads:
                     logger.debug(
