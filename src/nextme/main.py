@@ -397,6 +397,17 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     # Wire the real client into the dispatcher so dispatch() works correctly.
     dispatcher._feishu_client = feishu_client
 
+    # Fetch the bot's own open_id so the handler can filter @mentions precisely.
+    bot_open_id = await feishu_client.fetch_bot_open_id()
+    if bot_open_id:
+        handler._bot_open_id = bot_open_id
+        logger.info("MessageHandler: bot open_id set to %r", bot_open_id)
+    else:
+        logger.warning(
+            "MessageHandler: could not fetch bot open_id; "
+            "falling back to user_id heuristic for @mention detection"
+        )
+
     # ------------------------------------------------------------------
     # Step 9: Start background tasks
     # ------------------------------------------------------------------

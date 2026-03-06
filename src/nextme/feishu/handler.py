@@ -95,10 +95,12 @@ class MessageHandler:
     """Convert lark P2ImMessageReceiveV1 events into Task objects and dispatch them."""
 
     def __init__(self, dedup: MessageDedup, dispatcher: _Dispatcher,
-                 require_at_mention: bool = True) -> None:
+                 require_at_mention: bool = True,
+                 bot_open_id: str = "") -> None:
         self._dedup = dedup
         self._dispatcher = dispatcher
         self._require_at_mention = require_at_mention
+        self._bot_open_id: str = bot_open_id
         # The asyncio event loop that owns the dispatcher.  Captured lazily on
         # the first call from the asyncio side (see get_event_handler).
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -403,26 +405,48 @@ class MessageHandler:
     # Private helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _has_bot_mention(message: Any) -> bool:
-        """Return True if the message @-mentions the bot (not just any user).
+    def _has_bot_mention(self, message: Any) -> bool:
+        """Return True if the message @-mentions this bot.
 
-        Heuristic: in Feishu, bot mentions have no ``user_id`` (bots are app
-        accounts, not user accounts), while user mentions always populate
-        ``user_id``.  A mention entry without ``user_id`` is treated as a bot
-        mention.
+        When ``self._bot_open_id`` is set (fetched at startup from
+        ``GET /open-apis/bot/v3/info``), compare each mention's ``open_id``
+        directly — this is the definitive check.
+
+        Fallback heuristic (used only when bot_open_id is unavailable): bots
+        are app accounts and have no ``user_id``, while user mentions always
+        populate ``user_id``.  A mention entry without ``user_id`` is treated
+        as a bot mention.
         """
         mentions = getattr(message, "mentions", None) or []
+        if not mentions:
+            logger.debug("_has_bot_mention: no mentions in message")
+            return False
+
+        if self._bot_open_id:
+            # Exact comparison against the bot's own open_id.
+            for m in mentions:
+                mid = getattr(m, "id", None)
+                if mid is None:
+                    continue
+                mention_open_id = getattr(mid, "open_id", None) or ""
+                if mention_open_id == self._bot_open_id:
+                    return True
+            logger.debug(
+                "_has_bot_mention: no bot mention (bot_open_id=%r, total=%d)",
+                self._bot_open_id, len(mentions),
+            )
+            return False
+
+        # Fallback: no user_id → likely a bot mention.
         for m in mentions:
             mid = getattr(m, "id", None)
             if mid is None:
                 continue
             user_id = getattr(mid, "user_id", None) or ""
             if not user_id:
-                # No user_id → this is a bot (app) mention
                 return True
         logger.debug(
-            "_has_bot_mention: no bot mention found (total mentions=%d)", len(mentions)
+            "_has_bot_mention: no bot mention found via heuristic (total=%d)", len(mentions)
         )
         return False
 

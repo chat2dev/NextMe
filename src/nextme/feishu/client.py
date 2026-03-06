@@ -213,6 +213,37 @@ class FeishuClient:
     # Factory
     # ------------------------------------------------------------------
 
+    async def fetch_bot_open_id(self) -> str:
+        """Fetch this app bot's ``open_id`` from the Feishu Bot Info API.
+
+        Calls ``GET /open-apis/bot/v3/info`` with a tenant_access_token and
+        returns the ``bot.open_id`` field.  Returns an empty string on failure
+        so callers can degrade gracefully.
+        """
+        try:
+            req = lark.BaseRequest()
+            req.http_method = lark.HttpMethod.GET
+            req.uri = "/open-apis/bot/v3/info"
+            req.token_types = {lark.AccessTokenType.TENANT}
+            resp = await self._lark_client.arequest(req)
+            if not resp.success():
+                logger.warning(
+                    "fetch_bot_open_id: API error code=%s msg=%s",
+                    resp.code, resp.msg,
+                )
+                return ""
+            data = resp.raw.content
+            if isinstance(data, (bytes, bytearray)):
+                import json as _json
+                data = _json.loads(data)
+            bot_info = data.get("bot", {}) if isinstance(data, dict) else {}
+            open_id: str = bot_info.get("open_id", "") or ""
+            logger.info("fetch_bot_open_id: bot open_id=%r", open_id)
+            return open_id
+        except Exception:
+            logger.exception("fetch_bot_open_id: unexpected error")
+            return ""
+
     def get_replier(self) -> FeishuReplier:
         """Return a ``FeishuReplier`` backed by the underlying lark REST client."""
         return FeishuReplier(self._lark_client)
