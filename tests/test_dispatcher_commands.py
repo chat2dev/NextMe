@@ -795,3 +795,177 @@ class TestDoneCommand:
         replier.send_text.assert_called()
         text_arg = replier.send_text.call_args[0][1]
         assert "话题" in text_arg or "/done" in text_arg
+
+
+# ---------------------------------------------------------------------------
+# Thread queue bug-fix regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestThreadQueueBugFixes:
+    """Regression tests for the three thread-queue bugs found and fixed.
+
+    Bug 1: When dispatcher queues a root task (limit exceeded), it must call
+           _thread_closed_callback to roll back handler's optimistic
+           _active_threads entry.
+
+    Bug 2: When _on_thread_closed dequeues the next task, it must call
+           _thread_accept_callback to restore the thread in handler's
+           _active_threads.
+
+    Bug 3: When /done triggers _on_thread_closed, _thread_closed_callback
+           (= handler.deregister_thread) must be called so the thread is
+           removed from handler._active_threads.
+    """
+
+    async def test_bug1_active_threads_rolled_back_when_queued(self, tmp_path):
+        """Bug 1: When task is queued (limit exceeded), _thread_closed_callback must
+        be called to roll back handler's optimistic _active_threads entry."""
+        from nextme.config.state_store import StateStore
+
+        replier = make_replier()
+        settings_obj = Settings(max_active_threads_per_chat=1)
+        store = StateStore(settings_obj, state_path=tmp_path / "state.json")
+        await store.load()
+        store.register_thread("oc_G", "om_existing", "default")  # fill the one slot
+
+        d = make_dispatcher(tmp_path, replier)
+        d._state_store = store
+        d._settings = settings_obj
+
+        # Install callback spy
+        rollback_calls: list[tuple[str, str]] = []
+        d._thread_closed_callback = lambda chat_id, thread_root_id: rollback_calls.append(
+            (chat_id, thread_root_id)
+        )
+
+        task = make_task("hi", session_id="oc_G:om_new_root")
+        task.user_id = "ou_A"
+        task.thread_root_id = "om_new_root"
+        task.message_id = "om_new_root"  # root message = new thread
+        task.chat_type = "group"
+
+        with patch.object(d, "_ensure_worker", new=AsyncMock()):
+            await d.dispatch(task)
+
+        # Task should be queued (not dispatched) due to limit
+        assert "oc_G" in d._pending_thread_queue
+        assert len(d._pending_thread_queue["oc_G"]) == 1
+
+        # Rollback callback must have been called to undo the handler's optimistic entry
+        assert len(rollback_calls) == 1, (
+            f"Expected 1 rollback call, got {rollback_calls}"
+        )
+        assert rollback_calls[0] == ("oc_G", "om_new_root")
+
+    async def test_bug2_active_threads_restored_when_queued_task_released(self, tmp_path):
+        """Bug 2: When _on_thread_closed dequeues the next task, _thread_accept_callback
+        must be called so handler knows the thread is now active."""
+        import collections
+
+        d = make_dispatcher(tmp_path, make_replier())
+
+        # Install accept callback spy
+        accept_calls: list[tuple[str, str]] = []
+        d._thread_accept_callback = lambda chat_id, thread_root_id: accept_calls.append(
+            (chat_id, thread_root_id)
+        )
+        # Silence the closed callback
+        d._thread_closed_callback = lambda *args: None
+
+        # Put a queued task in the pending queue
+        queued_task = make_task("queued", session_id="oc_G:om_queued_root")
+        queued_task.user_id = "ou_B"
+        queued_task.thread_root_id = "om_queued_root"
+        queued_task.message_id = "om_queued_root"
+        queued_task.chat_type = "group"
+        d._pending_thread_queue["oc_G"] = collections.deque([queued_task])
+
+        # Patch state_store to avoid errors on unregister
+        if d._state_store is not None:
+            d._state_store.unregister_thread = MagicMock()
+
+        # Patch dispatch so the re-dispatched task doesn't run for real
+        d.dispatch = AsyncMock()
+
+        # Trigger _on_thread_closed (simulates /done on the currently-active thread)
+        d._on_thread_closed("oc_G", "om_active_root")
+
+        # Give asyncio.create_task a chance to schedule
+        await asyncio.sleep(0)
+
+        # accept callback must have been called with the queued task's thread_root_id
+        assert len(accept_calls) == 1, (
+            f"Expected 1 accept call, got {accept_calls}"
+        )
+        assert accept_calls[0] == ("oc_G", "om_queued_root")
+
+    async def test_bug3_done_command_deregisters_from_active_threads(self, tmp_path):
+        """Bug 3: _on_thread_closed must call _thread_closed_callback (= handler.deregister_thread)
+        so the thread is removed from handler._active_threads after /done."""
+        import collections
+
+        d = make_dispatcher(tmp_path, make_replier())
+
+        # Install closed callback spy
+        closed_calls: list[tuple[str, str]] = []
+        d._thread_closed_callback = lambda chat_id, thread_root_id: closed_calls.append(
+            (chat_id, thread_root_id)
+        )
+
+        # No pending tasks — simple close
+        d._pending_thread_queue = {}
+        if d._state_store is not None:
+            d._state_store.unregister_thread = MagicMock()
+
+        d._on_thread_closed("oc_G", "om_root1")
+
+        # Closed callback must have been called — this removes from handler._active_threads
+        assert len(closed_calls) == 1, (
+            f"Expected 1 closed call, got {closed_calls}"
+        )
+        assert closed_calls[0] == ("oc_G", "om_root1")
+
+    def test_handler_register_and_deregister_thread(self):
+        """Integration: handler.register_thread adds, handler.deregister_thread removes."""
+        from nextme.feishu.handler import MessageHandler
+        from nextme.feishu.dedup import MessageDedup
+
+        handler = MessageHandler(MessageDedup(), MagicMock())
+
+        # Initially empty
+        assert "oc_G:om_root1" not in handler._active_threads
+
+        # register adds it
+        handler.register_thread("oc_G", "om_root1")
+        assert "oc_G:om_root1" in handler._active_threads
+
+        # deregister removes it
+        handler.deregister_thread("oc_G", "om_root1")
+        assert "oc_G:om_root1" not in handler._active_threads
+
+        # deregister is idempotent — must not raise
+        handler.deregister_thread("oc_G", "om_root1")
+        assert "oc_G:om_root1" not in handler._active_threads
+
+    def test_full_callback_chain_wiring(self, tmp_path):
+        """Verify wiring: after register_thread_closed/accept_callback, invoking
+        the dispatcher callbacks mutates handler._active_threads correctly."""
+        from nextme.feishu.handler import MessageHandler
+        from nextme.feishu.dedup import MessageDedup
+
+        handler = MessageHandler(MessageDedup(), MagicMock())
+        d = make_dispatcher(tmp_path, make_replier())
+
+        # Wire up the way main.py does
+        d.register_thread_closed_callback(handler.deregister_thread)
+        d.register_thread_accept_callback(handler.register_thread)
+
+        # Simulate: dispatcher accepts a thread → added to _active_threads
+        handler._active_threads = set()
+        d._thread_accept_callback("oc_G", "om_root1")
+        assert "oc_G:om_root1" in handler._active_threads
+
+        # Simulate: dispatcher closes the thread → removed from _active_threads
+        d._thread_closed_callback("oc_G", "om_root1")
+        assert "oc_G:om_root1" not in handler._active_threads
