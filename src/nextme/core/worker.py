@@ -221,9 +221,12 @@ class SessionWorker:
                         task.id,
                     )
                     # Mark task as cancelled and send feedback before re-raising.
-                    task.canceled = True
-                    self._session.status = TaskStatus.CANCELED
-                    await self._send_cancelled(task)
+                    # Guard: _execute_task's inner handler may have already sent
+                    # the cancel card (and set task.canceled=True); don't send twice.
+                    if not task.canceled:
+                        task.canceled = True
+                        self._session.status = TaskStatus.CANCELED
+                        await self._send_cancelled(task)
                     raise
                 finally:
                     self._session.active_task = None
@@ -537,6 +540,7 @@ class SessionWorker:
                     on_permission=self._on_permission,
                 )
             except asyncio.CancelledError:
+                task.canceled = True
                 self._session.status = TaskStatus.CANCELED
                 await self._send_cancelled(task)
                 raise

@@ -159,6 +159,37 @@ async def test_run_dequeues_multiple_tasks(worker, session, acp_registry):
     assert mock_runtime.execute.call_count >= 1
 
 
+async def test_run_cancellation_sends_cancel_card_exactly_once(worker, session, acp_registry, replier):
+    """On worker cancellation mid-execution, 'already cancelled' card is sent only once.
+
+    Regression test: previously _execute_task() and run() both called
+    _send_cancelled() when CancelledError propagated through both handlers,
+    causing two '已取消' messages on bot restart.
+    """
+    _, mock_runtime = acp_registry
+    # Simulate slow runtime so the worker is executing when we cancel it.
+    async def slow_execute(**kwargs):
+        await asyncio.sleep(10)
+        return "done"
+    mock_runtime.execute.side_effect = slow_execute
+
+    task, _ = make_task("slow task")
+    await session.task_queue.put(task)
+    task_runner = asyncio.create_task(worker.run())
+    await asyncio.sleep(0.05)  # let worker start executing
+    task_runner.cancel()
+    try:
+        await task_runner
+    except asyncio.CancelledError:
+        pass
+
+    # _send_cancelled calls build_result_card then update_card/reply_card.
+    # It must have been called exactly once — not twice.
+    assert replier.build_result_card.call_count == 1, (
+        f"Expected 1 cancel card, got {replier.build_result_card.call_count}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # _send_result tests
 # ---------------------------------------------------------------------------
