@@ -21,6 +21,12 @@ Tests
 13. test_task_timeout_sends_timeout_card             — runtime raises TaskTimeoutError → timeout card sent, result card NOT sent
 14. test_task_timeout_evicts_runtime_from_registry   — after timeout, runtime is removed from ACPRuntimeRegistry
 15. test_task_timeout_session_preserved_next_message_succeeds — actual_id preserved; 2nd task after timeout succeeds
+23. test_thread_command_lists_active_threads         — /thread in group chat → lists threads from state_store
+24. test_thread_close_command_closes_thread          — /thread close <short_id> (Owner) → calls handle_done, DONE reaction sent
+25. test_thread_close_command_non_owner_denied       — /thread close by non-Owner → permission denied message
+26. test_suppress_cancel_prevents_cancel_card        — worker cancelled with suppress_cancel=True → no cancel card
+27. test_thread_close_ambiguous_short_id             — /thread close with ambiguous prefix → "匹配多个" error
+28. test_thread_command_non_group_chat_rejected      — /thread in p2p chat → "仅在群聊中有效" message
 """
 
 from __future__ import annotations
@@ -1495,3 +1501,410 @@ async def test_thread_queue_reply_in_queued_thread_is_dropped(tmp_project, setti
     assert len(dispatch_calls) == 0, (
         f"Expected 0 dispatch calls for reply in queued thread, got {len(dispatch_calls)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 23: /thread command lists active threads from state_store
+# ---------------------------------------------------------------------------
+
+
+async def test_thread_command_lists_active_threads(tmp_project, settings, tmp_path):
+    """E2E: /thread in a group chat lists the active threads from state_store.
+
+    Setup:
+    - Create a real StateStore with two pre-registered threads.
+    - Dispatch a /thread command from a group-chat session.
+    - Verify: replier.send_card is called (the thread-list card was sent).
+    - Verify: runtime.execute is NOT called (meta command, no agent invocation).
+    """
+    from nextme.config.state_store import StateStore
+
+    replier = make_replier()
+    mock_runtime = make_mock_runtime()
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    state_store = StateStore(settings, state_path=tmp_path / "state.json")
+    await state_store.load()
+
+    chat_id = "oc_thread_list_test"
+    state_store.register_thread(chat_id, "om_thread_aaa", "myproject")
+    state_store.register_thread(chat_id, "om_thread_bbb", "myproject")
+    assert state_store.get_active_thread_count(chat_id) == 2
+
+    config = AppConfig(projects=[tmp_project])
+    feishu_client = make_feishu_client(replier)
+    SessionRegistry._instance = None
+    session_registry = SessionRegistry.get_instance()
+    dispatcher = TaskDispatcher(
+        config=config,
+        settings=settings,
+        session_registry=session_registry,
+        acp_registry=acp_registry,
+        path_lock_registry=PathLockRegistry(),
+        feishu_client=feishu_client,
+        state_store=state_store,
+    )
+
+    # /thread from a group-chat context
+    session_id = f"{chat_id}:ou_admin"
+    task = Task(
+        id=str(uuid.uuid4()),
+        content="/thread",
+        session_id=session_id,
+        reply_fn=AsyncMock(),
+        message_id="om_thread_cmd",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="ou_admin",
+    )
+
+    await dispatcher.dispatch(task)
+    await asyncio.sleep(0.2)
+
+    # The thread-list card must be sent
+    assert replier.send_card.called, "Expected send_card to be called with the thread-list card"
+
+    # No agent invocation for a meta command
+    mock_runtime.execute.assert_not_called()
+
+    await cancel_workers(dispatcher)
+
+
+# ---------------------------------------------------------------------------
+# Test 24: /thread close <short_id> by Owner closes thread and sends DONE reaction
+# ---------------------------------------------------------------------------
+
+
+async def test_thread_close_command_closes_thread(tmp_project, settings, tmp_path, acl_db):
+    """E2E: /thread close <short_id> (Owner) stops the target session and sends DONE reaction.
+
+    Setup:
+    - Create an active group-thread session (session_id = chat_id:thread_root_id).
+    - Run one task so the session is initialized.
+    - Register the thread in state_store.
+    - Dispatch /thread close <short_id> from an Owner context.
+    - Verify: send_reaction called with "DONE" for the target thread root message.
+    - Verify: state_store no longer has the thread registered.
+    """
+    from nextme.config.state_store import StateStore
+
+    replier = make_replier()
+    mock_runtime = make_mock_runtime(execute_return="work done")
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    state_store = StateStore(settings, state_path=tmp_path / "state_close.json")
+    await state_store.load()
+
+    chat_id = "oc_close_test"
+    thread_root_id = "om_target_thread_root"
+    thread_session_id = f"{chat_id}:{thread_root_id}"
+    short_id = thread_root_id[:8]
+
+    # ACL: both users are admins (ou_worker for task1, ou_admin for /thread close)
+    acl_manager = AclManager(db=acl_db, admin_users=["ou_admin", "ou_worker"])
+
+    config = AppConfig(projects=[tmp_project])
+    feishu_client = make_feishu_client(replier)
+    SessionRegistry._instance = None
+    session_registry = SessionRegistry.get_instance()
+    dispatcher = TaskDispatcher(
+        config=config,
+        settings=settings,
+        session_registry=session_registry,
+        acp_registry=acp_registry,
+        path_lock_registry=PathLockRegistry(),
+        feishu_client=feishu_client,
+        state_store=state_store,
+        acl_manager=acl_manager,
+    )
+
+    # First, run a task in the target thread to create the session
+    task1 = Task(
+        id=str(uuid.uuid4()),
+        content="start work",
+        session_id=thread_session_id,
+        reply_fn=AsyncMock(),
+        message_id=thread_root_id,
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="ou_worker",
+        thread_root_id=thread_root_id,
+    )
+    await dispatcher.dispatch(task1)
+    session = _get_session(dispatcher, thread_session_id)
+    assert session is not None
+
+    try:
+        await drain_session_queue(session)
+    except asyncio.TimeoutError:
+        pytest.fail("task1 did not complete within timeout")
+
+    # Register the thread in state_store (dispatcher does this for group root messages,
+    # but since state_store was attached, let's register it manually here)
+    state_store.register_thread(chat_id, thread_root_id, "myproject")
+    assert state_store.get_active_thread_count(chat_id) == 1
+
+    # Now dispatch /thread close <short_id> as Owner (no ACL manager → defaults to Owner role)
+    close_task = Task(
+        id=str(uuid.uuid4()),
+        content=f"/thread close {short_id}",
+        session_id=f"{chat_id}:ou_admin",
+        reply_fn=AsyncMock(),
+        message_id="om_close_cmd",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="ou_admin",
+    )
+
+    await dispatcher.dispatch(close_task)
+    await asyncio.sleep(0.3)
+
+    # DONE reaction must be sent to the target thread root message
+    replier.send_reaction.assert_any_call(thread_root_id, "DONE")
+
+    # Thread must be removed from state_store
+    assert state_store.get_active_thread_count(chat_id) == 0, (
+        "Expected thread to be unregistered from state_store after /thread close"
+    )
+
+    await cancel_workers(dispatcher)
+
+
+# ---------------------------------------------------------------------------
+# Test 25: /thread close by non-Owner → permission denied
+# ---------------------------------------------------------------------------
+
+
+async def test_thread_close_command_non_owner_denied(tmp_project, settings, tmp_path, acl_db):
+    """E2E: /thread close by a Collaborator is rejected with a permission-denied message."""
+    from nextme.acl.manager import AclManager
+    from nextme.acl.schema import Role
+    from nextme.config.state_store import StateStore
+
+    replier = make_replier()
+    mock_runtime = make_mock_runtime()
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    state_store = StateStore(settings, state_path=tmp_path / "state_denied.json")
+    await state_store.load()
+
+    chat_id = "oc_denied_test"
+    thread_root_id = "om_target_thread_denied"
+    short_id = thread_root_id[:8]
+
+    # Register a thread so the /thread close lookup succeeds up to the permission check
+    state_store.register_thread(chat_id, thread_root_id, "myproject")
+
+    # ACL: collaborator_user has Collaborator role; no admin users so ou_admin is not auto-Owner
+    acl_manager = AclManager(db=acl_db, admin_users=[])
+    await acl_manager.add_user("collaborator_user", Role.COLLABORATOR, added_by="owner_user")
+
+    config = AppConfig(projects=[tmp_project])
+    feishu_client = make_feishu_client(replier)
+    SessionRegistry._instance = None
+    session_registry = SessionRegistry.get_instance()
+    dispatcher = TaskDispatcher(
+        config=config,
+        settings=settings,
+        session_registry=session_registry,
+        acp_registry=acp_registry,
+        path_lock_registry=PathLockRegistry(),
+        feishu_client=feishu_client,
+        state_store=state_store,
+        acl_manager=acl_manager,
+    )
+
+    close_task = Task(
+        id=str(uuid.uuid4()),
+        content=f"/thread close {short_id}",
+        session_id=f"{chat_id}:collaborator_user",
+        reply_fn=AsyncMock(),
+        message_id="om_denied_cmd",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="collaborator_user",
+    )
+
+    await dispatcher.dispatch(close_task)
+    await asyncio.sleep(0.2)
+
+    # Permission denied message must be sent
+    send_text_calls = [str(call) for call in replier.send_text.call_args_list]
+    assert any("权限不足" in c for c in send_text_calls), (
+        f"Expected '权限不足' in send_text calls, got: {send_text_calls}"
+    )
+
+    # Thread must still be registered (not closed)
+    assert state_store.get_active_thread_count(chat_id) == 1
+
+    # Runtime must NOT have been called
+    mock_runtime.execute.assert_not_called()
+
+    await cancel_workers(dispatcher)
+
+
+# ---------------------------------------------------------------------------
+# Test 26: suppress_cancel=True prevents cancel card on worker cancellation
+# ---------------------------------------------------------------------------
+
+
+async def test_suppress_cancel_prevents_cancel_card(tmp_project, settings):
+    """E2E: When session.suppress_cancel=True, cancelling the worker does NOT send a cancel card.
+
+    This simulates bot shutdown: we set suppress_cancel before cancelling workers
+    so that active sessions do not spam "已取消" cards to all threads.
+    """
+    replier = make_replier()
+    # Make runtime.execute() block indefinitely so the worker is busy when we cancel
+    execute_started = asyncio.Event()
+
+    async def slow_execute(*_args, **_kwargs):
+        execute_started.set()
+        await asyncio.sleep(60)  # Never completes in normal test flow
+        return "never"
+
+    mock_runtime = make_mock_runtime()
+    mock_runtime.execute = AsyncMock(side_effect=slow_execute)
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acp_registry=acp_registry)
+
+    task = make_task("do some work")
+    await dispatcher.dispatch(task)
+
+    session = _get_session(dispatcher, task.session_id)
+    assert session is not None
+
+    # Wait until the worker is actually inside runtime.execute()
+    await asyncio.wait_for(execute_started.wait(), timeout=5.0)
+
+    # Simulate bot shutdown: set suppress_cancel before cancelling workers
+    session.suppress_cancel = True
+
+    # Cancel all workers (mimics asyncio finalizer or nextme down)
+    for worker_task in list(dispatcher._worker_tasks.values()):
+        if not worker_task.done():
+            worker_task.cancel()
+    await asyncio.gather(*dispatcher._worker_tasks.values(), return_exceptions=True)
+
+    # build_result_card is called for cancel cards (status="cancelled")
+    # It must NOT have been called with a cancel/cancelled variant
+    cancel_calls = [
+        call for call in replier.build_result_card.call_args_list
+        if "cancel" in str(call).lower() or "取消" in str(call)
+    ]
+    assert len(cancel_calls) == 0, (
+        f"Expected no cancel-card build calls when suppress_cancel=True, got: {cancel_calls}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 27: /thread close with ambiguous short_id → "匹配多个" error
+# ---------------------------------------------------------------------------
+
+
+async def test_thread_close_ambiguous_short_id(tmp_project, settings, tmp_path, acl_db):
+    """E2E: /thread close with a prefix that matches multiple threads → "匹配多个" error sent."""
+    from nextme.config.state_store import StateStore
+
+    replier = make_replier()
+    mock_runtime = make_mock_runtime()
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    state_store = StateStore(settings, state_path=tmp_path / "state_ambiguous.json")
+    await state_store.load()
+
+    chat_id = "oc_ambiguous_test"
+    # Register two threads whose IDs share the same prefix
+    state_store.register_thread(chat_id, "om_ambig_aaa111", "myproject")
+    state_store.register_thread(chat_id, "om_ambig_aaa222", "myproject")
+    assert state_store.get_active_thread_count(chat_id) == 2
+
+    # ACL: ou_admin is an Owner so permission check passes and we reach the ambiguity check
+    acl_manager = AclManager(db=acl_db, admin_users=["ou_admin"])
+
+    config = AppConfig(projects=[tmp_project])
+    feishu_client = make_feishu_client(replier)
+    SessionRegistry._instance = None
+    session_registry = SessionRegistry.get_instance()
+    dispatcher = TaskDispatcher(
+        config=config,
+        settings=settings,
+        session_registry=session_registry,
+        acp_registry=acp_registry,
+        path_lock_registry=PathLockRegistry(),
+        feishu_client=feishu_client,
+        state_store=state_store,
+        acl_manager=acl_manager,
+    )
+
+    # Use a short_id prefix that matches both threads
+    ambiguous_prefix = "om_ambig"
+    close_task = Task(
+        id=str(uuid.uuid4()),
+        content=f"/thread close {ambiguous_prefix}",
+        session_id=f"{chat_id}:ou_admin",
+        reply_fn=AsyncMock(),
+        message_id="om_ambig_cmd",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="ou_admin",
+    )
+
+    await dispatcher.dispatch(close_task)
+    await asyncio.sleep(0.2)
+
+    send_text_calls = [str(call) for call in replier.send_text.call_args_list]
+    assert any("匹配多个" in c for c in send_text_calls), (
+        f"Expected '匹配多个' in send_text calls, got: {send_text_calls}"
+    )
+
+    # Threads must still be registered (not closed)
+    assert state_store.get_active_thread_count(chat_id) == 2
+
+    await cancel_workers(dispatcher)
+
+
+# ---------------------------------------------------------------------------
+# Test 28: /thread in p2p chat → "仅在群聊中有效"
+# ---------------------------------------------------------------------------
+
+
+async def test_thread_command_non_group_chat_rejected(tmp_project, settings):
+    """E2E: /thread dispatched from a p2p chat sends '仅在群聊中有效' message."""
+    replier = make_replier()
+    mock_runtime = make_mock_runtime()
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, acp_registry=acp_registry)
+
+    task = Task(
+        id=str(uuid.uuid4()),
+        content="/thread",
+        session_id="oc_p2p_chat:ou_user",
+        reply_fn=AsyncMock(),
+        message_id="om_p2p_cmd",
+        chat_type="p2p",  # Not a group chat
+        timeout=timedelta(seconds=10),
+        user_id="ou_user",
+    )
+
+    await dispatcher.dispatch(task)
+    await asyncio.sleep(0.2)
+
+    send_text_calls = [str(call) for call in replier.send_text.call_args_list]
+    assert any("仅在群聊中有效" in c for c in send_text_calls), (
+        f"Expected '仅在群聊中有效' in send_text calls, got: {send_text_calls}"
+    )
+
+    mock_runtime.execute.assert_not_called()
+
+    await cancel_workers(dispatcher)

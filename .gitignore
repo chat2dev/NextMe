@@ -37,3 +37,6 @@ nextme.json
 .python-version
 .worktrees/
 .worktrees/
+
+# skill
+skills/private/

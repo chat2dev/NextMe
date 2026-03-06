@@ -152,11 +152,12 @@ cat > "$PLIST_PATH" << EOF
     <key>WorkingDirectory</key>
     <string>${PROJECT_DIR}</string>
 
-    <!-- 日志输出 -->
+    <!-- 日志输出：Python 内部 RotatingFileHandler 已写入 ${LOG_FILE}，
+         launchd 输出重定向到 /dev/null 避免同一文件被写两次 -->
     <key>StandardOutPath</key>
-    <string>${LOG_FILE}</string>
+    <string>/dev/null</string>
     <key>StandardErrorPath</key>
-    <string>${LOG_FILE}</string>
+    <string>/dev/null</string>
 
     <!-- 崩溃后自动重启 -->
     <key>KeepAlive</key>

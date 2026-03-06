@@ -780,7 +780,12 @@ class TaskDispatcher:
                     has_any = True
                     lines.append(f"**{active_marker}{project_name}**")
                     if active_task:
-                        lines.append(f"  执行中: `{active_task.id[:8]}…` {active_task.content[:40]}")
+                        _c = active_task.content
+                        if len(_c) > 60:
+                            _preview = _c[:28] + "…" + _c[-28:]
+                        else:
+                            _preview = _c
+                        lines.append(f"  执行中: `{active_task.id[:8]}…` {_preview}")
                     if queue_size > 0:
                         lines.append(f"  队列等待: {queue_size} 个任务")
             content = "\n".join(lines) if has_any else "当前没有进行中的任务。"
