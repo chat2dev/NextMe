@@ -405,9 +405,26 @@ class MessageHandler:
 
     @staticmethod
     def _has_bot_mention(message: Any) -> bool:
-        """Return True if the message has any @mention (indicating bot was @-mentioned)."""
+        """Return True if the message @-mentions the bot (not just any user).
+
+        Heuristic: in Feishu, bot mentions have no ``user_id`` (bots are app
+        accounts, not user accounts), while user mentions always populate
+        ``user_id``.  A mention entry without ``user_id`` is treated as a bot
+        mention.
+        """
         mentions = getattr(message, "mentions", None) or []
-        return len(mentions) > 0
+        for m in mentions:
+            mid = getattr(m, "id", None)
+            if mid is None:
+                continue
+            user_id = getattr(mid, "user_id", None) or ""
+            if not user_id:
+                # No user_id → this is a bot (app) mention
+                return True
+        logger.debug(
+            "_has_bot_mention: no bot mention found (total mentions=%d)", len(mentions)
+        )
+        return False
 
     def _schedule_dispatch(self, task: Task) -> None:
         """Schedule ``dispatcher.dispatch(task)`` on the asyncio event loop."""

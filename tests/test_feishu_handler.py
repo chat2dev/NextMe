@@ -972,6 +972,7 @@ class TestThreadSessionId:
         bot_mention = MagicMock()
         bot_mention.id = MagicMock()
         bot_mention.id.open_id = "ou_bot_id"
+        bot_mention.id.user_id = ""  # bots have no user_id
         bot_mention.name = "NextMe"
         message.mentions = [bot_mention] if with_mention else []
         sender = MagicMock()
@@ -995,8 +996,14 @@ class TestThreadSessionId:
         message.root_id = root_id
         message.parent_id = root_id
         message.content = json.dumps({"text": text})
-        # With @mention: non-empty mentions list; without: empty list
-        message.mentions = [MagicMock()] if with_mention else []
+        # With @mention: bot mention (no user_id); without: empty list
+        if with_mention:
+            bot_m = MagicMock()
+            bot_m.id = MagicMock()
+            bot_m.id.user_id = ""  # bots have no user_id
+            message.mentions = [bot_m]
+        else:
+            message.mentions = []
         sender = MagicMock()
         sender.sender_id = MagicMock()
         sender.sender_id.open_id = user_id
