@@ -385,6 +385,8 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
 
     # Keep handler._active_threads in sync when /done closes a thread.
     dispatcher.register_thread_closed_callback(handler.deregister_thread)
+    # Keep handler._active_threads in sync when a queued thread is accepted.
+    dispatcher.register_thread_accept_callback(handler.register_thread)
 
     feishu_client = FeishuClient(config, settings, handler=handler)
 

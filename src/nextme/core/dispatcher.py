@@ -114,6 +114,9 @@ class TaskDispatcher:
         # Optional callback invoked when a thread is closed, so the handler can
         # remove it from _active_threads.  Registered via register_thread_closed_callback().
         self._thread_closed_callback: Callable[[str, str], None] | None = None
+        # Optional callback invoked when a thread is accepted (after limit check passes),
+        # so the handler can add it to _active_threads.  Registered via register_thread_accept_callback().
+        self._thread_accept_callback: Callable[[str, str], None] | None = None
 
     # ------------------------------------------------------------------
     # Public: callback registration
@@ -122,6 +125,10 @@ class TaskDispatcher:
     def register_thread_closed_callback(self, callback: Callable[[str, str], None]) -> None:
         """Register a callback invoked when a thread is closed (chat_id, thread_root_id)."""
         self._thread_closed_callback = callback
+
+    def register_thread_accept_callback(self, callback: Callable[[str, str], None]) -> None:
+        """Register a callback invoked when a thread is accepted (chat_id, thread_root_id)."""
+        self._thread_accept_callback = callback
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -309,6 +316,14 @@ class TaskDispatcher:
             if active_count >= limit:
                 queue = self._pending_thread_queue.setdefault(chat_id, collections.deque())
                 queue_pos = len(queue) + 1
+                # Revert handler's optimistic _active_threads entry — the thread is only queued, not active.
+                if self._thread_closed_callback is not None:
+                    try:
+                        self._thread_closed_callback(chat_id, task.thread_root_id)
+                    except Exception:
+                        logger.exception(
+                            "TaskDispatcher: failed to revert _active_threads for queued thread"
+                        )
                 queue.append(task)
                 logger.info(
                     "TaskDispatcher: thread limit reached for chat %r "
@@ -424,6 +439,13 @@ class TaskDispatcher:
                 next_task.id,
                 chat_id,
             )
+            # Re-register in handler._active_threads so follow-up messages in this thread
+            # are routed correctly once it becomes active.
+            if self._thread_accept_callback is not None:
+                try:
+                    self._thread_accept_callback(chat_id, next_task.thread_root_id)
+                except Exception:
+                    logger.exception("_on_thread_closed: failed to re-register thread in handler")
             asyncio.create_task(self.dispatch(next_task))
 
     def _get_chat_id(self, session_id: str) -> str:

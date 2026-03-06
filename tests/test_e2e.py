@@ -1161,3 +1161,337 @@ async def test_done_command_releases_thread_resources(tmp_project, settings):
 
     # DONE reaction sent to root message
     replier.send_reaction.assert_called_with("om_done_root", "DONE")
+
+
+# ---------------------------------------------------------------------------
+# Test 20: Queued thread — _active_threads rolled back while thread is queued
+# ---------------------------------------------------------------------------
+
+
+async def test_thread_queue_active_threads_rolled_back_on_queue(tmp_project, settings, tmp_path):
+    """When dispatcher queues a task (limit reached), the handler's _active_threads
+    entry must be rolled back so follow-up messages in the queued thread are dropped.
+
+    Setup:
+    - max_active_threads_per_chat = 1
+    - Pre-fill state_store with one active thread for the chat (simulating a live thread).
+    - Dispatch task2 for a new thread (thread2) → should be queued.
+    - Register a thread_closed_callback (acts like handler.deregister_thread).
+    - Verify: thread2's key was removed from _active_threads (callback was called).
+    - Verify: task2 was NOT dispatched to the worker (execute not called).
+    - Verify: replier received a queue-full message (reply_text called).
+    """
+    from nextme.config.state_store import StateStore
+    from nextme.feishu.handler import MessageHandler
+
+    replier = make_replier()
+    mock_runtime = make_mock_runtime()
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    # Settings with thread limit = 1
+    limited_settings = Settings(
+        task_queue_capacity=10,
+        progress_debounce_seconds=0.0,
+        streaming_enabled=False,
+        max_active_threads_per_chat=1,
+    )
+
+    # Real StateStore backed by tmp file
+    state_store = StateStore(limited_settings, state_path=tmp_path / "state.json")
+    await state_store.load()
+
+    chat_id = "oc_queue_test"
+    # Pre-register thread1 to fill the slot
+    state_store.register_thread(chat_id, "om_thread1_root", "myproject")
+    assert state_store.get_active_thread_count(chat_id) == 1
+
+    config = AppConfig(projects=[tmp_project])
+    feishu_client = make_feishu_client(replier)
+    SessionRegistry._instance = None
+    session_registry = SessionRegistry.get_instance()
+    dispatcher = TaskDispatcher(
+        config=config,
+        settings=limited_settings,
+        session_registry=session_registry,
+        acp_registry=acp_registry,
+        path_lock_registry=PathLockRegistry(),
+        feishu_client=feishu_client,
+        state_store=state_store,
+    )
+
+    # Track what the closed-callback receives
+    reverted: list[tuple[str, str]] = []
+    accepted: list[tuple[str, str]] = []
+
+    dispatcher.register_thread_closed_callback(
+        lambda cid, tid: reverted.append((cid, tid))
+    )
+    dispatcher.register_thread_accept_callback(
+        lambda cid, tid: accepted.append((cid, tid))
+    )
+
+    # Dispatch task2 for thread2 — should be queued because limit=1 and thread1 is active
+    task2 = Task(
+        id=str(uuid.uuid4()),
+        content="new thread message",
+        session_id=f"{chat_id}:om_thread2_root",
+        reply_fn=AsyncMock(),
+        message_id="om_thread2_root",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="ou_userB",
+        thread_root_id="om_thread2_root",
+    )
+    await dispatcher.dispatch(task2)
+
+    # 1. The thread_closed_callback (rollback) must have been called for thread2
+    assert (chat_id, "om_thread2_root") in reverted, (
+        f"Expected thread2 to be rolled back from _active_threads; reverted={reverted}"
+    )
+
+    # 2. The thread_accept_callback must NOT have been called (thread2 is still queued)
+    assert (chat_id, "om_thread2_root") not in accepted, (
+        f"thread2 must not be accepted while queued; accepted={accepted}"
+    )
+
+    # 3. Runtime must NOT have been called (task2 is in queue, not dispatched yet)
+    mock_runtime.execute.assert_not_called()
+
+    # 4. Queue-full message was sent via reply_text
+    replier.reply_text.assert_called()
+    call_args = replier.reply_text.call_args
+    assert "排" in call_args.args[1] or "上限" in call_args.args[1], (
+        f"Expected queue-full message, got: {call_args.args[1]!r}"
+    )
+
+    await cancel_workers(dispatcher)
+
+
+# ---------------------------------------------------------------------------
+# Test 21: Queued thread is released after existing thread closes
+# ---------------------------------------------------------------------------
+
+
+async def test_thread_queue_released_after_thread_closes(tmp_project, settings, tmp_path):
+    """When an active thread is closed (_on_thread_closed), the next queued task
+    should be dispatched and executed.
+
+    Setup:
+    - max_active_threads_per_chat = 1
+    - Dispatch task1 for thread1 → accepted (registers in state_store + handler).
+    - Dispatch task2 for thread2 → queued (limit reached).
+    - Wait for task1 to complete, then call _on_thread_closed for thread1.
+    - Verify: task2 is eventually executed by the runtime.
+    - Verify: thread_accept_callback was called for thread2 before dispatch.
+    """
+    from nextme.config.state_store import StateStore
+    from nextme.feishu.handler import MessageHandler
+
+    replier = make_replier()
+
+    execute_order: list[str] = []
+
+    async def ordered_execute(task, on_progress, on_permission):
+        execute_order.append(task.thread_root_id or task.message_id)
+        return f"done:{task.message_id}"
+
+    mock_runtime = AsyncMock()
+    mock_runtime.actual_id = "test-session-id"
+    mock_runtime.is_running = True
+    mock_runtime.ensure_ready = AsyncMock()
+    mock_runtime.execute = ordered_execute
+    mock_runtime.stop = AsyncMock()
+    mock_runtime.restore_session = AsyncMock()
+
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    limited_settings = Settings(
+        task_queue_capacity=10,
+        progress_debounce_seconds=0.0,
+        streaming_enabled=False,
+        max_active_threads_per_chat=1,
+    )
+
+    state_store = StateStore(limited_settings, state_path=tmp_path / "state2.json")
+    await state_store.load()
+
+    chat_id = "oc_queue_release"
+
+    config = AppConfig(projects=[tmp_project])
+    feishu_client = make_feishu_client(replier)
+    SessionRegistry._instance = None
+    session_registry = SessionRegistry.get_instance()
+    dispatcher = TaskDispatcher(
+        config=config,
+        settings=limited_settings,
+        session_registry=session_registry,
+        acp_registry=acp_registry,
+        path_lock_registry=PathLockRegistry(),
+        feishu_client=feishu_client,
+        state_store=state_store,
+    )
+
+    accepted: list[tuple[str, str]] = []
+    dispatcher.register_thread_closed_callback(lambda cid, tid: None)  # no-op closed
+    dispatcher.register_thread_accept_callback(
+        lambda cid, tid: accepted.append((cid, tid))
+    )
+
+    session_id_1 = f"{chat_id}:om_t1_root"
+    session_id_2 = f"{chat_id}:om_t2_root"
+
+    task1 = Task(
+        id=str(uuid.uuid4()),
+        content="thread1 message",
+        session_id=session_id_1,
+        reply_fn=AsyncMock(),
+        message_id="om_t1_root",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="ou_userA",
+        thread_root_id="om_t1_root",
+    )
+
+    task2 = Task(
+        id=str(uuid.uuid4()),
+        content="thread2 message",
+        session_id=session_id_2,
+        reply_fn=AsyncMock(),
+        message_id="om_t2_root",
+        chat_type="group",
+        timeout=timedelta(seconds=10),
+        user_id="ou_userB",
+        thread_root_id="om_t2_root",
+    )
+
+    # Dispatch task1 first → accepted (slot used)
+    await dispatcher.dispatch(task1)
+    session1 = _get_session(dispatcher, session_id_1)
+    assert session1 is not None
+
+    # Wait for task1 to complete
+    try:
+        await drain_session_queue(session1, timeout=5.0)
+    except asyncio.TimeoutError:
+        pytest.fail("task1 did not complete within timeout")
+
+    # Dispatch task2 → should be queued because thread1 is still registered in state_store
+    await dispatcher.dispatch(task2)
+
+    # Verify task2 is queued (execute_order has only thread1's entry so far)
+    assert "om_t1_root" in execute_order
+    assert "om_t2_root" not in execute_order, "task2 should still be queued"
+
+    # Close thread1 → this should release task2 from the queue
+    dispatcher._on_thread_closed(chat_id, "om_t1_root")
+
+    # Give the event loop time to dispatch and execute task2
+    await asyncio.sleep(0.2)
+
+    # task2 must now have been executed
+    assert "om_t2_root" in execute_order, (
+        f"Expected task2 to execute after thread1 closed; execute_order={execute_order}"
+    )
+
+    # thread_accept_callback must have been called for thread2 when it was dequeued
+    assert (chat_id, "om_t2_root") in accepted, (
+        f"Expected thread2 to be re-registered via accept callback; accepted={accepted}"
+    )
+
+    await cancel_workers(dispatcher)
+
+
+# ---------------------------------------------------------------------------
+# Test 22: Follow-up reply in queued thread is dropped
+# ---------------------------------------------------------------------------
+
+
+async def test_thread_queue_reply_in_queued_thread_is_dropped(tmp_project, settings, tmp_path):
+    """After dispatcher rolls back the optimistic _active_threads entry for a
+    queued thread, a follow-up reply in that thread must be dropped by the handler.
+
+    Setup:
+    - Simulate the handler's _active_threads being rolled back (as happens when
+      dispatcher queues the thread).
+    - Send a follow-up reply (root_id set, not root message) to the queued thread.
+    - Verify: dispatch is NOT called for the follow-up (it is dropped by the handler
+      before reaching the dispatcher).
+
+    This test exercises handler.py's thread-key lookup, not the dispatcher directly.
+    """
+    from nextme.feishu.handler import MessageHandler
+
+    # Minimal dedup mock
+    dedup = MagicMock()
+    dedup.check_and_mark = MagicMock(return_value=True)  # not duplicate
+
+    dispatch_calls: list = []
+
+    async def mock_dispatch(task):
+        dispatch_calls.append(task)
+
+    replier = make_replier()
+    mock_fc = make_feishu_client(replier)
+
+    config = AppConfig(projects=[tmp_project])
+    SessionRegistry._instance = None
+    session_registry = SessionRegistry.get_instance()
+    dispatcher = TaskDispatcher(
+        config=config,
+        settings=settings,
+        session_registry=session_registry,
+        acp_registry=ACPRuntimeRegistry(),
+        path_lock_registry=PathLockRegistry(),
+        feishu_client=mock_fc,
+    )
+    # Replace dispatch with our spy
+    dispatcher.dispatch = mock_dispatch  # type: ignore[method-assign]
+
+    handler = MessageHandler(dedup=dedup, dispatcher=dispatcher)
+
+    chat_id = "oc_handler_test"
+    root_id = "om_queued_root"
+    thread_key = f"{chat_id}:{root_id}"
+
+    # Simulate: handler had the thread registered optimistically, then dispatcher
+    # rolled it back via deregister_thread.
+    # So _active_threads should NOT contain thread_key.
+    assert thread_key not in handler._active_threads, (
+        "thread_key must not be in _active_threads before the test"
+    )
+
+    # Build a fake lark-shaped message (MagicMock, matching handler test conventions)
+    msg = MagicMock()
+    msg.message_id = "om_reply_in_queued"
+    msg.root_id = root_id
+    msg.chat_type = "group"
+    msg.chat_id = chat_id
+    msg.message_type = "text"
+    msg.content = '{"text":"follow-up"}'
+    msg.mentions = []
+
+    sender = MagicMock()
+    sender.sender_id = MagicMock()
+    sender.sender_id.open_id = "ou_userB"
+
+    event = MagicMock()
+    event.message = msg
+    event.sender = sender
+
+    event_outer = MagicMock()
+    event_outer.event = event
+
+    # Attach a dummy loop so handle_message can schedule coroutines
+    loop = asyncio.get_event_loop()
+    handler.attach_loop(loop)
+
+    handler.handle_message(event_outer)  # type: ignore[arg-type]
+    # Allow any scheduled coroutines to run
+    await asyncio.sleep(0.05)
+
+    # dispatch must NOT have been called — the reply should have been dropped
+    assert len(dispatch_calls) == 0, (
+        f"Expected 0 dispatch calls for reply in queued thread, got {len(dispatch_calls)}"
+    )

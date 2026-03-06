@@ -122,6 +122,12 @@ class MessageHandler:
         self._active_threads.discard(key)
         logger.info("MessageHandler: deregistered thread %r", key)
 
+    def register_thread(self, chat_id: str, thread_root_id: str) -> None:
+        """Add a thread to the active set (called when dispatcher accepts the thread after limit check)."""
+        key = f"{chat_id}:{thread_root_id}"
+        self._active_threads.add(key)
+        logger.info("MessageHandler: registered thread %r", key)
+
     # ------------------------------------------------------------------
     # Public: create a lark EventDispatcherHandler that wraps this handler.
     # ------------------------------------------------------------------
