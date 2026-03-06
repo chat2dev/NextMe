@@ -374,7 +374,11 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
         acl_manager=acl_manager,
     )
 
-    handler = MessageHandler(dedup=dedup, dispatcher=dispatcher)
+    handler = MessageHandler(
+        dedup=dedup,
+        dispatcher=dispatcher,
+        require_at_mention=settings.require_at_mention,
+    )
 
     # Restore active thread set from persisted state so thread replies
     # received after a bot restart are still routed correctly.

@@ -86,7 +86,14 @@ class Settings(BaseModel):
     """Feishu open_ids of super-admins. Hot-reloadable via ./reload.sh (SIGHUP).
     These users bypass all ACL checks and can approve owner applications."""
     max_active_threads_per_chat: int = 8
-    """每个群聊最多同时活���的话题数。超出则排队等候直到有话题关闭。"""
+    """每个群聊最多同时活跃的话题数。超出则排队等候直到有话题关闭。"""
+    require_at_mention: bool = True
+    """是否只处理 @机器人 的消息。
+
+    - ``True``（默认）：群聊根消息和话题内普通消息必须 @bot 才会处理；
+      话题内元命令（/stop /done 等）无论是否 @bot 均处理。
+    - ``False``：处理所有消息，无论是否 @bot。适用于专属私有群的场景。
+    """
 
 
 class ThreadRecord(BaseModel):

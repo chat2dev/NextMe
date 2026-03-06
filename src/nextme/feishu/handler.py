@@ -94,9 +94,11 @@ class _Dispatcher(Protocol):
 class MessageHandler:
     """Convert lark P2ImMessageReceiveV1 events into Task objects and dispatch them."""
 
-    def __init__(self, dedup: MessageDedup, dispatcher: _Dispatcher) -> None:
+    def __init__(self, dedup: MessageDedup, dispatcher: _Dispatcher,
+                 require_at_mention: bool = True) -> None:
         self._dedup = dedup
         self._dispatcher = dispatcher
+        self._require_at_mention = require_at_mention
         # The asyncio event loop that owns the dispatcher.  Captured lazily on
         # the first call from the asyncio side (see get_event_handler).
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -329,10 +331,9 @@ class MessageHandler:
 
         if is_group:
             if root_id:
-                # 话题内回复：必须 @bot 或是元命令（/xxx），且话题必须是 bot 参与的。
-                # 元命令（/stop /done /project 等）无需 @mention，用户明确发给 bot。
+                # 话题内回复：元命令（/xxx）始终处理；普通消息受 require_at_mention 控制。
                 is_meta = text.startswith("/")
-                if not is_meta and not self._has_bot_mention(message):
+                if self._require_at_mention and not is_meta and not self._has_bot_mention(message):
                     logger.debug(
                         "handle_message: ignoring thread reply without @mention root_id=%s",
                         root_id,
@@ -347,8 +348,8 @@ class MessageHandler:
                 session_id = thread_key
                 thread_root_id = root_id
             else:
-                # 群聊根消息：必须 @bot
-                if not self._has_bot_mention(message):
+                # 群聊根消息：受 require_at_mention 控制
+                if self._require_at_mention and not self._has_bot_mention(message):
                     logger.debug(
                         "handle_message: ignoring group root message without @mention message_id=%s",
                         message_id,
