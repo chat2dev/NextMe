@@ -1132,3 +1132,136 @@ class TestThreadSessionId:
         # Key was never added — should not raise.
         handler.deregister_thread("oc_group1", "om_nonexistent")
         assert "oc_group1:om_nonexistent" not in handler._active_threads
+
+
+# ---------------------------------------------------------------------------
+# Additional coverage tests
+# ---------------------------------------------------------------------------
+
+
+class TestAdditionalCoverage:
+    """Extra tests to cover missed branches."""
+
+    def test_restore_active_threads(self):
+        """restore_active_threads sets the internal thread set."""
+        handler, _, _ = make_handler()
+        keys = {"oc_chat1:om_root1", "oc_chat2:om_root2"}
+        handler.restore_active_threads(keys)
+        assert handler._active_threads == keys
+
+    def test_on_message_receive_catches_handle_message_exception(self):
+        """_on_message_receive catches exceptions raised by handle_message."""
+        handler, _, _ = make_handler()
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        with patch.object(handler, "handle_message", side_effect=RuntimeError("boom")):
+            # Should not raise
+            handler._on_message_receive(MagicMock())
+
+    def test_extract_mentions_post_invalid_json(self):
+        """_extract_mentions returns empty list for post message with invalid JSON."""
+        from nextme.feishu.handler import _extract_mentions
+        message = MagicMock()
+        message.message_type = "post"
+        message.content = "not-valid-json"
+        result = _extract_mentions(message)
+        assert result == []
+
+    def test_extract_mentions_post_non_string_content_raises_type_error(self):
+        """_extract_mentions returns empty list when content causes TypeError in json.loads."""
+        from nextme.feishu.handler import _extract_mentions
+        message = MagicMock()
+        message.message_type = "post"
+        # json.loads(None) raises TypeError
+        message.content = None
+        result = _extract_mentions(message)
+        # content is None/falsy → content_obj = {} → no iterations → empty
+        assert result == []
+
+    def test_has_bot_mention_bot_open_id_set_no_match(self):
+        """_has_bot_mention returns False when bot_open_id is set but no mention matches."""
+        handler, _, _ = make_handler()
+        handler._bot_open_id = "ou_bot123"
+        message = MagicMock()
+        m1 = MagicMock()
+        m1.id = MagicMock()
+        m1.id.open_id = "ou_other_user"  # doesn't match
+        message.mentions = [m1]
+        result = handler._has_bot_mention(message)
+        assert result is False
+
+    def test_has_bot_mention_fallback_mid_none(self):
+        """_has_bot_mention fallback loop skips entries where m.id is None."""
+        handler, _, _ = make_handler()
+        handler._bot_open_id = ""  # no bot_open_id → use fallback
+        message = MagicMock()
+        m_with_none_id = MagicMock()
+        m_with_none_id.id = None  # triggers the `if mid is None: continue`
+        m_with_user_id = MagicMock()
+        m_with_user_id.id = MagicMock()
+        m_with_user_id.id.user_id = "ou_human"  # has user_id → not a bot
+        message.mentions = [m_with_none_id, m_with_user_id]
+        result = handler._has_bot_mention(message)
+        assert result is False
+
+    def test_has_bot_mention_fallback_no_match(self):
+        """_has_bot_mention fallback returns False when all mentions have user_id."""
+        handler, _, _ = make_handler()
+        handler._bot_open_id = ""
+        message = MagicMock()
+        m = MagicMock()
+        m.id = MagicMock()
+        m.id.user_id = "ou_human"  # has user_id → not a bot mention
+        message.mentions = [m]
+        result = handler._has_bot_mention(message)
+        assert result is False
+
+    def test_schedule_dispatch_no_loop_runtime_error(self):
+        """_schedule_dispatch drops task when asyncio.get_event_loop raises RuntimeError."""
+        handler, _, _ = make_handler()
+        handler._loop = None  # no attached loop
+        task = MagicMock()
+        task.id = "task-123"
+        with patch("nextme.feishu.handler.asyncio.get_event_loop",
+                   side_effect=RuntimeError("no loop")):
+            handler._schedule_dispatch(task)
+        # Should not raise; task is silently dropped
+
+    def test_on_card_action_exception_swallowed(self):
+        """_on_card_action catches unexpected exceptions without propagating."""
+        handler, _, _ = make_handler()
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = MagicMock()
+        data.event = MagicMock()
+        # Make value.get raise to trigger general except
+        bad_action = MagicMock()
+        bad_action.value = MagicMock()
+        bad_action.value.get = MagicMock(side_effect=RuntimeError("boom"))
+        data.event.action = bad_action
+        # Should not raise
+        handler._on_card_action(data)
+
+    def test_acl_action_operator_id_exception_swallowed(self):
+        """Exceptions extracting operator_id in _on_card_action are swallowed."""
+        handler, _, _ = make_handler()
+        dispatcher = handler._dispatcher
+        dispatcher.handle_acl_card_action = AsyncMock()
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = MagicMock()
+        data.event = MagicMock()
+        action = MagicMock()
+        action.value = {"action": "acl_apply", "app_id": "1"}
+        data.event.action = action
+        # Make accessing data.event.operator raise
+        type(data.event).operator = property(lambda self: (_ for _ in ()).throw(RuntimeError("oops")))
+        # Should not raise
+        with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe"):
+            handler._on_card_action(data)

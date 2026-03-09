@@ -561,3 +561,653 @@ class TestHandleDone:
         )
 
         runtime.cancel.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# reply_msg_id branches
+# ---------------------------------------------------------------------------
+
+def _make_replier():
+    """Create a full-featured mock replier including reply_text and reply_card."""
+    r = MagicMock()
+    r.send_text = AsyncMock()
+    r.send_card = AsyncMock(return_value="msg_123")
+    r.reply_text = AsyncMock()
+    r.reply_card = AsyncMock()
+    r.update_card = AsyncMock()
+    r.build_help_card = MagicMock(return_value='{"card": "help"}')
+    r.send_reaction = AsyncMock()
+    r.build_acl_list_card = MagicMock(return_value='{"card": "acl"}')
+    r.build_whoami_card = MagicMock(return_value='{"card": "whoami"}')
+    r.build_acl_pending_card = MagicMock(return_value='{"card": "pending"}')
+    return r
+
+
+async def test_handle_new_reply_msg_id_uses_reply_text(session):
+    """handle_new with reply_msg_id sends reply_text in_thread instead of send_text."""
+    r = _make_replier()
+    await handle_new(session, None, r, "oc_chat", reply_msg_id="om_123")
+    r.reply_text.assert_awaited_once()
+    args, kwargs = r.reply_text.call_args
+    assert args[0] == "om_123"
+    assert kwargs.get("in_thread") is True
+    r.send_text.assert_not_awaited()
+
+
+async def test_handle_stop_reply_msg_id_uses_reply_text(session):
+    """handle_stop with reply_msg_id sends reply_text in_thread."""
+    r = _make_replier()
+    await handle_stop(session, r, "oc_chat", reply_msg_id="om_456")
+    r.reply_text.assert_awaited_once()
+    args, kwargs = r.reply_text.call_args
+    assert args[0] == "om_456"
+    assert kwargs.get("in_thread") is True
+    r.send_text.assert_not_awaited()
+
+
+async def test_handle_stop_runtime_cancel_exception_swallowed(session):
+    """handle_stop swallows runtime.cancel() exceptions and still sends reply."""
+    r = _make_replier()
+    runtime = MagicMock()
+    runtime.cancel = AsyncMock(side_effect=RuntimeError("cancel failed"))
+    await handle_stop(session, r, "oc_chat", runtime=runtime)
+    r.send_text.assert_awaited_once()
+
+
+async def test_handle_help_reply_msg_id_uses_reply_card():
+    """handle_help with reply_msg_id calls reply_card in_thread."""
+    r = _make_replier()
+    await handle_help(r, "oc_chat", reply_msg_id="om_help")
+    r.reply_card.assert_awaited_once()
+    args, kwargs = r.reply_card.call_args
+    assert args[0] == "om_help"
+    assert kwargs.get("in_thread") is True
+    r.send_card.assert_not_awaited()
+
+
+async def test_handle_status_empty_reply_msg_id():
+    """handle_status with empty sessions and reply_msg_id calls reply_text."""
+    r = _make_replier()
+    user_ctx = UserContext("oc_chat:ou_user")
+    await handle_status(user_ctx, r, "oc_chat", reply_msg_id="om_st")
+    r.reply_text.assert_awaited_once()
+    args, kwargs = r.reply_text.call_args
+    assert args[0] == "om_st"
+    assert kwargs.get("in_thread") is True
+
+
+async def test_handle_status_empty_exception_swallowed():
+    """handle_status with empty sessions swallows reply exceptions."""
+    user_ctx = UserContext("oc_chat:ou_user")
+    r = _make_replier()
+    r.send_text = AsyncMock(side_effect=RuntimeError("boom"))
+    # Should not raise
+    await handle_status(user_ctx, r, "oc_chat")
+
+
+async def test_handle_status_with_actual_id(tmp_path):
+    """handle_status shows truncated actual_id when session.actual_id is set."""
+    import json
+    settings = Settings(task_queue_capacity=5)
+    project = Project(name="proj", path=str(tmp_path), executor="claude")
+    user_ctx = UserContext("oc_chat:ou_user")
+    user_ctx.get_or_create_session(project, settings)
+    user_ctx.sessions["proj"].actual_id = "abc123def456ghi7"
+    r = _make_replier()
+    await handle_status(user_ctx, r, "oc_chat")
+    card_json = r.send_card.call_args[0][1]
+    content = json.loads(card_json)["body"]["elements"][0]["content"]
+    assert "abc123def456ghi7" in content
+
+
+async def test_handle_status_executing_no_actual_id(tmp_path):
+    """handle_status shows '初始化中' when status=executing but actual_id is empty."""
+    import json
+    settings = Settings(task_queue_capacity=5)
+    project = Project(name="proj", path=str(tmp_path), executor="claude")
+    user_ctx = UserContext("oc_chat:ou_user")
+    user_ctx.get_or_create_session(project, settings)
+    sess = user_ctx.sessions["proj"]
+    sess.actual_id = ""
+    sess.status = TaskStatus.EXECUTING  # "executing"
+    r = _make_replier()
+    await handle_status(user_ctx, r, "oc_chat")
+    card_json = r.send_card.call_args[0][1]
+    content = json.loads(card_json)["body"]["elements"][0]["content"]
+    assert "初始化中" in content
+
+
+async def test_handle_status_active_task_long_content(tmp_path):
+    """handle_status truncates active_task.content longer than 50 chars."""
+    import json
+    settings = Settings(task_queue_capacity=5)
+    project = Project(name="proj", path=str(tmp_path), executor="claude")
+    user_ctx = UserContext("oc_chat:ou_user")
+    user_ctx.get_or_create_session(project, settings)
+    sess = user_ctx.sessions["proj"]
+    long_content = "A" * 60  # 60 chars > 50 limit
+    active_task = MagicMock()
+    active_task.content = long_content
+    sess.active_task = active_task
+    r = _make_replier()
+    await handle_status(user_ctx, r, "oc_chat")
+    card_json = r.send_card.call_args[0][1]
+    content = json.loads(card_json)["body"]["elements"][0]["content"]
+    assert "…" in content  # truncated
+
+
+async def test_handle_status_reply_msg_id_uses_reply_card(tmp_path):
+    """handle_status with sessions and reply_msg_id calls reply_card."""
+    settings = Settings(task_queue_capacity=5)
+    project = Project(name="proj", path=str(tmp_path), executor="claude")
+    user_ctx = UserContext("oc_chat:ou_user")
+    user_ctx.get_or_create_session(project, settings)
+    r = _make_replier()
+    await handle_status(user_ctx, r, "oc_chat", reply_msg_id="om_st2")
+    r.reply_card.assert_awaited_once()
+    args, kwargs = r.reply_card.call_args
+    assert args[0] == "om_st2"
+    assert kwargs.get("in_thread") is True
+
+
+async def test_handle_bind_not_found_reply_msg_id():
+    """handle_bind when project not found with reply_msg_id calls reply_text."""
+    r = _make_replier()
+    config = AppConfig(app_id="x", app_secret="y", projects=[])
+    result = await handle_bind("oc_chat", "missing", config, r, reply_msg_id="om_bind")
+    assert result is None
+    r.reply_text.assert_awaited_once()
+    args, kwargs = r.reply_text.call_args
+    assert args[0] == "om_bind"
+    assert kwargs.get("in_thread") is True
+
+
+async def test_handle_bind_not_found_exception_swallowed(tmp_path):
+    """handle_bind not found swallows send_text exceptions."""
+    r = _make_replier()
+    r.send_text = AsyncMock(side_effect=RuntimeError("boom"))
+    config = AppConfig(app_id="x", app_secret="y", projects=[])
+    result = await handle_bind("oc_chat", "missing", config, r)
+    assert result is None  # still returns None
+
+
+async def test_handle_bind_found_reply_msg_id(tmp_path):
+    """handle_bind with found project and reply_msg_id calls reply_text."""
+    r = _make_replier()
+    project = Project(name="myproj", path=str(tmp_path), executor="claude")
+    config = AppConfig(app_id="x", app_secret="y", projects=[project])
+    result = await handle_bind("oc_chat", "myproj", config, r, reply_msg_id="om_bind2")
+    assert result == "myproj"
+    r.reply_text.assert_awaited_once()
+    args, kwargs = r.reply_text.call_args
+    assert args[0] == "om_bind2"
+    assert kwargs.get("in_thread") is True
+
+
+async def test_handle_unbind_reply_msg_id():
+    """handle_unbind with reply_msg_id calls reply_text in_thread."""
+    r = _make_replier()
+    result = await handle_unbind("oc_chat", r, reply_msg_id="om_unbind")
+    assert result is True
+    r.reply_text.assert_awaited_once()
+    args, kwargs = r.reply_text.call_args
+    assert args[0] == "om_unbind"
+    assert kwargs.get("in_thread") is True
+
+
+async def test_handle_remember_reply_msg_id(memory_manager):
+    """handle_remember with reply_msg_id calls reply_text in_thread."""
+    r = _make_replier()
+    await handle_remember("ou_user", "some fact", memory_manager, r, "oc_chat", reply_msg_id="om_rem")
+    r.reply_text.assert_awaited_once()
+    args, kwargs = r.reply_text.call_args
+    assert args[0] == "om_rem"
+    assert kwargs.get("in_thread") is True
+
+
+async def test_handle_project_not_found_reply_msg_id(tmp_path):
+    """handle_project not found with reply_msg_id calls reply_text."""
+    r = _make_replier()
+    user_ctx = UserContext("oc_chat:ou_user")
+    settings = Settings(task_queue_capacity=5)
+    config = AppConfig(app_id="x", app_secret="y", projects=[])
+    await handle_project(user_ctx, "missing", config, settings, r, "oc_chat", reply_msg_id="om_proj")
+    r.reply_text.assert_awaited_once()
+    args, kwargs = r.reply_text.call_args
+    assert args[0] == "om_proj"
+    assert kwargs.get("in_thread") is True
+
+
+async def test_handle_project_not_found_exception_swallowed(tmp_path):
+    """handle_project not found swallows reply exceptions."""
+    r = _make_replier()
+    r.send_text = AsyncMock(side_effect=RuntimeError("boom"))
+    user_ctx = UserContext("oc_chat:ou_user")
+    settings = Settings(task_queue_capacity=5)
+    config = AppConfig(app_id="x", app_secret="y", projects=[])
+    # Should not raise
+    await handle_project(user_ctx, "missing", config, settings, r, "oc_chat")
+
+
+async def test_handle_project_found_reply_msg_id(tmp_path):
+    """handle_project found with reply_msg_id calls reply_card."""
+    r = _make_replier()
+    project = Project(name="myproj", path=str(tmp_path), executor="claude")
+    user_ctx = UserContext("oc_chat:ou_user")
+    settings = Settings(task_queue_capacity=5)
+    config = AppConfig(app_id="x", app_secret="y", projects=[project])
+    await handle_project(user_ctx, "myproj", config, settings, r, "oc_chat", reply_msg_id="om_proj2")
+    r.reply_card.assert_awaited_once()
+    args, kwargs = r.reply_card.call_args
+    assert args[0] == "om_proj2"
+    assert kwargs.get("in_thread") is True
+
+
+# ---------------------------------------------------------------------------
+# handle_done exception paths
+# ---------------------------------------------------------------------------
+
+async def test_handle_done_perm_future_cancelled():
+    """handle_done cancels perm_future when session has no cancel_permission."""
+    import asyncio
+    replier = _make_replier()
+    session = MagicMock(spec=[
+        "context_id", "project_name", "active_task",
+        "perm_future", "task_queue", "pending_tasks",
+    ])
+    session.context_id = "oc_G:ou_user"
+    session.project_name = "proj"
+    session.active_task = None
+    perm_future = asyncio.get_event_loop().create_future()
+    session.perm_future = perm_future
+    session.task_queue = asyncio.Queue()
+    session.pending_tasks = []
+
+    from nextme.core.commands import handle_done
+    acp_registry = MagicMock()
+    acp_registry.remove = AsyncMock()
+    await handle_done(
+        session=session,
+        runtime=None,
+        replier=replier,
+        chat_id="oc_G",
+        root_message_id="om_root",
+        acp_registry=acp_registry,
+        on_thread_closed=MagicMock(),
+    )
+    assert perm_future.cancelled()
+
+
+async def test_handle_done_runtime_cancel_exception_swallowed():
+    """handle_done swallows runtime.cancel() exceptions."""
+    import asyncio
+    from nextme.core.commands import handle_done
+    replier = _make_replier()
+    session = MagicMock()
+    session.context_id = "oc_G:ou_user"
+    session.project_name = "proj"
+    session.active_task = None
+    session.task_queue = asyncio.Queue()
+    session.pending_tasks = []
+    runtime = AsyncMock()
+    runtime.cancel = AsyncMock(side_effect=RuntimeError("cancel boom"))
+    acp_registry = MagicMock()
+    acp_registry.remove = AsyncMock()
+    # Should not raise
+    await handle_done(
+        session=session, runtime=runtime, replier=replier,
+        chat_id="oc_G", root_message_id="om_root",
+        acp_registry=acp_registry, on_thread_closed=MagicMock(),
+    )
+    replier.send_reaction.assert_awaited()
+
+
+async def test_handle_done_queue_drain_exception_swallowed():
+    """handle_done handles queue.get_nowait() raising an exception."""
+    import asyncio
+    from nextme.core.commands import handle_done
+    replier = _make_replier()
+    session = MagicMock()
+    session.context_id = "oc_G:ou_user"
+    session.project_name = "proj"
+    session.active_task = None
+
+    # Create a queue that reports non-empty but raises on get_nowait
+    bad_queue = MagicMock()
+    bad_queue.empty = MagicMock(side_effect=[False, True])  # first call: non-empty, then empty
+    bad_queue.get_nowait = MagicMock(side_effect=RuntimeError("queue error"))
+    session.task_queue = bad_queue
+    session.pending_tasks = []
+    acp_registry = MagicMock()
+    acp_registry.remove = AsyncMock()
+    # Should not raise
+    await handle_done(
+        session=session, runtime=None, replier=replier,
+        chat_id="oc_G", root_message_id="om_root",
+        acp_registry=acp_registry, on_thread_closed=MagicMock(),
+    )
+
+
+async def test_handle_done_acp_registry_remove_exception_swallowed():
+    """handle_done swallows acp_registry.remove() exceptions."""
+    import asyncio
+    from nextme.core.commands import handle_done
+    replier = _make_replier()
+    session = MagicMock()
+    session.context_id = "oc_G:ou_user"
+    session.project_name = "proj"
+    session.active_task = None
+    session.task_queue = asyncio.Queue()
+    session.pending_tasks = []
+    acp_registry = MagicMock()
+    acp_registry.remove = AsyncMock(side_effect=RuntimeError("remove boom"))
+    on_cb = MagicMock()
+    # Should not raise
+    await handle_done(
+        session=session, runtime=None, replier=replier,
+        chat_id="oc_G", root_message_id="om_root",
+        acp_registry=acp_registry, on_thread_closed=on_cb,
+    )
+    on_cb.assert_called_once()  # on_thread_closed still called
+
+
+async def test_handle_done_on_thread_closed_exception_swallowed():
+    """handle_done swallows on_thread_closed exceptions."""
+    import asyncio
+    from nextme.core.commands import handle_done
+    replier = _make_replier()
+    session = MagicMock()
+    session.context_id = "oc_G:ou_user"
+    session.project_name = "proj"
+    session.active_task = None
+    session.task_queue = asyncio.Queue()
+    session.pending_tasks = []
+    acp_registry = MagicMock()
+    acp_registry.remove = AsyncMock()
+    bad_cb = MagicMock(side_effect=RuntimeError("cb boom"))
+    # Should not raise
+    await handle_done(
+        session=session, runtime=None, replier=replier,
+        chat_id="oc_G", root_message_id="om_root",
+        acp_registry=acp_registry, on_thread_closed=bad_cb,
+    )
+    replier.send_reaction.assert_awaited()
+
+
+async def test_handle_done_send_reaction_exception_swallowed():
+    """handle_done swallows send_reaction exceptions."""
+    import asyncio
+    from nextme.core.commands import handle_done
+    replier = _make_replier()
+    replier.send_reaction = AsyncMock(side_effect=RuntimeError("reaction boom"))
+    session = MagicMock()
+    session.context_id = "oc_G:ou_user"
+    session.project_name = "proj"
+    session.active_task = None
+    session.task_queue = asyncio.Queue()
+    session.pending_tasks = []
+    acp_registry = MagicMock()
+    acp_registry.remove = AsyncMock()
+    # Should not raise; reply_text still called
+    await handle_done(
+        session=session, runtime=None, replier=replier,
+        chat_id="oc_G", root_message_id="om_root",
+        acp_registry=acp_registry, on_thread_closed=MagicMock(),
+    )
+    replier.reply_text.assert_awaited()
+
+
+async def test_handle_done_reply_text_exception_swallowed():
+    """handle_done swallows reply_text exceptions."""
+    import asyncio
+    from nextme.core.commands import handle_done
+    replier = _make_replier()
+    replier.reply_text = AsyncMock(side_effect=RuntimeError("reply boom"))
+    session = MagicMock()
+    session.context_id = "oc_G:ou_user"
+    session.project_name = "proj"
+    session.active_task = None
+    session.task_queue = asyncio.Queue()
+    session.pending_tasks = []
+    acp_registry = MagicMock()
+    acp_registry.remove = AsyncMock()
+    # Should not raise
+    await handle_done(
+        session=session, runtime=None, replier=replier,
+        chat_id="oc_G", root_message_id="om_root",
+        acp_registry=acp_registry, on_thread_closed=MagicMock(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# handle_threads_list tests
+# ---------------------------------------------------------------------------
+
+async def test_handle_threads_list_empty_sends_text():
+    """handle_threads_list with empty list calls send_text."""
+    from nextme.core.commands import handle_threads_list
+    r = _make_replier()
+    await handle_threads_list("oc_chat", [], r)
+    r.send_text.assert_awaited_once()
+    assert "没有活跃话题" in r.send_text.call_args[0][1]
+
+
+async def test_handle_threads_list_empty_reply_msg_id():
+    """handle_threads_list empty list + reply_msg_id calls reply_text in_thread."""
+    from nextme.core.commands import handle_threads_list
+    r = _make_replier()
+    await handle_threads_list("oc_chat", [], r, reply_msg_id="om_th")
+    r.reply_text.assert_awaited_once()
+    args, kwargs = r.reply_text.call_args
+    assert args[0] == "om_th"
+    assert kwargs.get("in_thread") is True
+
+
+async def test_handle_threads_list_empty_exception_swallowed():
+    """handle_threads_list empty list swallows send exceptions."""
+    from nextme.core.commands import handle_threads_list
+    r = _make_replier()
+    r.send_text = AsyncMock(side_effect=RuntimeError("boom"))
+    # Should not raise
+    await handle_threads_list("oc_chat", [], r)
+
+
+async def test_handle_threads_list_non_empty_sends_card():
+    """handle_threads_list with threads sends a card."""
+    import json, datetime
+    from nextme.core.commands import handle_threads_list
+    r = _make_replier()
+    thread = MagicMock()
+    thread.thread_root_id = "om_rootabc12345"
+    thread.project_name = "myproj"
+    thread.created_at = datetime.datetime(2024, 1, 15, 10, 30)
+    await handle_threads_list("oc_chat", [thread], r)
+    r.send_card.assert_awaited_once()
+    card_json = r.send_card.call_args[0][1]
+    card = json.loads(card_json)
+    assert "活跃话题" in card["header"]["title"]["content"]
+
+
+async def test_handle_threads_list_non_empty_reply_msg_id():
+    """handle_threads_list with threads and reply_msg_id calls reply_card."""
+    import datetime
+    from nextme.core.commands import handle_threads_list
+    r = _make_replier()
+    thread = MagicMock()
+    thread.thread_root_id = "om_rootabc12345"
+    thread.project_name = "myproj"
+    thread.created_at = datetime.datetime(2024, 1, 15, 10, 30)
+    await handle_threads_list("oc_chat", [thread], r, reply_msg_id="om_th2")
+    r.reply_card.assert_awaited_once()
+    args, kwargs = r.reply_card.call_args
+    assert args[0] == "om_th2"
+    assert kwargs.get("in_thread") is True
+
+
+async def test_handle_threads_list_non_empty_exception_swallowed():
+    """handle_threads_list with threads swallows send_card exceptions."""
+    import datetime
+    from nextme.core.commands import handle_threads_list
+    r = _make_replier()
+    r.send_card = AsyncMock(side_effect=RuntimeError("boom"))
+    thread = MagicMock()
+    thread.thread_root_id = "om_rootabc12345"
+    thread.project_name = "myproj"
+    thread.created_at = datetime.datetime(2024, 1, 15, 10, 30)
+    # Should not raise
+    await handle_threads_list("oc_chat", [thread], r)
+
+
+# ---------------------------------------------------------------------------
+# ACL command tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+async def acl_db(tmp_path):
+    """Return a real AclDb backed by a temp sqlite file."""
+    from nextme.acl.db import AclDb
+    db_path = tmp_path / "test.db"
+    db = AclDb(db_path=db_path)
+    await db.open()
+    return db
+
+
+@pytest.fixture
+def acl_manager(acl_db):
+    from nextme.acl.manager import AclManager
+    return AclManager(db=acl_db, admin_users=["ou_admin"])
+
+
+async def test_handle_acl_list_sends_card(acl_manager):
+    """handle_acl_list sends a card with admin/owner/collaborator info."""
+    from nextme.core.commands import handle_acl_list
+    r = _make_replier()
+    await handle_acl_list(acl_manager, r, "oc_chat")
+    r.send_card.assert_awaited_once()
+
+
+async def test_handle_acl_list_exception_swallowed(acl_manager):
+    """handle_acl_list swallows send_card exceptions."""
+    from nextme.core.commands import handle_acl_list
+    r = _make_replier()
+    r.send_card = AsyncMock(side_effect=RuntimeError("boom"))
+    # Should not raise
+    await handle_acl_list(acl_manager, r, "oc_chat")
+
+
+async def test_handle_acl_add_unknown_role(acl_manager):
+    """handle_acl_add with unknown role string sends error text."""
+    from nextme.core.commands import handle_acl_add
+    from nextme.acl.schema import Role
+    r = _make_replier()
+    await handle_acl_add("ou_admin", Role.ADMIN, "ou_target", "superuser", acl_manager, r, "oc_chat")
+    r.send_text.assert_awaited_once()
+    assert "未知角色" in r.send_text.call_args[0][1]
+
+
+async def test_handle_acl_add_db_error(acl_manager):
+    """handle_acl_add swallows db errors and sends failure message."""
+    from nextme.core.commands import handle_acl_add
+    from nextme.acl.schema import Role
+    r = _make_replier()
+    # Patch add_user to raise
+    acl_manager.add_user = AsyncMock(side_effect=RuntimeError("db error"))
+    await handle_acl_add("ou_admin", Role.ADMIN, "ou_target", "collaborator", acl_manager, r, "oc_chat")
+    r.send_text.assert_awaited()
+    last_text = r.send_text.call_args[0][1]
+    assert "失败" in last_text
+
+
+async def test_handle_acl_remove_valueerror(acl_manager):
+    """handle_acl_remove sends ValueError message as text."""
+    from nextme.core.commands import handle_acl_remove
+    from nextme.acl.schema import Role
+    import datetime
+    r = _make_replier()
+    # Add a user first so get_user returns something
+    from nextme.acl.schema import AclUser
+    acl_manager.get_user = AsyncMock(return_value=AclUser(
+        open_id="ou_target",
+        role=Role.COLLABORATOR,
+        added_by="ou_admin",
+        added_at=datetime.datetime.now(),
+    ))
+    acl_manager.can_remove = MagicMock(return_value=True)
+    acl_manager.remove_user = AsyncMock(side_effect=ValueError("cannot remove last owner"))
+    await handle_acl_remove("ou_admin", Role.OWNER, "ou_target", acl_manager, r, "oc_chat")
+    r.send_text.assert_awaited()
+    last_text = r.send_text.call_args[0][1]
+    assert "cannot remove last owner" in last_text
+
+
+async def test_handle_acl_remove_generic_exception(acl_manager):
+    """handle_acl_remove swallows generic exceptions and sends failure message."""
+    from nextme.core.commands import handle_acl_remove
+    from nextme.acl.schema import Role, AclUser
+    import datetime
+    r = _make_replier()
+    acl_manager.get_user = AsyncMock(return_value=AclUser(
+        open_id="ou_target",
+        role=Role.COLLABORATOR,
+        added_by="ou_admin",
+        added_at=datetime.datetime.now(),
+    ))
+    acl_manager.can_remove = MagicMock(return_value=True)
+    acl_manager.remove_user = AsyncMock(side_effect=RuntimeError("db crash"))
+    await handle_acl_remove("ou_admin", Role.OWNER, "ou_target", acl_manager, r, "oc_chat")
+    last_text = r.send_text.call_args[0][1]
+    assert "失败" in last_text
+
+
+async def test_handle_acl_approve_result_none(acl_manager):
+    """handle_acl_approve sends 'already processed' if approve returns None."""
+    from nextme.core.commands import handle_acl_approve
+    from nextme.acl.schema import Role
+    r = _make_replier()
+    # Simulate app exists but approve returns None (already processed)
+    from nextme.acl.schema import AclApplication
+    import datetime
+    mock_app = AclApplication(
+        id=99, applicant_id="ou_x", requested_role=Role.COLLABORATOR,
+        status="pending", requested_at=datetime.datetime.now(),
+    )
+    acl_manager.get_application = AsyncMock(return_value=mock_app)
+    acl_manager.can_review = MagicMock(return_value=True)
+    acl_manager.approve = AsyncMock(return_value=None)
+    await handle_acl_approve(99, "ou_admin", Role.ADMIN, acl_manager, r, "oc_chat")
+    r.send_text.assert_awaited()
+    assert "已处理或不存在" in r.send_text.call_args[0][1]
+
+
+async def test_handle_acl_reject_cannot_review(acl_manager):
+    """handle_acl_reject sends permission error when reviewer lacks permission."""
+    from nextme.core.commands import handle_acl_reject
+    from nextme.acl.schema import Role, AclApplication
+    import datetime
+    r = _make_replier()
+    mock_app = AclApplication(
+        id=77, applicant_id="ou_y", requested_role=Role.OWNER,
+        status="pending", requested_at=datetime.datetime.now(),
+    )
+    acl_manager.get_application = AsyncMock(return_value=mock_app)
+    acl_manager.can_review = MagicMock(return_value=False)
+    await handle_acl_reject(77, "ou_collab", Role.COLLABORATOR, acl_manager, r, "oc_chat")
+    r.send_text.assert_awaited_once()
+    assert "权限不足" in r.send_text.call_args[0][1]
+
+
+async def test_handle_acl_reject_result_none(acl_manager):
+    """handle_acl_reject sends 'already processed' if reject returns None."""
+    from nextme.core.commands import handle_acl_reject
+    from nextme.acl.schema import Role, AclApplication
+    import datetime
+    r = _make_replier()
+    mock_app = AclApplication(
+        id=88, applicant_id="ou_z", requested_role=Role.COLLABORATOR,
+        status="pending", requested_at=datetime.datetime.now(),
+    )
+    acl_manager.get_application = AsyncMock(return_value=mock_app)
+    acl_manager.can_review = MagicMock(return_value=True)
+    acl_manager.reject = AsyncMock(return_value=None)
+    await handle_acl_reject(88, "ou_admin", Role.ADMIN, acl_manager, r, "oc_chat")
+    assert "已处理或不存在" in r.send_text.call_args[0][1]
