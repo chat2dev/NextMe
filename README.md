@@ -23,7 +23,9 @@ Turn Feishu group chats and direct messages into an interactive Claude Code term
 | Long-term memory | Facts stored per user (shared across all chats); injected as a numbered list into new sessions; agent can add / replace / delete facts via `<memory>` tags |
 | Context compression | Oversized contexts auto-compressed with zlib / lzma / brotli |
 | Skills system | Markdown prompt templates; tiered discovery (Built-in / Global / NextMe Global / Project); `/review` `/commit` `/test` etc. |
-| Meta-commands | `/new` `/stop` `/help` `/status` `/project` `/task` `/remember` `/skill` |
+| Thread / topic management | Each message spawns a Feishu thread reply; `/thread` lists active threads; `/thread close <id>` force-closes; `/done` marks complete |
+| Access control (ACL) | Role-based access: Admin / Owner / Collaborator; built-in application and approval flow; `require_at_mention` for group chats |
+| Meta-commands | `/new` `/stop` `/help` `/status` `/project` `/task` `/remember` `/skill` `/thread` `/done` `/whoami` `/acl` |
 | Path lock | Only one session may write to a given project directory at a time |
 | Graceful shutdown | SIGTERM/SIGINT → drain in-flight tasks → flush state → exit |
 
@@ -299,7 +301,7 @@ Evaluate and apply what's appropriate for your environment:
 
 | Measure | How |
 |---------|-----|
-| **Restrict who can send messages** | Add your own `open_id` to `admin_users` and enable the ACL feature (Phase 3) |
+| **Restrict who can send messages** | Add your own `open_id` to `admin_users` in `settings.json` and configure the ACL roles |
 | **Run as a dedicated OS user** | Create a low-privilege user for NextMe; it inherits only that user's file permissions |
 | **Limit project path** | Set `path` in `settings.json` to a narrow directory, not `/` or `~` |
 | **Read-only volumes for sensitive dirs** | Mount sensitive directories as read-only for the NextMe process |
@@ -377,6 +379,10 @@ Send any message to the bot. The agent executes the task inside the configured p
 | `/skill` | List all registered skills grouped by tier (Project / NextMe Global / Global / Built-in) |
 | `/skill <trigger>` | Invoke a skill by trigger name |
 | `/remember <text>` | Save a fact to long-term memory |
+| `/whoami` | Show your Feishu `open_id` and current role |
+| `/thread` | List all active threads in this chat |
+| `/thread close <id>` | Force-close a thread by its short ID |
+| `/done` | Mark the current task complete and close its group thread |
 
 ### Built-in skills
 
@@ -447,6 +453,10 @@ Reply with the corresponding number to continue.
 | `context_compression` | `"zlib"` | Compression algorithm: `zlib` / `lzma` / `brotli` |
 | `progress_debounce_seconds` | `0.5` | Progress card update debounce interval (s) |
 | `permission_auto_approve` | `false` | Auto-approve ACPRuntime permission requests without user confirmation |
+| `streaming_enabled` | `true` | Enable CardKit streaming progress updates |
+| `require_at_mention` | `false` | Only process group messages that @mention the bot |
+| `max_active_threads_per_chat` | `100` | Max concurrent active threads per chat |
+| `admin_users` | `[]` | List of admin `open_id`s; admins have full access and can approve Owner applications |
 | `log_level` | `"INFO"` | Log verbosity |
 
 **Multi-project example (`~/.nextme/settings.json`):**
@@ -574,7 +584,8 @@ Invoke with `/skill myskill`.
 ```
 ~/.nextme/
 ├── settings.json        # single user-level config (credentials + projects + settings)
-├── state.json           # session state (actual_id, active project, dynamic bindings)
+├── state.json           # session state (actual_id, active project, dynamic bindings, thread records)
+├── nextme.db            # ACL database (SQLite; users, roles, pending applications)
 ├── nextme.pid           # PID file (used by nextme down)
 ├── memory/
 │   └── {user_hash}/     # per-user memory (facts / preferences)
@@ -796,7 +807,8 @@ supervisorctl status nextme
 
 - **Phase 1 ✅** — Feishu WebSocket + agent subprocess + session isolation + streaming progress + permission confirmation
 - **Phase 2 ✅** — Skills system, multi-project parallel, session persistence across restarts, long-term memory (`/remember` + agent-driven add/replace/delete), context compression, path lock
-- **Phase 3** — Config hot-reload, Slack / DingTalk adapter, multi-agent orchestration
+- **Phase 3 ✅** — Access control (ACL) with role-based roles + application flow, thread / topic management, `require_at_mention`, CardKit streaming
+- **Phase 4** — Config hot-reload, Slack / DingTalk adapter, multi-agent orchestration
 
 ---
 
