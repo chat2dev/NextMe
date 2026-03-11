@@ -52,6 +52,11 @@ HELP_COMMANDS: list[tuple[str, str]] = [
     ("/acl pending", "查看待审批申请（owner/admin 可用）"),
     ("/acl approve <id>", "批准申请（owner/admin 可用）"),
     ("/acl reject <id>", "拒绝申请（owner/admin 可用）"),
+    ("/schedule <prompt> at <time>", "单次定时任务"),
+    ("/schedule <prompt> every <N><s/m/h/d>", "周期定时任务"),
+    ("/schedule <prompt> cron <expr>", "Cron 定时任务"),
+    ("/schedule list", "查看定时任务"),
+    ("/schedule pause/resume/delete <id>", "管理定时任务"),
 ]
 
 
