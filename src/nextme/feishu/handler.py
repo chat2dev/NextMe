@@ -85,6 +85,7 @@ class _Dispatcher(Protocol):
     async def dispatch(self, task: Task) -> None: ...
     def handle_card_action(self, session_id: str, index: int, project_name: str = "") -> None: ...
     async def handle_acl_card_action(self, action_data: dict) -> None: ...
+    async def dispatch_hook_task(self, action_data: dict) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +231,46 @@ class MessageHandler:
                 resp.card = CallBackCard()
                 resp.card.type = "raw"
                 resp.card.data = processing_card
+                return resp
+
+            if value.get("action") == "nextme_hook":
+                hook_name = str(value.get("hook", "")).strip()
+                if not hook_name:
+                    logger.warning("_on_card_action: nextme_hook action missing hook name")
+                    return resp
+
+                # Extract context from the card event.
+                operator_id = ""
+                chat_id = ""
+                message_id = ""
+                try:
+                    if data.event:
+                        if hasattr(data.event, "operator"):
+                            operator_id = getattr(data.event.operator, "open_id", "") or ""
+                        if hasattr(data.event, "context") and data.event.context is not None:
+                            chat_id = getattr(data.event.context, "open_chat_id", "") or ""
+                            message_id = getattr(data.event.context, "open_message_id", "") or ""
+                except Exception:
+                    logger.debug("_on_card_action: failed to extract context from hook event")
+
+                action_data = dict(value)
+                action_data["operator_id"] = operator_id
+                action_data["chat_id"] = chat_id
+                action_data["message_id"] = message_id
+
+                loop = self._loop
+                if loop is not None and loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self._dispatcher.dispatch_hook_task(action_data), loop
+                    )
+                else:
+                    logger.warning(
+                        "_on_card_action: no running loop for nextme_hook %r", hook_name
+                    )
+
+                resp.toast = CallBackToast()
+                resp.toast.type = "info"
+                resp.toast.content = "正在处理…"
                 return resp
 
             if value.get("action") != "permission_choice":

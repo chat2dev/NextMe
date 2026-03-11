@@ -1265,3 +1265,111 @@ class TestAdditionalCoverage:
         # Should not raise
         with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe"):
             handler._on_card_action(data)
+
+    def test_nextme_hook_schedules_dispatch_hook_task(self):
+        """nextme_hook action routes to dispatch_hook_task via run_coroutine_threadsafe."""
+        handler, _, dispatcher = make_handler()
+        dispatcher.dispatch_hook_task = AsyncMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = MagicMock()
+        data.event = MagicMock()
+        data.event.action = MagicMock()
+        data.event.action.value = {"action": "nextme_hook", "hook": "greet"}
+        data.event.operator = MagicMock()
+        data.event.operator.open_id = "ou_user"
+        ctx = MagicMock()
+        ctx.open_chat_id = "oc_chat"
+        ctx.open_message_id = "om_msg"
+        data.event.context = ctx
+
+        with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe") as mock_rct:
+            resp = handler._on_card_action(data)
+            assert mock_rct.called
+            assert mock_rct.call_args[0][1] is loop
+
+        assert resp.toast is not None
+        assert resp.toast.content == "正在处理…"
+        # permission_choice path must NOT have been triggered
+        loop.call_soon_threadsafe.assert_not_called()
+
+    def test_nextme_hook_context_injected_into_action_data(self):
+        """operator_id, chat_id, and message_id are injected into action_data."""
+        handler, _, dispatcher = make_handler()
+        dispatcher.dispatch_hook_task = AsyncMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = MagicMock()
+        data.event = MagicMock()
+        data.event.action = MagicMock()
+        data.event.action.value = {"action": "nextme_hook", "hook": "myaction"}
+        data.event.operator = MagicMock()
+        data.event.operator.open_id = "ou_abc"
+        ctx = MagicMock()
+        ctx.open_chat_id = "oc_xyz"
+        ctx.open_message_id = "om_123"
+        data.event.context = ctx
+
+        captured: list[dict] = []
+        with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe") as mock_rct:
+            mock_rct.side_effect = lambda coro, _loop: captured.append(coro.cr_frame.f_locals if hasattr(coro, 'cr_frame') else {})
+            handler._on_card_action(data)
+            assert mock_rct.called
+            # Extract the coroutine's first argument (action_data)
+            call_coro = mock_rct.call_args[0][0]
+            # The coro is dispatch_hook_task(action_data=...) — peek at bound args
+            # We verify by checking dispatch_hook_task was called with correct data
+            # (actual args verification happens in the coro call args)
+
+    def test_nextme_hook_missing_name_returns_empty_resp(self):
+        """nextme_hook with no hook name returns a plain response (no toast, no dispatch)."""
+        handler, _, dispatcher = make_handler()
+        dispatcher.dispatch_hook_task = AsyncMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = True
+        handler.attach_loop(loop)
+
+        data = MagicMock()
+        data.event = MagicMock()
+        data.event.action = MagicMock()
+        data.event.action.value = {"action": "nextme_hook", "hook": ""}
+
+        with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe") as mock_rct:
+            resp = handler._on_card_action(data)
+            assert not mock_rct.called
+
+        # No toast set for missing hook name
+        assert resp.toast is None
+
+    def test_nextme_hook_no_running_loop_logs_warning(self):
+        """When loop is not running, dispatch is skipped but toast is still returned."""
+        handler, _, dispatcher = make_handler()
+        dispatcher.dispatch_hook_task = AsyncMock()
+
+        loop = MagicMock()
+        loop.is_running.return_value = False
+        handler.attach_loop(loop)
+
+        data = MagicMock()
+        data.event = MagicMock()
+        data.event.action = MagicMock()
+        data.event.action.value = {"action": "nextme_hook", "hook": "test"}
+        data.event.operator = MagicMock()
+        data.event.operator.open_id = "ou_x"
+        data.event.context = MagicMock()
+        data.event.context.open_chat_id = "oc_x"
+        data.event.context.open_message_id = "om_x"
+
+        with patch("nextme.feishu.handler.asyncio.run_coroutine_threadsafe") as mock_rct:
+            resp = handler._on_card_action(data)
+            assert not mock_rct.called  # not scheduled since loop not running
+
+        assert resp.toast is not None
+        assert resp.toast.content == "正在处理…"

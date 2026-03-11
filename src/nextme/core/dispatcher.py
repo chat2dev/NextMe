@@ -21,6 +21,7 @@ import json
 import logging
 import uuid
 from datetime import timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
@@ -1105,6 +1106,102 @@ class TaskDispatcher:
             await self._handle_acl_review_action(action_data, replier)
         else:
             logger.warning("handle_acl_card_action: unknown action %r", action)
+
+    async def dispatch_hook_task(self, action_data: dict) -> None:
+        """Load a custom card hook file and dispatch its content as a new task.
+
+        Called when a Feishu card button with ``action == "nextme_hook"`` is
+        clicked.  The hook file is looked up at
+        ``<project_dir>/.nextme/hooks/<hook_name>.md`` (relative to the active
+        session's project directory).  Context metadata from the card event is
+        appended to the file content before dispatching.
+
+        Args:
+            action_data: Parsed action value dict from the card event, with the
+                following keys injected by the handler:
+
+                - ``hook``        — hook file name (without ``.md``)
+                - ``session_id``  — optional, used to locate the correct session
+                - ``operator_id`` — open_id of the user who clicked the button
+                - ``chat_id``     — Feishu chat ID
+                - ``message_id``  — original card message ID (used as reply anchor)
+                - ``chat_type``   — ``"p2p"`` or ``"group"``
+        """
+        hook_name = action_data.get("hook", "").strip()
+        if not hook_name:
+            logger.warning("dispatch_hook_task: missing hook name in action_data")
+            return
+        # Prevent path traversal: only bare names without slashes or leading dots.
+        if "/" in hook_name or "\\" in hook_name or hook_name.startswith("."):
+            logger.warning("dispatch_hook_task: unsafe hook name %r — ignored", hook_name)
+            return
+
+        session_id: str = action_data.get("session_id", "").strip()
+        operator_id: str = action_data.get("operator_id", "")
+        chat_id: str = action_data.get("chat_id", "")
+        message_id: str = action_data.get("message_id", "")
+        chat_type: str = action_data.get("chat_type", "p2p")
+
+        # Derive session_id when not provided: use p2p context (chat_id:operator_id).
+        if not session_id:
+            session_id = f"{chat_id}:{operator_id}" if chat_id and operator_id else chat_id
+
+        user_ctx = self._session_registry.get_or_create(session_id)
+        session = user_ctx.get_active_session()
+        if session is None:
+            default_project = self._config.default_project
+            if default_project is None:
+                logger.warning(
+                    "dispatch_hook_task: no active session and no default project for %r",
+                    session_id,
+                )
+                return
+            session = user_ctx.get_or_create_session(default_project, self._settings)
+
+        # Load hook file from <project_dir>/.nextme/hooks/<hook_name>.md
+        hook_path = Path(session.project_path) / ".nextme" / "hooks" / f"{hook_name}.md"
+        try:
+            hook_content = hook_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            logger.warning("dispatch_hook_task: hook file not found: %s", hook_path)
+            return
+        except Exception:
+            logger.exception("dispatch_hook_task: failed to read hook file: %s", hook_path)
+            return
+
+        # Append card interaction context so the agent has situational awareness.
+        context_lines: list[str] = ["", "", "---", "**卡片交互**"]
+        if operator_id:
+            context_lines.append(f"- 操作者 open_id: {operator_id}")
+        if chat_id:
+            context_lines.append(f"- 聊天 ID: {chat_id}")
+        if message_id:
+            context_lines.append(f"- 消息 ID: {message_id}")
+        _skip = {"action", "hook", "session_id", "operator_id", "chat_id", "message_id", "chat_type"}
+        for k, v in action_data.items():
+            if k not in _skip and v not in (None, ""):
+                context_lines.append(f"- {k}: {v}")
+
+        content = hook_content + "\n".join(context_lines)
+
+        async def _noop_reply(_r: Reply) -> None:
+            pass
+
+        task = Task(
+            id=f"hook_{hook_name}_{uuid.uuid4().hex[:8]}",
+            content=content,
+            session_id=session_id,
+            reply_fn=_noop_reply,  # replaced by dispatch() below
+            message_id=message_id,
+            chat_type=chat_type,
+            user_id=operator_id,
+        )
+        logger.info(
+            "dispatch_hook_task: dispatching hook=%r session=%r",
+            hook_name,
+            session_id,
+        )
+        await self.dispatch(task)
 
     async def _handle_acl_apply_action(self, data: dict, replier: Replier) -> None:
         """Process an acl_apply card button click."""
