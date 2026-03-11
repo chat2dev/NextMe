@@ -2124,3 +2124,46 @@ async def test_schedule_engine_fires_due_task_through_dispatcher(
     assert updated is not None
     assert updated.status == "done"
     assert updated.run_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 22: Chinese NL → creates interval task
+# ---------------------------------------------------------------------------
+
+
+async def test_schedule_chinese_nl_creates_interval_task(tmp_project, settings, scheduler_db):
+    """'/schedule 每小时提醒我喝水' — Chinese NL → creates interval task without explicit 'every' syntax."""
+    replier = make_replier()
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, scheduler_db=scheduler_db)
+
+    await dispatcher.dispatch(make_task("/schedule 每小时提醒我喝水"))
+
+    replier.send_text.assert_called_once()
+    assert "已创建" in replier.send_text.call_args[0][1]
+
+    tasks = await scheduler_db.list_by_chat("oc_chat")
+    assert len(tasks) == 1
+    assert tasks[0].prompt == "提醒我喝水"
+    assert tasks[0].schedule_type.value == "interval"
+    assert tasks[0].schedule_value == "3600"
+
+
+# ---------------------------------------------------------------------------
+# Test 23: Chinese NL daily-at → creates cron task
+# ---------------------------------------------------------------------------
+
+
+async def test_schedule_chinese_daily_at_creates_cron_task(tmp_project, settings, scheduler_db):
+    """'/schedule 每天9点发日报' — creates a cron task."""
+    replier = make_replier()
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, scheduler_db=scheduler_db)
+
+    await dispatcher.dispatch(make_task("/schedule 每天9点发日报"))
+
+    tasks = await scheduler_db.list_by_chat("oc_chat")
+    assert len(tasks) == 1
+    assert tasks[0].schedule_type.value == "cron"
+    assert tasks[0].schedule_value == "0 9 * * *"
+    assert tasks[0].prompt == "发日报"

@@ -245,3 +245,84 @@ async def test_handle_invalid_args_shows_usage(replier, mock_db):
     replier.send_text.assert_called_once()
     text = replier.send_text.call_args[0][1]
     assert "schedule" in text.lower() or "用法" in text
+
+
+# -- Chinese natural language parse tests --
+
+def test_parse_chinese_every_hour():
+    result = parse_schedule_command("每小时提醒我喝水")
+    assert result is not None
+    assert result.action == "create"
+    assert result.prompt == "提醒我喝水"
+    assert result.schedule_type == "interval"
+    assert result.schedule_value == "3600"
+
+def test_parse_chinese_every_n_hours():
+    result = parse_schedule_command("每2小时检查新闻")
+    assert result is not None
+    assert result.schedule_value == "7200"
+    assert result.prompt == "检查新闻"
+
+def test_parse_chinese_every_n_minutes():
+    result = parse_schedule_command("每30分钟ping")
+    assert result is not None
+    assert result.schedule_value == "1800"
+    assert result.prompt == "ping"
+
+def test_parse_chinese_every_day():
+    result = parse_schedule_command("每天发日报")
+    assert result is not None
+    assert result.schedule_type == "interval"
+    assert result.schedule_value == "86400"
+    assert result.prompt == "发日报"
+
+def test_parse_chinese_suffix_interval():
+    result = parse_schedule_command("提醒我喝水每小时")
+    assert result is not None
+    assert result.prompt == "提醒我喝水"
+    assert result.schedule_value == "3600"
+
+def test_parse_chinese_daily_at():
+    result = parse_schedule_command("每天9点发日报")
+    assert result is not None
+    assert result.schedule_type == "cron"
+    assert result.schedule_value == "0 9 * * *"
+    assert result.prompt == "发日报"
+
+def test_parse_chinese_daily_at_prefix_with_early_morning():
+    # "早上" is part of the hour spec — handle gracefully
+    # This might not parse due to "早上" but ensure no crash
+    # (could be None if pattern doesn't match)
+    _ = parse_schedule_command("每天早上8点提醒我")
+
+def test_parse_chinese_future_once():
+    result = parse_schedule_command("30分钟后提醒我开会")
+    assert result is not None
+    assert result.schedule_type == "once"
+    assert result.prompt == "提醒我开会"
+    # next_run_at should be ~30 minutes from now
+    now = datetime.now(timezone.utc)
+    delta = (result.next_run_at - now).total_seconds()
+    assert 1700 < delta < 1900  # 30 min ± small tolerance
+
+def test_parse_chinese_future_hours():
+    result = parse_schedule_command("2小时后检查结果")
+    assert result is not None
+    assert result.schedule_type == "once"
+    assert result.prompt == "检查结果"
+
+def test_parse_chinese_suffix_daily_at():
+    result = parse_schedule_command("发日报每天9点")
+    assert result is not None
+    assert result.schedule_type == "cron"
+    assert result.schedule_value == "0 9 * * *"
+    assert result.prompt == "发日报"
+
+def test_parse_chinese_future_suffix():
+    result = parse_schedule_command("提醒我开会2小时后")
+    assert result is not None
+    assert result.schedule_type == "once"
+    assert result.prompt == "提醒我开会"
+
+def test_parse_chinese_daily_at_invalid_hour_returns_none():
+    assert parse_schedule_command("每天25点发日报") is None
