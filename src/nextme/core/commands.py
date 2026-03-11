@@ -7,7 +7,10 @@ objects they need and return after sending exactly one reply.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import subprocess
 
 import json
 from typing import TYPE_CHECKING, Any, Optional
@@ -262,6 +265,46 @@ async def handle_help(replier: Replier, chat_id: str, reply_msg_id: str = "") ->
         logger.exception("handle_help: failed to send help card to chat %r", chat_id)
 
 
+def _get_git_branch(path: str) -> str | None:
+    """Return the current git branch for *path*, or ``None`` if unavailable.
+
+    Uses a 0.8 s timeout so a slow/absent git never blocks the status card.
+    Returns ``"detached@<sha>"`` when in detached HEAD state.
+    """
+    # Strip git worktree env vars so a caller running inside a worktree (e.g.
+    # pytest or a git hook) cannot bleed its own GIT_DIR into the subprocess
+    # and cause git to talk to the wrong repository.
+    _strip = {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+              "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"}
+    env = {k: v for k, v in os.environ.items() if k not in _strip}
+    try:
+        # symbolic-ref works even for unborn branches (no commits yet)
+        result = subprocess.run(
+            ["git", "-C", path, "symbolic-ref", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=0.8,
+            env=env,
+        )
+        if result.returncode == 0:
+            branch = result.stdout.strip()
+            return branch if branch else None
+        # Detached HEAD — return short SHA
+        sha_result = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=0.8,
+            env=env,
+        )
+        if sha_result.returncode != 0:
+            return None
+        sha = sha_result.stdout.strip()
+        return f"detached@{sha}" if sha else None
+    except Exception:
+        return None
+
+
 async def handle_status(
     user_ctx: UserContext,
     replier: Replier,
@@ -329,13 +372,21 @@ async def handle_status(
 
         queue_label = f"**{queue_size}** 个待处理" if queue_size > 0 else "_无_"
 
-        section = "\n".join([
+        branch = await asyncio.to_thread(_get_git_branch, str(session.project_path))
+        branch_line = f"🌿 分支: `{branch}`" if branch else ""
+
+        section_lines = [
             f"**{active_marker}{session.project_name}**　{status_emoji} {session.status.value}",
             f"📁 `{session.project_path}`",
+        ]
+        if branch_line:
+            section_lines.append(branch_line)
+        section_lines += [
             f"🔧 执行器: `{session.executor}`　　Session: {session_label}",
             f"📝 当前任务: {task_label}",
             f"📋 队列: {queue_label}",
-        ])
+        ]
+        section = "\n".join(section_lines)
         sections.append(section)
 
     content = "\n\n---\n\n".join(sections)

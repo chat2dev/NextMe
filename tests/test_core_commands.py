@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from nextme.core.commands import (
     HELP_COMMANDS, handle_new, handle_stop, handle_help,
     handle_status, handle_project, handle_bind, handle_unbind, handle_remember,
+    _get_git_branch,
 )
 from nextme.config.schema import AppConfig, Project, Settings
 from nextme.core.session import Session, UserContext
@@ -708,6 +709,69 @@ async def test_handle_status_reply_msg_id_uses_reply_card(tmp_path):
     args, kwargs = r.reply_card.call_args
     assert args[0] == "om_st2"
     assert kwargs.get("in_thread") is True
+
+
+# ---------------------------------------------------------------------------
+# _get_git_branch tests
+# ---------------------------------------------------------------------------
+
+def test_get_git_branch_returns_branch_name(tmp_path):
+    """Returns branch name for a valid git repo."""
+    # Create a minimal git repo by writing .git/* directly.
+    # Avoids subprocess git calls whose behaviour varies when GIT_DIR is set
+    # in the environment (e.g. inside a git pre-commit hook).
+    git_dir = tmp_path / ".git"
+    (git_dir / "objects").mkdir(parents=True)
+    (git_dir / "refs").mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/my-branch\n")
+    assert _get_git_branch(str(tmp_path)) == "my-branch"
+
+
+def test_get_git_branch_returns_none_for_non_git_dir(tmp_path):
+    """Returns None when the path is not a git repository."""
+    assert _get_git_branch(str(tmp_path)) is None
+
+
+def test_get_git_branch_returns_none_on_exception():
+    """Returns None when git raises (e.g. path doesn't exist)."""
+    assert _get_git_branch("/nonexistent/path/xyz") is None
+
+
+# ---------------------------------------------------------------------------
+# handle_status branch-line tests
+# ---------------------------------------------------------------------------
+
+async def test_handle_status_shows_git_branch(tmp_path):
+    """handle_status includes branch line when project path is a git repo."""
+    import json
+    # Create a minimal git repo by writing .git/* directly.
+    git_dir = tmp_path / ".git"
+    (git_dir / "objects").mkdir(parents=True)
+    (git_dir / "refs").mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/feat/demo\n")
+    settings = Settings(task_queue_capacity=5)
+    project = Project(name="proj", path=str(tmp_path), executor="claude")
+    user_ctx = UserContext("oc_chat:ou_user")
+    user_ctx.get_or_create_session(project, settings)
+    r = _make_replier()
+    await handle_status(user_ctx, r, "oc_chat")
+    card_json = r.send_card.call_args[0][1]
+    content = json.loads(card_json)["body"]["elements"][0]["content"]
+    assert "feat/demo" in content
+
+
+async def test_handle_status_no_branch_line_for_non_git(tmp_path):
+    """handle_status omits branch line when project path is not a git repo."""
+    import json
+    settings = Settings(task_queue_capacity=5)
+    project = Project(name="proj", path=str(tmp_path), executor="claude")
+    user_ctx = UserContext("oc_chat:ou_user")
+    user_ctx.get_or_create_session(project, settings)
+    r = _make_replier()
+    await handle_status(user_ctx, r, "oc_chat")
+    card_json = r.send_card.call_args[0][1]
+    content = json.loads(card_json)["body"]["elements"][0]["content"]
+    assert "🌿" not in content
 
 
 async def test_handle_bind_not_found_reply_msg_id():
