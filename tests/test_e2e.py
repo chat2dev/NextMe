@@ -2168,3 +2168,191 @@ async def test_schedule_chinese_daily_at_creates_cron_task(tmp_project, settings
     assert tasks[0].schedule_type.value == "cron"
     assert tasks[0].schedule_value == "0 9 * * *"
     assert tasks[0].prompt == "发日报"
+
+
+# ---------------------------------------------------------------------------
+# Test 29-30: /status shows git branch
+# ---------------------------------------------------------------------------
+
+
+async def test_status_shows_git_branch(tmp_path, settings):
+    """/status card includes branch name when project dir is a git repo."""
+    import json
+
+    # Create a minimal git repo (filesystem only — no subprocess, immune to GIT_DIR).
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    git_dir = project_dir / ".git"
+    (git_dir / "objects").mkdir(parents=True)
+    (git_dir / "refs").mkdir()
+    (git_dir / "HEAD").write_text("ref: refs/heads/feat/e2e-test\n")
+
+    project = Project(name="myproject", path=str(project_dir), executor="claude-code-acp")
+    config = AppConfig(projects=[project])
+    replier = make_replier()
+    replier.send_card = AsyncMock(return_value="status_card_id")
+
+    dispatcher = make_dispatcher(config, settings, replier)
+    await dispatcher.dispatch(make_task("/status"))
+
+    replier.send_card.assert_called_once()
+    card_json = replier.send_card.call_args[0][1]
+    card = json.loads(card_json)
+    content = card["body"]["elements"][0]["content"]
+
+    assert "feat/e2e-test" in content, (
+        f"Expected branch 'feat/e2e-test' in /status card content, got: {content!r}"
+    )
+    assert "🌿" in content
+
+
+async def test_status_omits_branch_line_for_non_git_project(tmp_path, settings):
+    """/status card omits the branch line when project dir is not a git repo."""
+    import json
+
+    project_dir = tmp_path / "plain"
+    project_dir.mkdir()
+
+    project = Project(name="plain", path=str(project_dir), executor="claude-code-acp")
+    config = AppConfig(projects=[project])
+    replier = make_replier()
+    replier.send_card = AsyncMock(return_value="status_card_id")
+
+    dispatcher = make_dispatcher(config, settings, replier)
+    await dispatcher.dispatch(make_task("/status"))
+
+    replier.send_card.assert_called_once()
+    card_json = replier.send_card.call_args[0][1]
+    card = json.loads(card_json)
+    content = card["body"]["elements"][0]["content"]
+
+    assert "🌿" not in content, (
+        f"Did not expect branch line in /status card for non-git project, got: {content!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 31-33: Custom card hooks (dispatch_hook_task)
+# ---------------------------------------------------------------------------
+
+
+async def test_hook_task_loads_file_and_calls_runtime(tmp_path, settings):
+    """dispatch_hook_task loads the hook file and the agent executes it."""
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    hooks_dir = project_dir / ".nextme" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "greet.md").write_text("Say hello warmly to the user.")
+
+    project = Project(name="myproject", path=str(project_dir), executor="claude-code-acp")
+    config = AppConfig(projects=[project])
+    replier = make_replier()
+    mock_runtime = make_mock_runtime(execute_return="Hello!")
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    dispatcher = make_dispatcher(config, settings, replier, acp_registry=acp_registry)
+
+    session_id = "oc_chat:ou_user"
+    await dispatcher.dispatch_hook_task({
+        "action": "nextme_hook",
+        "hook": "greet",
+        "session_id": session_id,
+        "operator_id": "ou_user",
+        "chat_id": "oc_chat",
+        "message_id": "om_hook_msg",
+        "chat_type": "p2p",
+    })
+
+    session = _get_session(dispatcher, session_id)
+    assert session is not None, "Session should have been created by dispatch_hook_task"
+
+    try:
+        await drain_session_queue(session)
+    except asyncio.TimeoutError:
+        pytest.fail("Hook task queue did not drain within timeout")
+    finally:
+        await cancel_workers(dispatcher)
+
+    mock_runtime.execute.assert_called_once()
+    executed_task = mock_runtime.execute.call_args.kwargs["task"]
+    assert "Say hello warmly to the user." in executed_task.content, (
+        f"Expected hook content in prompt, got: {executed_task.content!r}"
+    )
+    assert "ou_user" in executed_task.content, "Expected operator context in prompt"
+
+
+async def test_hook_task_appends_context_to_prompt(tmp_path, settings):
+    """dispatch_hook_task appends operator/chat/message context to the hook content."""
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    hooks_dir = project_dir / ".nextme" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    (hooks_dir / "report.md").write_text("Generate a daily report.")
+
+    project = Project(name="myproject", path=str(project_dir), executor="claude-code-acp")
+    config = AppConfig(projects=[project])
+    replier = make_replier()
+    mock_runtime = make_mock_runtime()
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    dispatcher = make_dispatcher(config, settings, replier, acp_registry=acp_registry)
+
+    await dispatcher.dispatch_hook_task({
+        "hook": "report",
+        "session_id": "oc_chat:ou_user",
+        "operator_id": "ou_op_456",
+        "chat_id": "oc_room_789",
+        "message_id": "om_abc",
+        "chat_type": "p2p",
+        "custom_param": "my_value",
+    })
+
+    session = _get_session(dispatcher, "oc_chat:ou_user")
+    assert session is not None
+    try:
+        await drain_session_queue(session)
+    except asyncio.TimeoutError:
+        pytest.fail("Hook task queue did not drain")
+    finally:
+        await cancel_workers(dispatcher)
+
+    mock_runtime.execute.assert_called_once()
+    executed_task = mock_runtime.execute.call_args.kwargs["task"]
+    assert "Generate a daily report." in executed_task.content
+    assert "ou_op_456" in executed_task.content
+    assert "oc_room_789" in executed_task.content
+    assert "om_abc" in executed_task.content
+    assert "my_value" in executed_task.content
+
+
+async def test_hook_task_missing_file_no_dispatch(tmp_path, settings):
+    """dispatch_hook_task silently skips when the hook file does not exist."""
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+
+    project = Project(name="myproject", path=str(project_dir), executor="claude-code-acp")
+    config = AppConfig(projects=[project])
+    replier = make_replier()
+    mock_runtime = make_mock_runtime()
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    dispatcher = make_dispatcher(config, settings, replier, acp_registry=acp_registry)
+
+    await dispatcher.dispatch_hook_task({
+        "hook": "does_not_exist",
+        "session_id": "oc_chat:ou_user",
+        "operator_id": "ou_user",
+        "chat_id": "oc_chat",
+        "message_id": "om_x",
+        "chat_type": "p2p",
+    })
+
+    # Give a brief moment in case something async was started unexpectedly.
+    await asyncio.sleep(0.05)
+
+    # No worker should have been started; runtime must not have been called.
+    mock_runtime.execute.assert_not_called()
+    await cancel_workers(dispatcher)
