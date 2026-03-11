@@ -121,7 +121,12 @@ def _update_log_level(log_level: str) -> None:
         handler.setLevel(numeric_level)
 
 
-async def _reload_settings_async(settings: object, acl_manager: object | None = None) -> None:
+async def _reload_settings_async(
+    settings: object,
+    acl_manager: object | None = None,
+    skill_registry: object | None = None,
+    skill_registry_kwargs: dict | None = None,
+) -> None:
     """Re-read settings.json and hot-update reloadable fields in *settings* in-place."""
     from .config.loader import ConfigLoader
 
@@ -151,11 +156,21 @@ async def _reload_settings_async(settings: object, acl_manager: object | None = 
     else:
         logger.info("SIGHUP: settings reloaded — no changes detected")
 
+    # Always reload skills on SIGHUP
+    if skill_registry is not None:
+        from .skills.registry import SkillRegistry as _SkillRegistry
+        if isinstance(skill_registry, _SkillRegistry):
+            kwargs = skill_registry_kwargs or {}
+            skill_registry.load(**kwargs)
+            logger.info("SIGHUP: SkillRegistry reloaded — %d skill(s)", len(skill_registry.list_all()))
+
 
 def _install_sighup_handler(
     loop: asyncio.AbstractEventLoop,
     settings: object,
     acl_manager: object | None = None,
+    skill_registry: object | None = None,
+    skill_registry_kwargs: dict | None = None,
 ) -> None:
     """Register a SIGHUP handler that hot-reloads settings.json in-place.
 
@@ -164,6 +179,7 @@ def _install_sighup_handler(
     streaming_enabled, admin_users.
 
     Fields requiring restart: app_id, app_secret, projects, bindings.
+    Skills are always reloaded from disk on SIGHUP.
     """
 
     def _on_sighup() -> None:
@@ -171,7 +187,10 @@ def _install_sighup_handler(
             "Received SIGHUP — reloading hot settings from %s",
             _NEXTME_HOME / "settings.json",
         )
-        loop.create_task(_reload_settings_async(settings, acl_manager), name="sighup-reload")
+        loop.create_task(
+            _reload_settings_async(settings, acl_manager, skill_registry, skill_registry_kwargs),
+            name="sighup-reload",
+        )
 
     try:
         loop.add_signal_handler(signal.SIGHUP, _on_sighup)
@@ -313,7 +332,8 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     context_manager = ContextManager(settings)
     skill_registry = SkillRegistry()
     executors = {p.executor for p in config.projects}
-    skill_registry.load(project_path=cwd, executors=executors)
+    _skill_registry_kwargs = {"project_path": cwd, "executors": executors}
+    skill_registry.load(**_skill_registry_kwargs)
     logger.info("SkillRegistry: %d skill(s) loaded", len(skill_registry.list_all()))
 
     # ------------------------------------------------------------------
@@ -431,7 +451,7 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     # ------------------------------------------------------------------
     shutdown_event = asyncio.Event()
     _install_signal_handlers(loop, shutdown_event)
-    _install_sighup_handler(loop, settings, acl_manager)
+    _install_sighup_handler(loop, settings, acl_manager, skill_registry, _skill_registry_kwargs)
 
     # ------------------------------------------------------------------
     # Step 11: Start the Feishu WebSocket — blocks until shutdown
