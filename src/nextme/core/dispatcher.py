@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 if TYPE_CHECKING:
     from ..acl.manager import AclManager
     from ..acl.schema import Role
+    from ..scheduler.db import SchedulerDb
 
 from ..acp.janitor import ACPRuntimeRegistry
 from ..config.schema import AppConfig, Settings
@@ -88,6 +89,7 @@ class TaskDispatcher:
         skill_registry: Optional[SkillRegistry] = None,
         memory_manager: Optional[MemoryManager] = None,
         acl_manager: Optional["AclManager"] = None,
+        scheduler_db: Optional["SchedulerDb"] = None,
     ) -> None:
         self._config = config
         self._settings = settings
@@ -99,6 +101,7 @@ class TaskDispatcher:
         self._skill_registry: SkillRegistry = skill_registry or SkillRegistry()
         self._memory_manager = memory_manager
         self._acl_manager = acl_manager
+        self._scheduler_db = scheduler_db
 
         # worker_key (context_id:project_name) -> asyncio.Task (running worker)
         self._worker_tasks: dict[str, asyncio.Task] = {}
@@ -946,6 +949,21 @@ class TaskDispatcher:
                 await self._handle_acl_command(
                     arg, caller_role, task.user_id or self._get_user_id(context_id), replier, chat_id
                 )
+
+        elif command == "/schedule":
+            args = arg
+            if self._scheduler_db is not None:
+                from ..scheduler.commands import handle_schedule
+                await handle_schedule(
+                    raw_args=args,
+                    chat_id=chat_id,
+                    creator_open_id=task.user_id or self._get_user_id(context_id),
+                    replier=replier,
+                    db=self._scheduler_db,
+                    project_name=session.project_name if session else None,
+                )
+            else:
+                await replier.send_text(chat_id, "定时任务功能未启用。")
 
         else:
             logger.debug(

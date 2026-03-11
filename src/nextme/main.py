@@ -354,6 +354,16 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     acp_janitor = ACPJanitor(acp_registry, settings)
 
     # ------------------------------------------------------------------
+    # Scheduler DB (extends nextme.db with scheduled_tasks tables)
+    # ------------------------------------------------------------------
+    from .scheduler.db import SchedulerDb
+    from .scheduler.engine import SchedulerEngine
+
+    scheduler_db = SchedulerDb()
+    await scheduler_db.open()
+    logger.info("SchedulerDb opened")
+
+    # ------------------------------------------------------------------
     # Step 8: MessageHandler, TaskDispatcher, FeishuClient
     # ------------------------------------------------------------------
     from .feishu.dedup import MessageDedup
@@ -392,6 +402,7 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
         skill_registry=skill_registry,
         memory_manager=memory_manager,
         acl_manager=acl_manager,
+        scheduler_db=scheduler_db,
     )
 
     handler = MessageHandler(
@@ -417,6 +428,12 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     # Wire the real client into the dispatcher so dispatch() works correctly.
     dispatcher._feishu_client = feishu_client
 
+    scheduler_engine = SchedulerEngine(
+        db=scheduler_db,
+        dispatcher=dispatcher,
+        feishu_client=feishu_client,
+    )
+
     # Fetch the bot's own open_id so the handler can filter @mentions precisely.
     bot_open_id = await feishu_client.fetch_bot_open_id()
     if bot_open_id:
@@ -434,6 +451,8 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
     loop = asyncio.get_running_loop()
 
     janitor_task = loop.create_task(acp_janitor.run(), name="acp-janitor")
+    scheduler_task = loop.create_task(scheduler_engine.run(), name="scheduler")
+    logger.info("Scheduler started")
     await state_store.start_debounce_loop()
     await memory_manager.start_debounce_loop()
 
@@ -543,6 +562,17 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
         logger.exception("Error stopping StateStore")
 
     # 7. Cancel remaining background asyncio tasks.
+    scheduler_task.cancel()
+    try:
+        await asyncio.wait_for(scheduler_task, timeout=2)
+    except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+        pass
+    try:
+        await scheduler_db.close()
+        logger.info("Scheduler stopped")
+    except Exception:
+        logger.exception("Error stopping SchedulerDb")
+
     for bg_task in (janitor_task,):
         if not bg_task.done():
             bg_task.cancel()
