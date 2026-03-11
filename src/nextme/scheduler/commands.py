@@ -12,22 +12,26 @@ from .schema import ScheduledTask, ScheduleType
 
 logger = logging.getLogger(__name__)
 
-_USAGE = """用法: /schedule <子命令>
-
-子命令:
-  <提示词> at <ISO时间>         — 在指定时间执行一次
-  <提示词> every <N><s|m|h|d>  — 每隔 N 秒/分/时/天执行
-  <提示词> cron <5部分表达式>   — 按 cron 表达式执行
-  list                          — 列出当前会话的所有任务
-  pause <任务ID>                — 暂停任务
-  resume <任务ID>               — 恢复任务
-  delete <任务ID>               — 删除任务
-
-示例:
-  /schedule 发送日报 at 2026-03-20T09:00:00+08:00
-  /schedule 检查新闻 every 2h
-  /schedule 周报 cron 0 9 * * 1
-"""
+_USAGE = (
+    "用法: /schedule <子命令>\n\n"
+    "子命令:\n"
+    "  <提示词> at <ISO时间>         — 在指定时间执行一次\n"
+    "  <提示词> every <N><s|m|h|d>  — 每隔 N 秒/分/时/天执行\n"
+    "  <提示词> cron <5部分表达式>   — 按 cron 表达式执行\n"
+    "  list                          — 列出当前会话的所有任务\n"
+    "  pause <任务ID>                — 暂停任务\n"
+    "  resume <任务ID>               — 恢复任务\n"
+    "  delete <任务ID>               — 删除任务\n\n"
+    "示例:\n"
+    "  /schedule 发送日报 at 2026-03-20T09:00:00+08:00\n"
+    "  /schedule 检查新闻 every 2h\n"
+    "  /schedule 周报 cron 0 9 * * 1\n\n"
+    "支持自然语言:\n"
+    "  /schedule 每小时提醒我喝水\n"
+    "  /schedule 每天9点发日报\n"
+    "  /schedule 30分钟后提醒我开会\n"
+    "  /schedule 30分钟后提醒我开会"
+)
 
 # Interval unit multipliers: s=1, m=60, h=3600, d=86400
 _UNIT_SECONDS: dict[str, int] = {
@@ -36,6 +40,31 @@ _UNIT_SECONDS: dict[str, int] = {
     "h": 3600,
     "d": 86400,
 }
+
+# Chinese unit → seconds
+_CN_SEC: dict[str, int] = {
+    "秒": 1,
+    "分": 60,
+    "分钟": 60,
+    "小时": 3600,
+    "时": 3600,
+    "天": 86400,
+    "日": 86400,
+}
+
+# Ordered from most-specific to least-specific to avoid partial matches
+_CN_PATTERNS: list[tuple[str, str]] = [
+    # "X分钟/小时后" — once in the future (must come before interval patterns)
+    (r"^(\d+)(分钟|分|小时|时)后\s*(.+)$", "future_prefix"),
+    (r"^(.+?)\s*(\d+)(分钟|分|小时|时)后$", "future_suffix"),
+    # 每天N点 — daily cron (before plain 每天 so 每天9点 doesn't hit 每天)
+    (r"^每天\s*(\d+)\s*[点时]\s*(.+)$", "daily_at_prefix"),
+    (r"^(.+?)\s*每天\s*(\d+)\s*[点时]$", "daily_at_suffix"),
+    # Prefix: 每(N?)(unit)(prompt)
+    (r"^每(\d+)?(秒|分钟|分|小时|时|天|日)\s*(.+)$", "interval_prefix"),
+    # Suffix: (prompt)每(N?)(unit)
+    (r"^(.+?)\s*每(\d+)?(秒|分钟|分|小时|时|天|日)$", "interval_suffix"),
+]
 
 # Regex patterns
 _RE_AT = re.compile(r"^(.+?)\s+at\s+(\S+)$", re.IGNORECASE)
@@ -140,6 +169,105 @@ def parse_schedule_command(raw_args: str) -> ParsedSchedule | None:
             schedule_value=cron_expr,
             next_run_at=next_run,
         )
+
+    # Fallback: try Chinese natural language
+    return _parse_chinese_schedule(text)
+
+
+def _parse_chinese_schedule(text: str) -> "ParsedSchedule | None":
+    """Try to extract schedule intent from Chinese natural language."""
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+
+    for pattern, kind in _CN_PATTERNS:
+        m = re.match(pattern, text.strip())
+        if not m:
+            continue
+
+        if kind == "future_prefix":
+            n, unit, prompt = int(m.group(1)), m.group(2), m.group(3).strip()
+            if not prompt:
+                continue
+            seconds = n * _CN_SEC[unit]
+            run_at = now + timedelta(seconds=seconds)
+            return ParsedSchedule(
+                action="create",
+                prompt=prompt,
+                schedule_type="once",
+                schedule_value=run_at.isoformat(),
+                next_run_at=run_at,
+            )
+
+        elif kind == "future_suffix":
+            prompt, n, unit = m.group(1).strip(), int(m.group(2)), m.group(3)
+            if not prompt:
+                continue
+            seconds = n * _CN_SEC[unit]
+            run_at = now + timedelta(seconds=seconds)
+            return ParsedSchedule(
+                action="create",
+                prompt=prompt,
+                schedule_type="once",
+                schedule_value=run_at.isoformat(),
+                next_run_at=run_at,
+            )
+
+        elif kind == "daily_at_prefix":
+            hour, prompt = int(m.group(1)), m.group(2).strip()
+            if not prompt or hour > 23:
+                return None
+            cron_expr = f"0 {hour} * * *"
+            next_run = _next_cron_run(cron_expr)
+            return ParsedSchedule(
+                action="create",
+                prompt=prompt,
+                schedule_type="cron",
+                schedule_value=cron_expr,
+                next_run_at=next_run,
+            )
+
+        elif kind == "daily_at_suffix":
+            prompt, hour = m.group(1).strip(), int(m.group(2))
+            if not prompt or hour > 23:
+                return None
+            cron_expr = f"0 {hour} * * *"
+            next_run = _next_cron_run(cron_expr)
+            return ParsedSchedule(
+                action="create",
+                prompt=prompt,
+                schedule_type="cron",
+                schedule_value=cron_expr,
+                next_run_at=next_run,
+            )
+
+        elif kind == "interval_prefix":
+            n_str, unit, prompt = m.group(1), m.group(2), m.group(3).strip()
+            n = int(n_str) if n_str else 1
+            if not prompt:
+                continue
+            seconds = n * _CN_SEC[unit]
+            return ParsedSchedule(
+                action="create",
+                prompt=prompt,
+                schedule_type="interval",
+                schedule_value=str(seconds),
+                next_run_at=now + timedelta(seconds=seconds),
+            )
+
+        elif kind == "interval_suffix":
+            prompt, n_str, unit = m.group(1).strip(), m.group(2), m.group(3)
+            n = int(n_str) if n_str else 1
+            if not prompt:
+                continue
+            seconds = n * _CN_SEC[unit]
+            return ParsedSchedule(
+                action="create",
+                prompt=prompt,
+                schedule_type="interval",
+                schedule_value=str(seconds),
+                next_run_at=now + timedelta(seconds=seconds),
+            )
 
     return None
 
