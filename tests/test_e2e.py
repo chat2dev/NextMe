@@ -2017,6 +2017,7 @@ async def test_schedule_list_shows_existing_tasks(tmp_project, settings, schedul
     text = replier.send_text.call_args[0][1]
     assert "ping" in text
     assert "interval" in text
+    assert "1小时" in text   # interval human-readable duration shown
 
 
 # ---------------------------------------------------------------------------

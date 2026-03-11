@@ -153,6 +153,8 @@ async def test_handle_list_with_tasks(replier, mock_db):
     )
     text = replier.send_text.call_args[0][1]
     assert "abc12345" in text
+    assert "1小时" in text       # interval human-readable
+    assert "UTC" not in text    # local timezone, not raw UTC label
 
 
 async def test_handle_pause(replier, mock_db):

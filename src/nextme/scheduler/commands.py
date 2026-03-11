@@ -324,14 +324,35 @@ async def handle_schedule(
             await replier.send_text(chat_id, "没有找到任何定时任务。")
             return
 
+        local_tz = datetime.now().astimezone().tzinfo
         lines = ["当前定时任务列表:\n"]
         for t in tasks:
             short_id = t.id[:8]
             status_label = {"active": "运行中", "paused": "已暂停", "done": "已完成"}.get(t.status, t.status)
-            next_run_str = t.next_run_at.strftime("%Y-%m-%d %H:%M UTC") if t.next_run_at else "-"
+            if t.next_run_at:
+                next_run_local = t.next_run_at.astimezone(local_tz)
+                next_run_str = next_run_local.strftime("%Y-%m-%d %H:%M %Z")
+            else:
+                next_run_str = "-"
+            # Format schedule_value into human-readable interval for interval tasks
+            if t.schedule_type.value == "interval":
+                secs = int(t.schedule_value)
+                if secs % 86400 == 0:
+                    interval_str = f"{secs // 86400}天"
+                elif secs % 3600 == 0:
+                    interval_str = f"{secs // 3600}小时"
+                elif secs % 60 == 0:
+                    interval_str = f"{secs // 60}分钟"
+                else:
+                    interval_str = f"{secs}秒"
+                type_detail = f"interval ({interval_str})"
+            elif t.schedule_type.value == "cron":
+                type_detail = f"cron ({t.schedule_value})"
+            else:
+                type_detail = t.schedule_type.value
             lines.append(
                 f"[{short_id}] {t.prompt}\n"
-                f"  类型: {t.schedule_type.value}  状态: {status_label}\n"
+                f"  类型: {type_detail}  状态: {status_label}\n"
                 f"  下次执行: {next_run_str}\n"
             )
         await replier.send_text(chat_id, "\n".join(lines))
