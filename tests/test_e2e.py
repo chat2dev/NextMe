@@ -21,6 +21,12 @@ Tests
 13. test_task_timeout_sends_timeout_card             — runtime raises TaskTimeoutError → timeout card sent, result card NOT sent
 14. test_task_timeout_evicts_runtime_from_registry   — after timeout, runtime is removed from ACPRuntimeRegistry
 15. test_task_timeout_session_preserved_next_message_succeeds — actual_id preserved; 2nd task after timeout succeeds
+16. test_schedule_list_empty                                 — /schedule list with empty DB → "没有" in reply
+17. test_schedule_create_once_stores_in_db                  — /schedule ... at <ISO> → task in DB + "已创建" confirmation
+18. test_schedule_create_interval_stores_in_db              — /schedule ... every 2h → interval task in DB
+19. test_schedule_list_shows_existing_tasks                 — /schedule list after creating a task shows it
+20. test_schedule_pause_command                             — /schedule pause <id> → task status becomes 'paused'
+21. test_schedule_engine_fires_due_task_through_dispatcher  — SchedulerEngine._tick() fires due task → runtime.execute() called
 23. test_thread_command_lists_active_threads         — /thread in group chat → lists threads from state_store
 24. test_thread_close_command_closes_thread          — /thread close <short_id> (Owner) → calls handle_done, DONE reaction sent
 25. test_thread_close_command_non_owner_denied       — /thread close by non-Owner → permission denied message
@@ -180,6 +186,7 @@ def make_dispatcher(
     replier,
     acp_registry=None,
     acl_manager=None,
+    scheduler_db=None,
 ) -> TaskDispatcher:
     feishu_client = make_feishu_client(replier)
     if acp_registry is None:
@@ -194,6 +201,7 @@ def make_dispatcher(
         path_lock_registry=PathLockRegistry(),
         feishu_client=feishu_client,
         acl_manager=acl_manager,
+        scheduler_db=scheduler_db,
     )
 
 
@@ -1908,3 +1916,211 @@ async def test_thread_command_non_group_chat_rejected(tmp_project, settings):
     mock_runtime.execute.assert_not_called()
 
     await cancel_workers(dispatcher)
+
+
+# ---------------------------------------------------------------------------
+# Scheduler fixture
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def scheduler_db(tmp_path):
+    """Real in-process SchedulerDb backed by a temporary SQLite file."""
+    from nextme.scheduler.db import SchedulerDb
+
+    db = SchedulerDb(db_path=tmp_path / "scheduler_e2e.db")
+    await db.open()
+    yield db
+    await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Test 16: /schedule list with empty DB → "没有" in reply
+# ---------------------------------------------------------------------------
+
+
+async def test_schedule_list_empty(tmp_project, settings, scheduler_db):
+    """/schedule list with no tasks → sends '没有' message."""
+    replier = make_replier()
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, scheduler_db=scheduler_db)
+
+    task = make_task("/schedule list")
+    await dispatcher.dispatch(task)
+
+    replier.send_text.assert_called_once()
+    assert "没有" in replier.send_text.call_args[0][1]
+
+
+# ---------------------------------------------------------------------------
+# Test 17: /schedule ... at <ISO> → task created in DB, "已创建" confirmation
+# ---------------------------------------------------------------------------
+
+
+async def test_schedule_create_once_stores_in_db(tmp_project, settings, scheduler_db):
+    """/schedule ... at <ISO> → creates task in DB and sends '已创建' confirmation."""
+    replier = make_replier()
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, scheduler_db=scheduler_db)
+
+    task = make_task("/schedule say hello at 2026-03-20T10:00:00+08:00")
+    await dispatcher.dispatch(task)
+
+    replier.send_text.assert_called_once()
+    assert "已创建" in replier.send_text.call_args[0][1]
+
+    tasks = await scheduler_db.list_by_chat("oc_chat")
+    assert len(tasks) == 1
+    assert tasks[0].prompt == "say hello"
+    assert tasks[0].schedule_type.value == "once"
+
+
+# ---------------------------------------------------------------------------
+# Test 18: /schedule ... every <N><unit> → interval task created
+# ---------------------------------------------------------------------------
+
+
+async def test_schedule_create_interval_stores_in_db(tmp_project, settings, scheduler_db):
+    """/schedule ... every 2h → creates interval task with schedule_value='7200'."""
+    replier = make_replier()
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, scheduler_db=scheduler_db)
+
+    task = make_task("/schedule check news every 2h")
+    await dispatcher.dispatch(task)
+
+    tasks = await scheduler_db.list_by_chat("oc_chat")
+    assert len(tasks) == 1
+    assert tasks[0].schedule_type.value == "interval"
+    assert tasks[0].schedule_value == "7200"
+
+
+# ---------------------------------------------------------------------------
+# Test 19: /schedule list with tasks → lists them
+# ---------------------------------------------------------------------------
+
+
+async def test_schedule_list_shows_existing_tasks(tmp_project, settings, scheduler_db):
+    """/schedule list after creating a task shows it in the reply."""
+    replier = make_replier()
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, scheduler_db=scheduler_db)
+
+    # First create a task
+    await dispatcher.dispatch(make_task("/schedule ping every 1h"))
+    replier.reset_mock()
+
+    # Then list
+    await dispatcher.dispatch(make_task("/schedule list"))
+
+    replier.send_text.assert_called_once()
+    text = replier.send_text.call_args[0][1]
+    assert "ping" in text
+    assert "interval" in text
+
+
+# ---------------------------------------------------------------------------
+# Test 20: /schedule pause <id> → task paused in DB
+# ---------------------------------------------------------------------------
+
+
+async def test_schedule_pause_command(tmp_project, settings, scheduler_db):
+    """/schedule pause <short_id> → task status becomes 'paused' in DB."""
+    replier = make_replier()
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(config, settings, replier, scheduler_db=scheduler_db)
+
+    # Create a task first
+    await dispatcher.dispatch(make_task("/schedule check every 1h"))
+    tasks = await scheduler_db.list_by_chat("oc_chat")
+    assert len(tasks) == 1
+    short_id = tasks[0].id[:8]
+
+    replier.reset_mock()
+
+    # Pause it
+    await dispatcher.dispatch(make_task(f"/schedule pause {short_id}"))
+    replier.send_text.assert_called_once()
+    assert "已暂停" in replier.send_text.call_args[0][1]
+
+    # Verify in DB
+    updated = await scheduler_db.get(tasks[0].id)
+    assert updated.status == "paused"
+
+
+# ---------------------------------------------------------------------------
+# Test 21: Engine fires due task through real dispatcher
+# ---------------------------------------------------------------------------
+
+
+async def test_schedule_engine_fires_due_task_through_dispatcher(
+    tmp_project, settings, scheduler_db
+):
+    """SchedulerEngine._tick() fires a due task through real TaskDispatcher → runtime.execute() called."""
+    from datetime import datetime, timezone, timedelta as td
+
+    from nextme.scheduler.engine import SchedulerEngine
+    from nextme.scheduler.schema import ScheduledTask, ScheduleType
+
+    replier = make_replier()
+    mock_runtime = make_mock_runtime(execute_return="Scheduled task done!")
+
+    acp_registry = ACPRuntimeRegistry()
+    acp_registry.get_or_create = MagicMock(return_value=mock_runtime)
+
+    config = AppConfig(projects=[tmp_project])
+    dispatcher = make_dispatcher(
+        config,
+        settings,
+        replier,
+        acp_registry=acp_registry,
+        scheduler_db=scheduler_db,
+    )
+    feishu_client = make_feishu_client(replier)
+
+    engine = SchedulerEngine(
+        db=scheduler_db,
+        dispatcher=dispatcher,
+        feishu_client=feishu_client,
+    )
+
+    # Create a task that is already due (1 minute in the past)
+    past = datetime.now(timezone.utc) - td(minutes=1)
+    sched_task = ScheduledTask(
+        id="e2e-sched-001",
+        chat_id="oc_chat",
+        creator_open_id="ou_user",
+        prompt="summarize today",
+        schedule_type=ScheduleType.ONCE,
+        schedule_value=past.isoformat(),
+        next_run_at=past,
+    )
+    await scheduler_db.create(sched_task)
+
+    # Run one tick
+    await engine._tick()
+
+    # Give the dispatcher a moment to create the session
+    await asyncio.sleep(0.1)
+
+    # Wait for the worker to process the dispatched task
+    session = _get_session(dispatcher, "oc_chat:ou_user")
+    if session is not None:
+        try:
+            await drain_session_queue(session)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            await cancel_workers(dispatcher)
+
+    # Runtime should have been called with the scheduled prompt
+    mock_runtime.execute.assert_called_once()
+    call_args = mock_runtime.execute.call_args
+    # The prompt is in the task content
+    assert "summarize today" in str(call_args)
+
+    # DB: task should be marked done
+    updated = await scheduler_db.get("e2e-sched-001")
+    assert updated is not None
+    assert updated.status == "done"
+    assert updated.run_count == 1
