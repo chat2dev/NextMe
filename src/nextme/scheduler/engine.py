@@ -97,7 +97,7 @@ class SchedulerEngine:
         error_msg: str | None = None
 
         try:
-            replier = self._feishu_client.get_replier(sched_task.chat_id)
+            replier = self._feishu_client.get_replier()
 
             async def reply_fn(reply: Reply) -> None:
                 try:

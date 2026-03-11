@@ -109,12 +109,14 @@ async def test_tick_no_due_tasks_no_dispatch(engine, mock_db, mock_dispatcher):
     mock_dispatcher.dispatch.assert_not_called()
 
 
-async def test_tick_fires_due_task(engine, mock_db, mock_dispatcher):
+async def test_tick_fires_due_task(engine, mock_db, mock_dispatcher, mock_feishu_client):
     task = _make_task(schedule_type=ScheduleType.ONCE)
     mock_db.list_due = AsyncMock(return_value=[task])
     await engine._tick()
     mock_dispatcher.dispatch.assert_called_once()
     mock_db.update_after_run.assert_called_once()
+    # Verify get_replier called with no arguments
+    mock_feishu_client.get_replier.assert_called_with()  # no args
 
 
 async def test_once_task_marked_done(engine, mock_db):
