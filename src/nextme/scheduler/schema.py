@@ -26,6 +26,8 @@ class ScheduledTask(BaseModel):
     max_runs: int | None = None
     created_at: datetime | None = None
     project_name: str | None = None
+    notify_chat: bool = False
+    """When True, reminders are sent to the group chat_id; when False (default) to the creator's DM."""
 
     def model_post_init(self, __context: Any) -> None:
         if self.created_at is None:

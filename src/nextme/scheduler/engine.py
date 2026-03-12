@@ -58,11 +58,13 @@ class SchedulerEngine:
         dispatcher: Any,  # TaskDispatcher — Any to avoid circular import
         feishu_client: Any,
         poll_interval: float = _DEFAULT_POLL_INTERVAL,
+        overdue_grace_minutes: int = 5,
     ) -> None:
         self._db = db
         self._dispatcher = dispatcher
         self._feishu_client = feishu_client
         self._poll_interval = poll_interval
+        self._overdue_grace_minutes = overdue_grace_minutes
 
     async def run(self) -> None:
         """Entry point — call as asyncio.create_task(engine.run())."""
@@ -86,11 +88,38 @@ class SchedulerEngine:
             return
         logger.info("SchedulerEngine: %d task(s) due at %s", len(due_tasks), now.isoformat())
         for sched_task in due_tasks:
-            await self._fire(sched_task, now)
+            overdue_seconds = max(0.0, (now - sched_task.next_run_at).total_seconds())
+            grace_seconds = self._overdue_grace_minutes * 60
 
-    async def _fire(self, sched_task: ScheduledTask, fired_at: datetime) -> None:
+            # Skip overdue tasks that exceed the grace period (grace >= 0)
+            if self._overdue_grace_minutes >= 0 and overdue_seconds > grace_seconds:
+                next_run = compute_next_run(sched_task)
+                new_status = "done" if next_run is None else "active"
+                if sched_task.max_runs is not None and (sched_task.run_count + 1) >= sched_task.max_runs:
+                    new_status = "done"
+                    next_run = None
+                await self._db.update_after_run(
+                    sched_task.id,
+                    next_run_at=next_run,
+                    new_status=new_status,
+                )
+                logger.info(
+                    "SchedulerEngine: skipped overdue task %s (overdue=%.0fs, grace=%ds)",
+                    sched_task.id, overdue_seconds, grace_seconds,
+                )
+                continue
+
+            await self._fire(sched_task, now, overdue_seconds=overdue_seconds)
+
+    async def _fire(
+        self,
+        sched_task: ScheduledTask,
+        fired_at: datetime,
+        overdue_seconds: float = 0.0,
+    ) -> None:
         """Dispatch one scheduled task and update the DB."""
         from ..protocol.types import Reply, ReplyType, Task
+        import json as _json
 
         start = time.monotonic()
         success = False
@@ -99,12 +128,49 @@ class SchedulerEngine:
         try:
             replier = self._feishu_client.get_replier()
 
+            # Overdue notice prepended to first reply when task fired late
+            overdue_notice: str | None = None
+            if overdue_seconds > 0:
+                overdue_minutes = int(overdue_seconds // 60) or 1
+                overdue_notice = f"⏰ 定时任务延迟 {overdue_minutes} 分钟执行"
+
+            first_reply_sent = False
+            notify_chat = sched_task.notify_chat
+
             async def reply_fn(reply: Reply) -> None:
+                nonlocal first_reply_sent
                 try:
-                    if reply.type == ReplyType.CARD:
-                        await replier.send_card(sched_task.chat_id, reply.content or "")
+                    content = reply.content or ""
+                    is_first = not first_reply_sent
+                    first_reply_sent = True
+                    if notify_chat:
+                        # Broadcast to group chat
+                        if reply.type == ReplyType.CARD:
+                            if overdue_notice and is_first:
+                                await replier.send_text(sched_task.chat_id, overdue_notice)
+                            await replier.send_card(sched_task.chat_id, content)
+                        else:
+                            if overdue_notice and is_first:
+                                content = f"{overdue_notice}\n\n{content}"
+                            await replier.send_text(sched_task.chat_id, content)
                     else:
-                        await replier.send_text(sched_task.chat_id, reply.content or "")
+                        # Send to creator's DM via open_id
+                        if reply.type == ReplyType.CARD:
+                            if overdue_notice and is_first:
+                                await replier.send_to_user(
+                                    sched_task.creator_open_id,
+                                    _json.dumps({"text": overdue_notice}),
+                                    msg_type="text",
+                                )
+                            await replier.send_to_user(sched_task.creator_open_id, content)
+                        else:
+                            if overdue_notice and is_first:
+                                content = f"{overdue_notice}\n\n{content}"
+                            await replier.send_to_user(
+                                sched_task.creator_open_id,
+                                _json.dumps({"text": content}),
+                                msg_type="text",
+                            )
                 except Exception:
                     logger.exception("SchedulerEngine: reply_fn failed for task %s", sched_task.id)
 
@@ -118,7 +184,7 @@ class SchedulerEngine:
                 content=fired_content,
                 session_id=sched_task.session_id,
                 reply_fn=reply_fn,
-                chat_type="p2p",
+                chat_type="group" if notify_chat else "p2p",
                 user_id=sched_task.creator_open_id,
             )
             await self._dispatcher.dispatch(dispatched_task)

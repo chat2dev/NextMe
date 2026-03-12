@@ -294,6 +294,18 @@ def _find_task_by_prefix(tasks: list[ScheduledTask], prefix: str) -> ScheduledTa
     return None
 
 
+# Keywords that indicate a reminder should be broadcast to the group chat
+_GROUP_NOTIFY_KEYWORDS = re.compile(
+    r"群(提醒|通知|定时|消息|播报)|通知(群|大家|所有人)|发给(大家|所有人)|全群|@所有人",
+    re.IGNORECASE,
+)
+
+
+def _is_group_notify(prompt: str, chat_type: str) -> bool:
+    """Return True only when in a group chat AND prompt explicitly requests group broadcast."""
+    return chat_type == "group" and bool(_GROUP_NOTIFY_KEYWORDS.search(prompt))
+
+
 async def handle_schedule(
     raw_args: str,
     chat_id: str,
@@ -301,6 +313,7 @@ async def handle_schedule(
     replier: Any,
     db: Any,
     project_name: str | None = None,
+    chat_type: str = "p2p",
 ) -> None:
     """Handle a /schedule command.
 
@@ -311,6 +324,7 @@ async def handle_schedule(
         replier: Replier instance with send_text(chat_id, text) async method.
         db: SchedulerDb (or compatible async mock) instance.
         project_name: Optional project name to associate with created tasks.
+        chat_type: ``"p2p"`` or ``"group"``.  Used to decide reminder recipient.
     """
     parsed = parse_schedule_command(raw_args)
 
@@ -374,6 +388,7 @@ async def handle_schedule(
             schedule_value=parsed.schedule_value,
             next_run_at=parsed.next_run_at,
             project_name=project_name,
+            notify_chat=_is_group_notify(parsed.prompt, chat_type),
         )
         await db.create(task)
         short_id = task_id[:8]

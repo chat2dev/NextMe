@@ -962,6 +962,7 @@ class TaskDispatcher:
                     replier=replier,
                     db=self._scheduler_db,
                     project_name=session.project_name if session else None,
+                    chat_type=task.chat_type,
                 )
             else:
                 await replier.send_text(chat_id, "定时任务功能未启用。")

@@ -83,6 +83,7 @@ def mock_replier():
     r = MagicMock()
     r.send_text = AsyncMock()
     r.send_card = AsyncMock()
+    r.send_to_user = AsyncMock()
     return r
 
 
@@ -171,10 +172,10 @@ async def test_run_loop_stops_on_cancel(engine):
 
 
 async def test_fire_reply_fn_sends_text(engine, mock_db, mock_dispatcher, mock_replier):
-    """reply_fn closure inside _fire routes text replies to replier.send_text."""
+    """notify_chat=True → text reply sent to group via send_text."""
     from nextme.protocol.types import Reply, ReplyType
 
-    task = _make_task(schedule_type=ScheduleType.ONCE)
+    task = _make_task(schedule_type=ScheduleType.ONCE, notify_chat=True)
     mock_db.list_due = AsyncMock(return_value=[task])
     await engine._tick()
 
@@ -188,10 +189,10 @@ async def test_fire_reply_fn_sends_text(engine, mock_db, mock_dispatcher, mock_r
 
 
 async def test_fire_reply_fn_sends_card(engine, mock_db, mock_dispatcher, mock_replier):
-    """reply_fn closure inside _fire routes card replies to replier.send_card."""
+    """notify_chat=True → card reply sent to group via send_card."""
     from nextme.protocol.types import Reply, ReplyType
 
-    task = _make_task(schedule_type=ScheduleType.ONCE)
+    task = _make_task(schedule_type=ScheduleType.ONCE, notify_chat=True)
     mock_db.list_due = AsyncMock(return_value=[task])
     await engine._tick()
 
@@ -211,7 +212,7 @@ async def test_fire_reply_fn_suppresses_replier_exception(engine, mock_db, mock_
     mock_db.list_due = AsyncMock(return_value=[task])
     await engine._tick()
 
-    mock_replier.send_text = AsyncMock(side_effect=RuntimeError("network error"))
+    mock_replier.send_to_user = AsyncMock(side_effect=RuntimeError("network error"))
     dispatched = mock_dispatcher.dispatch.call_args[0][0]
     reply = Reply(type=ReplyType.MARKDOWN, content="hi")
 
@@ -241,3 +242,136 @@ async def test_run_tick_error_is_suppressed(engine, mock_db, mock_dispatcher):
         pass
 
     assert call_count >= 2  # loop continued after the first-tick error
+
+
+# -- notify_chat (recipient routing) tests --
+
+async def test_non_notify_chat_sends_to_user_dm(mock_db, mock_dispatcher, mock_feishu_client):
+    """notify_chat=False → reply sent to creator DM via send_to_user."""
+    from nextme.protocol.types import Reply, ReplyType
+
+    eng = SchedulerEngine(db=mock_db, dispatcher=mock_dispatcher, feishu_client=mock_feishu_client)
+    task = _make_task(schedule_type=ScheduleType.ONCE)
+    # notify_chat=False is default
+    mock_db.list_due = AsyncMock(return_value=[task])
+    await eng._tick()
+
+    dispatched = mock_dispatcher.dispatch.call_args[0][0]
+    mock_replier = mock_feishu_client.get_replier()
+    await dispatched.reply_fn(Reply(type=ReplyType.MARKDOWN, content="喝水啦！"))
+
+    mock_replier.send_to_user.assert_called_once()
+    call_args = mock_replier.send_to_user.call_args
+    assert call_args[0][0] == task.creator_open_id
+    import json as _json
+    payload = _json.loads(call_args[0][1])
+    assert "喝水啦！" in payload["text"]
+    mock_replier.send_text.assert_not_called()
+
+
+async def test_notify_chat_sends_to_group(mock_db, mock_dispatcher, mock_feishu_client):
+    """notify_chat=True → reply sent to group chat_id via send_text."""
+    from nextme.protocol.types import Reply, ReplyType
+
+    eng = SchedulerEngine(db=mock_db, dispatcher=mock_dispatcher, feishu_client=mock_feishu_client)
+    task = _make_task(schedule_type=ScheduleType.ONCE, notify_chat=True)
+    mock_db.list_due = AsyncMock(return_value=[task])
+    await eng._tick()
+
+    dispatched = mock_dispatcher.dispatch.call_args[0][0]
+    mock_replier = mock_feishu_client.get_replier()
+    await dispatched.reply_fn(Reply(type=ReplyType.MARKDOWN, content="群通知！"))
+
+    mock_replier.send_text.assert_called_once_with(task.chat_id, "群通知！")
+    mock_replier.send_to_user.assert_not_called()
+
+
+async def test_notify_chat_false_card_sends_to_user_dm(mock_db, mock_dispatcher, mock_feishu_client):
+    """notify_chat=False + card reply → card sent via send_to_user with open_id."""
+    from nextme.protocol.types import Reply, ReplyType
+
+    eng = SchedulerEngine(db=mock_db, dispatcher=mock_dispatcher, feishu_client=mock_feishu_client)
+    task = _make_task(schedule_type=ScheduleType.ONCE)
+    # notify_chat=False is default
+    mock_db.list_due = AsyncMock(return_value=[task])
+    await eng._tick()
+
+    dispatched = mock_dispatcher.dispatch.call_args[0][0]
+    mock_replier = mock_feishu_client.get_replier()
+    await dispatched.reply_fn(Reply(type=ReplyType.CARD, content='{"card":"data"}'))
+
+    mock_replier.send_to_user.assert_called_once_with(task.creator_open_id, '{"card":"data"}')
+    mock_replier.send_card.assert_not_called()
+
+
+# -- _is_group_notify tests --
+
+def test_is_group_notify_group_with_keyword():
+    from nextme.scheduler.commands import _is_group_notify
+    assert _is_group_notify("每天早上发一条群提醒", "group") is True
+    assert _is_group_notify("群通知每周一", "group") is True
+    assert _is_group_notify("通知大家喝水", "group") is True
+
+
+def test_is_group_notify_p2p_ignores_keywords():
+    from nextme.scheduler.commands import _is_group_notify
+    assert _is_group_notify("群提醒", "p2p") is False
+
+
+def test_is_group_notify_group_without_keyword():
+    from nextme.scheduler.commands import _is_group_notify
+    assert _is_group_notify("每小时提醒我喝水", "group") is False
+
+
+# -- Overdue grace tests --
+
+def _make_overdue_task(overdue_minutes: float, **kw):
+    from datetime import timedelta
+    next_run = datetime.now(timezone.utc) - timedelta(minutes=overdue_minutes)
+    return ScheduledTask(
+        id="t_overdue",
+        chat_id="oc_x",
+        creator_open_id="ou_y",
+        prompt="remind",
+        schedule_type=ScheduleType.INTERVAL,
+        schedule_value="3600",
+        next_run_at=next_run,
+        **kw,
+    )
+
+
+def _make_engine_with_grace(grace_minutes, mock_db, mock_dispatcher, mock_feishu_client):
+    return SchedulerEngine(
+        db=mock_db, dispatcher=mock_dispatcher,
+        feishu_client=mock_feishu_client, poll_interval=0.01,
+        overdue_grace_minutes=grace_minutes,
+    )
+
+
+async def test_overdue_task_skipped_when_exceeds_grace(mock_db, mock_dispatcher, mock_feishu_client):
+    eng = _make_engine_with_grace(5, mock_db, mock_dispatcher, mock_feishu_client)
+    mock_db.list_due = AsyncMock(return_value=[_make_overdue_task(10)])
+    await eng._tick()
+    mock_dispatcher.dispatch.assert_not_called()
+    mock_db.update_after_run.assert_called_once()
+
+
+async def test_overdue_task_fires_within_grace(mock_db, mock_dispatcher, mock_feishu_client):
+    eng = _make_engine_with_grace(5, mock_db, mock_dispatcher, mock_feishu_client)
+    mock_db.list_due = AsyncMock(return_value=[_make_overdue_task(2)])
+    await eng._tick()
+    mock_dispatcher.dispatch.assert_called_once()
+
+
+async def test_grace_minus_one_fires_all_overdue(mock_db, mock_dispatcher, mock_feishu_client):
+    eng = _make_engine_with_grace(-1, mock_db, mock_dispatcher, mock_feishu_client)
+    mock_db.list_due = AsyncMock(return_value=[_make_overdue_task(120)])
+    await eng._tick()
+    mock_dispatcher.dispatch.assert_called_once()
+
+
+async def test_grace_zero_skips_any_overdue(mock_db, mock_dispatcher, mock_feishu_client):
+    eng = _make_engine_with_grace(0, mock_db, mock_dispatcher, mock_feishu_client)
+    mock_db.list_due = AsyncMock(return_value=[_make_overdue_task(0.1)])
+    await eng._tick()
+    mock_dispatcher.dispatch.assert_not_called()

@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
     run_count        INTEGER NOT NULL DEFAULT 0,
     max_runs         INTEGER,
     created_at       TEXT NOT NULL,
-    project_name     TEXT
+    project_name     TEXT,
+    notify_chat      INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -61,6 +62,7 @@ def _row_to_task(row: aiosqlite.Row) -> ScheduledTask:
         max_runs=row["max_runs"],
         created_at=_parse_dt(row["created_at"]),
         project_name=row["project_name"],
+        notify_chat=bool(row["notify_chat"]),
     )
 
 
@@ -100,6 +102,13 @@ class SchedulerDb:
             await self._conn.execute("PRAGMA journal_mode=WAL")
             await self._conn.execute(_CREATE_SCHEDULED_TASKS)
             await self._conn.execute(_CREATE_TASK_RUN_LOGS)
+            # Migration: add notify_chat column if missing (existing DBs)
+            try:
+                await self._conn.execute(
+                    "ALTER TABLE scheduled_tasks ADD COLUMN notify_chat INTEGER NOT NULL DEFAULT 0"
+                )
+            except Exception:
+                pass  # column already exists
             await self._conn.commit()
 
     async def close(self) -> None:
@@ -112,8 +121,8 @@ class SchedulerDb:
             await self._conn.execute(
                 """INSERT INTO scheduled_tasks
                    (id, chat_id, creator_open_id, prompt, schedule_type, schedule_value,
-                    next_run_at, status, run_count, max_runs, created_at, project_name)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    next_run_at, status, run_count, max_runs, created_at, project_name, notify_chat)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     task.id,
                     task.chat_id,
@@ -127,6 +136,7 @@ class SchedulerDb:
                     task.max_runs,
                     task.created_at.isoformat() if task.created_at else datetime.now(timezone.utc).isoformat(),
                     task.project_name,
+                    int(task.notify_chat),
                 ),
             )
             await self._conn.commit()

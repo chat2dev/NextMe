@@ -432,6 +432,7 @@ async def run(directory: str | None, executor: str, log_level: str) -> None:
         db=scheduler_db,
         dispatcher=dispatcher,
         feishu_client=feishu_client,
+        overdue_grace_minutes=settings.scheduler_overdue_grace_minutes,
     )
 
     # Fetch the bot's own open_id so the handler can filter @mentions precisely.
