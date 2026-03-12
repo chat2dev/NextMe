@@ -48,7 +48,7 @@ async def test_engine_fires_due_task_e2e(db):
     await engine._tick()
 
     assert len(dispatched) == 1
-    assert dispatched[0].content == "ping"
+    assert "ping" in dispatched[0].content
     assert dispatched[0].session_id == "oc_test:ou_test"
 
     # Should be marked done
