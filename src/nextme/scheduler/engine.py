@@ -141,6 +141,9 @@ class SchedulerEngine:
                 nonlocal first_reply_sent
                 try:
                     content = reply.content or ""
+                    # Suppress heartbeat sentinel — agent signals "nothing to do"
+                    if content.strip() == "HEARTBEAT_OK":
+                        return
                     is_first = not first_reply_sent
                     first_reply_sent = True
                     if notify_chat:

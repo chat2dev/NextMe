@@ -375,3 +375,64 @@ async def test_grace_zero_skips_any_overdue(mock_db, mock_dispatcher, mock_feish
     mock_db.list_due = AsyncMock(return_value=[_make_overdue_task(0.1)])
     await eng._tick()
     mock_dispatcher.dispatch.assert_not_called()
+
+
+# -- HEARTBEAT_OK suppression tests --
+
+async def test_heartbeat_ok_suppresses_reply(engine, mock_db, mock_dispatcher, mock_replier):
+    """reply_fn must swallow replies whose content is exactly 'HEARTBEAT_OK'."""
+    from nextme.protocol.types import Reply, ReplyType
+
+    task = _make_task(schedule_type=ScheduleType.ONCE)
+    mock_db.list_due = AsyncMock(return_value=[task])
+    await engine._tick()
+
+    dispatched = mock_dispatcher.dispatch.call_args[0][0]
+    await dispatched.reply_fn(Reply(type=ReplyType.MARKDOWN, content="HEARTBEAT_OK"))
+
+    mock_replier.send_text.assert_not_called()
+    mock_replier.send_to_user.assert_not_called()
+    mock_replier.send_card.assert_not_called()
+
+
+async def test_heartbeat_ok_with_whitespace_suppressed(engine, mock_db, mock_dispatcher, mock_replier):
+    """HEARTBEAT_OK with surrounding whitespace/newlines is also suppressed."""
+    from nextme.protocol.types import Reply, ReplyType
+
+    task = _make_task(schedule_type=ScheduleType.ONCE)
+    mock_db.list_due = AsyncMock(return_value=[task])
+    await engine._tick()
+
+    dispatched = mock_dispatcher.dispatch.call_args[0][0]
+    await dispatched.reply_fn(Reply(type=ReplyType.MARKDOWN, content="  HEARTBEAT_OK\n"))
+
+    mock_replier.send_text.assert_not_called()
+    mock_replier.send_to_user.assert_not_called()
+
+
+async def test_non_heartbeat_reply_still_sent(engine, mock_db, mock_dispatcher, mock_replier):
+    """Normal replies (not HEARTBEAT_OK) are still delivered."""
+    from nextme.protocol.types import Reply, ReplyType
+
+    task = _make_task(schedule_type=ScheduleType.ONCE, notify_chat=True)
+    mock_db.list_due = AsyncMock(return_value=[task])
+    await engine._tick()
+
+    dispatched = mock_dispatcher.dispatch.call_args[0][0]
+    await dispatched.reply_fn(Reply(type=ReplyType.MARKDOWN, content="喝水啦！"))
+
+    mock_replier.send_text.assert_called_once()
+
+
+async def test_heartbeat_ok_partial_match_not_suppressed(engine, mock_db, mock_dispatcher, mock_replier):
+    """A reply containing HEARTBEAT_OK among other text is NOT suppressed."""
+    from nextme.protocol.types import Reply, ReplyType
+
+    task = _make_task(schedule_type=ScheduleType.ONCE, notify_chat=True)
+    mock_db.list_due = AsyncMock(return_value=[task])
+    await engine._tick()
+
+    dispatched = mock_dispatcher.dispatch.call_args[0][0]
+    await dispatched.reply_fn(Reply(type=ReplyType.MARKDOWN, content="HEARTBEAT_OK 顺便说一句"))
+
+    mock_replier.send_text.assert_called_once()
