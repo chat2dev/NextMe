@@ -378,12 +378,18 @@ class TaskDispatcher:
         try:
             session.task_queue.put_nowait(task)
             session.pending_tasks.append(task)
-            task.was_queued = session.task_queue.qsize() > 1
+            # tasks_ahead = tasks already in queue (before this one) + the currently
+            # running task (active_task has been dequeued so it won't show in qsize).
+            tasks_ahead = (session.task_queue.qsize() - 1) + (
+                1 if session.active_task is not None else 0
+            )
+            task.was_queued = tasks_ahead > 0
             logger.info(
-                "TaskDispatcher: enqueued task %s for session %r (queue depth=%d)",
+                "TaskDispatcher: enqueued task %s for session %r (queue depth=%d, tasks_ahead=%d)",
                 task.id,
                 context_id,
                 session.task_queue.qsize(),
+                tasks_ahead,
             )
         except asyncio.QueueFull:
             logger.warning(
@@ -411,6 +417,23 @@ class TaskDispatcher:
             except Exception:
                 logger.warning(
                     "TaskDispatcher: failed to send reaction for task %s",
+                    task.id,
+                    exc_info=True,
+                )
+
+        # If this task is waiting behind others, tell the user so they aren't
+        # left wondering why nothing is happening yet.
+        if task.was_queued and task.message_id:
+            if tasks_ahead == 1:
+                queue_msg = "⏳ 上一个任务执行中，完成后自动处理你的请求。"
+            else:
+                queue_msg = f"⏳ 前面还有 {tasks_ahead} 个任务，完成后自动处理你的请求。"
+            in_thread = task.chat_type != "p2p"
+            try:
+                await replier.reply_text(task.message_id, queue_msg, in_thread=in_thread)
+            except Exception:
+                logger.warning(
+                    "TaskDispatcher: failed to send queue notification for task %s",
                     task.id,
                     exc_info=True,
                 )

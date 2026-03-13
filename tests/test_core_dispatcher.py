@@ -998,3 +998,166 @@ def test_handle_card_action_wrong_project_name_does_not_resolve(
     dispatcher.handle_card_action(session_id, 1, project_name=proj_b.name)
 
     assert not perm_future_a.done()  # session_a's future untouched
+
+
+# ---------------------------------------------------------------------------
+# Tests: queue notification (排队提示)
+# ---------------------------------------------------------------------------
+
+async def test_queued_task_sends_notification_when_active_task_running(
+    dispatcher, mock_replier, session_registry, config, settings
+):
+    """When active_task is set, the 2nd task should get a queue notification."""
+    session_id = "chat_abc:user_xyz"
+
+    with patch("nextme.core.dispatcher.SessionWorker") as MockWorker:
+        async def block_forever():
+            await asyncio.sleep(9999)
+
+        mock_instance = MagicMock()
+        mock_instance.run = block_forever
+        MockWorker.return_value = mock_instance
+
+        task1 = make_task("first", session_id=session_id)
+        task1.message_id = "msg_001"
+        task1.chat_type = "p2p"
+        await dispatcher.dispatch(task1)
+
+        # Simulate task1 being actively processed (dequeued, running)
+        session = session_registry.get_or_create(session_id).get_or_create_session(
+            config.default_project, settings
+        )
+        # Drain it from the queue to simulate the worker picking it up
+        try:
+            session.task_queue.get_nowait()
+            session.task_queue.task_done()
+        except asyncio.QueueEmpty:
+            pass
+        session.active_task = task1
+
+        mock_replier.reply_text.reset_mock()
+
+        task2 = make_task("second", session_id=session_id)
+        task2.message_id = "msg_002"
+        task2.chat_type = "p2p"
+        await dispatcher.dispatch(task2)
+
+    assert task2.was_queued is True
+    mock_replier.reply_text.assert_awaited_once()
+    msg = mock_replier.reply_text.call_args.args[1]
+    assert "上一个任务" in msg or "任务" in msg
+    # p2p → in_thread=False
+    assert mock_replier.reply_text.call_args.kwargs.get("in_thread") is False or \
+           mock_replier.reply_text.call_args.args[2] is False
+
+
+async def test_queued_task_shows_count_when_multiple_tasks_ahead(
+    dispatcher, mock_replier, session_registry, config, settings
+):
+    """When 2 tasks are ahead, the notification says '前面还有 2 个任务'."""
+    session_id = "chat_abc:user_xyz"
+
+    with patch("nextme.core.dispatcher.SessionWorker") as MockWorker:
+        async def block_forever():
+            await asyncio.sleep(9999)
+
+        mock_instance = MagicMock()
+        mock_instance.run = block_forever
+        MockWorker.return_value = mock_instance
+
+        task1 = make_task("first", session_id=session_id)
+        task1.message_id = "msg_001"
+        task1.chat_type = "p2p"
+        await dispatcher.dispatch(task1)
+
+        session = session_registry.get_or_create(session_id).get_or_create_session(
+            config.default_project, settings
+        )
+        # Drain task1 from queue and mark it active (simulates worker picking it up)
+        try:
+            session.task_queue.get_nowait()
+            session.task_queue.task_done()
+        except asyncio.QueueEmpty:
+            pass
+        session.active_task = task1
+
+        # task2 → 1 ahead (task1 running); task3 → 2 ahead (task1 running + task2 queued)
+        task2 = make_task("second", session_id=session_id)
+        task2.message_id = "msg_002"
+        task2.chat_type = "p2p"
+        await dispatcher.dispatch(task2)
+
+        mock_replier.reply_text.reset_mock()
+
+        task3 = make_task("third", session_id=session_id)
+        task3.message_id = "msg_003"
+        task3.chat_type = "p2p"
+        await dispatcher.dispatch(task3)
+
+    assert task3.was_queued is True
+    mock_replier.reply_text.assert_awaited_once()
+    msg = mock_replier.reply_text.call_args.args[1]
+    assert "2" in msg
+
+
+async def test_first_task_not_queued_no_notification(dispatcher, mock_replier):
+    """First task in an idle session is NOT queued — no queue notification sent."""
+    with patch("nextme.core.dispatcher.SessionWorker") as MockWorker:
+        async def block_forever():
+            await asyncio.sleep(9999)
+
+        mock_instance = MagicMock()
+        mock_instance.run = block_forever
+        MockWorker.return_value = mock_instance
+
+        task = make_task("hello")
+        task.message_id = "msg_001"
+        task.chat_type = "p2p"
+        await dispatcher.dispatch(task)
+
+    assert task.was_queued is False
+    # reply_text should NOT have been called for queue notification
+    queue_notif_calls = [
+        c for c in mock_replier.reply_text.call_args_list
+        if "⏳" in str(c) or "排队" in str(c) or "任务" in str(c)
+    ]
+    assert not queue_notif_calls
+
+
+async def test_group_chat_queue_notification_uses_in_thread(
+    dispatcher, mock_replier, session_registry, config, settings
+):
+    """Group chat queue notifications use in_thread=True."""
+    session_id = "oc_group:user_xyz"
+
+    with patch("nextme.core.dispatcher.SessionWorker") as MockWorker:
+        async def block_forever():
+            await asyncio.sleep(9999)
+
+        mock_instance = MagicMock()
+        mock_instance.run = block_forever
+        MockWorker.return_value = mock_instance
+
+        task1 = make_task("first", session_id=session_id)
+        task1.message_id = "msg_001"
+        task1.chat_type = "group"
+        await dispatcher.dispatch(task1)
+
+        session = session_registry.get_or_create(session_id).get_or_create_session(
+            config.default_project, settings
+        )
+        session.active_task = task1
+
+        mock_replier.reply_text.reset_mock()
+
+        task2 = make_task("second", session_id=session_id)
+        task2.message_id = "msg_002"
+        task2.chat_type = "group"
+        await dispatcher.dispatch(task2)
+
+    assert task2.was_queued is True
+    mock_replier.reply_text.assert_awaited_once()
+    # group → in_thread=True
+    call = mock_replier.reply_text.call_args
+    in_thread = call.kwargs.get("in_thread", call.args[2] if len(call.args) > 2 else True)
+    assert in_thread is True
